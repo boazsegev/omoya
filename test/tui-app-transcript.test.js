@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import { GTUI } from "../lib/gtui/gtui.js";
 import { layoutView } from "../lib/gtui/layout.js";
+import { createControls } from "../lib/gtui/controls.js";
 import { Agent } from "../lib/agent.js";
 import { markdownRows } from "../lib/tui-app/markdown-view.js";
 import { transcriptItems, noticeItems, createTranscriptProjector } from "../lib/tui-app/transcript.js";
@@ -224,9 +225,23 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
   test("notices render as their own committed feed items, error vs plain", () => {
     const items = noticeItems([{ id: 1, text: "boom", kind: "error" }, { id: 2, text: "cancelled — the partial response is kept", kind: "notice" }]);
     expect(items).toEqual([
-      { key: "notice:1", done: true, node: GTUI.view.text({ role: "notice.error", priority: 0 }, "· boom") },
-      { key: "notice:2", done: true, node: GTUI.view.text({ role: "notice", priority: 1 }, "· cancelled — the partial response is kept") },
+      { key: "notice:1", done: true, node: GTUI.view.text({ role: "notice.error", priority: 0, selectionKey: "notice:1", sourceText: "boom" }, [{ text: "· " }, { text: "boom", source: { start: 0, end: 4 } }]) },
+      { key: "notice:2", done: true, node: GTUI.view.text({ role: "notice", priority: 1, selectionKey: "notice:2", sourceText: "cancelled — the partial response is kept" }, [{ text: "· " }, { text: "cancelled — the partial response is kept", source: { start: 0, end: 40 } }]) },
     ]);
+  });
+
+  test("error notices expose their complete message as selectable source text", () => {
+    const events = [];
+    const controls = createControls((event) => events.push(event));
+    const message = "turn failed: HTTP 401 Unauthorized";
+    const node = noticeItems([{ id: 1, text: message, kind: "error" }])[0].node;
+    const { canvas } = layoutView(node, { width: 80, height: 2, controls });
+    controls.endFrame(node, canvas);
+    const row = canvas.cells.findIndex((cells) => cells.some((cell) => cell?.selectionKey === "notice:1" && cell.source?.start === 0));
+    const column = canvas.cells[row].findIndex((cell) => cell?.selectionKey === "notice:1" && cell.source?.start === 0);
+    expect(controls.resolvePoint({ x: column, y: row })).toMatchObject({
+      kind: "press", control: "text", target: "notice:1", sourceText: message,
+    });
   });
 
   test("the same historical block keeps the same key across renders (the host commits it exactly once)", () => {

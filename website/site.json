@@ -1,5 +1,6 @@
 {
   "origin": "https://omoya.ai",
+  "repository": "https://github.com/boazsegev/omoya",
   "title": "Omoya — transparent Bun agent harness",
   "description": "A transparent Bun agent harness for people, scripts, and the things you build next.",
   "domains": {

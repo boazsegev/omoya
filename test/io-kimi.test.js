@@ -136,6 +136,31 @@ describe("kimi provider: context2msg (chat-completions dialect)", () => {
     }]);
   });
 
+  test("parallel tool results precede attached system payloads on the strict Kimi wire", () => {
+    const connection = new Protocol("https://api.kimi.com/coding/v1", aiio());
+    const [, body] = connection.context2msg([
+      user("find both"),
+      assistant([
+        { type: "toolCall", callId: "read:3", name: "read", arguments: { path: "a.txt" } },
+        { type: "toolCall", callId: "bash:4", name: "bash", arguments: { command: "pwd" } },
+      ]),
+      { type: 4, callId: "read:3", name: "read", content: [{ type: "text", text: "a" }] },
+      system("read tool payload"),
+      { type: 4, callId: "bash:4", name: "bash", content: [{ type: "text", text: "cwd" }] },
+      system("bash tool payload"),
+      user("continue"),
+    ]);
+    expect(body.messages.map((message) => [message.role, message.tool_call_id, message.content])).toEqual([
+      ["user", undefined, "find both"],
+      ["assistant", undefined, null],
+      ["tool", "read:3", "a"],
+      ["tool", "bash:4", "cwd"],
+      ["system", undefined, "read tool payload"],
+      ["system", undefined, "bash tool payload"],
+      ["user", undefined, "continue"],
+    ]);
+  });
+
   test("user images ride as image_url parts", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
     const [, body] = connection.context2msg([

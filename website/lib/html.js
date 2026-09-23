@@ -79,7 +79,7 @@ export function page({ title, description, path, body, apiNav }) {
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
     <a class="brand" href="${rebase(prefix, "/")}">omoya</a>
-    <nav class="site-nav" aria-label="Site">${nav}<span class="nav-note" title="The public repository URL will be published before launch.">Repository <span aria-hidden="true">(soon)</span></span></nav>
+    <nav class="site-nav" aria-label="Site">${nav}<a href="${site.repository}">Repository</a></nav>
     <div class="header-controls">
       <search class="site-search">
         <label class="visually-hidden" for="search-input">Search the Omoya site</label>

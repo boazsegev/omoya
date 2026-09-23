@@ -55,7 +55,7 @@ export function homePage() {
   <p class="eyebrow">TRANSPARENT BUN AGENT HARNESS</p>
   <h1>See what your agent sees.</h1>
   <p class="lede">Omoya puts the whole agent loop in your hands — model selection, system instructions, context, tools, sessions, and security policy. Work in the terminal, stream structured events through a headless process, or embed the Bun library in your own project.</p>
-  <div class="actions"><a class="button" href="https://www.npmjs.com/package/omoya">Install from npm</a><a class="text-link" href="./api">Read the API reference →</a></div>
+  <div class="actions"><a class="button" href="https://www.npmjs.com/package/omoya">Install from npm</a><a class="text-link" href="${site.repository}">View the source on GitHub →</a></div>
   <pre><code>bun add -g omoya
 omoya --login
 om</code></pre>

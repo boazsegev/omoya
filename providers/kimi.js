@@ -99,7 +99,7 @@ function context2msg(context, aiio = this.aiio) {
     stream: true,
     stream_options: { include_usage: true },
   };
-  for (const message of context) body.messages.push(...toMessages(message));
+  body.messages.push(...contextMessages(context));
   const tools = aiio?.tools?.() ?? [];
   if (tools.length > 0) {
     body.tools = tools.map((tool) => ({
@@ -112,6 +112,42 @@ function context2msg(context, aiio = this.aiio) {
     }));
   }
   return [headers, body];
+}
+
+/**
+ * Translate context while keeping every multi-call answer window valid for
+ * Kimi's strict chat API. Tool results can have System payloads attached by
+ * their tools; Agent preserves those payloads directly after each result for
+ * transcript semantics. Kimi instead requires all `tool` messages answering
+ * one assistant `tool_calls` message to be contiguous, so emit the whole
+ * result set before those payloads. This is a wire-only ordering change: the
+ * stored context remains the authoritative transcript.
+ */
+function contextMessages(context) {
+  const out = [];
+  for (let i = 0; i < context.length; i++) {
+    const message = context[i];
+    out.push(...toMessages(message));
+    if (message?.type !== MessageType.Assistant ||
+        !(message.content ?? []).some((block) => block?.type === ContentType.ToolCall)) continue;
+
+    const results = [];
+    const payloads = [];
+    let j = i + 1;
+    for (; j < context.length; j++) {
+      const next = context[j];
+      if (next?.type === MessageType.User || next?.type === MessageType.Assistant) break;
+      // A ToolResult is an answer to this assistant's call; every System
+      // message in this window is its attached payload and must wait until
+      // Kimi has received all of the answers.
+      if (next?.type === MessageType.ToolResult) results.push(next);
+      else payloads.push(next);
+    }
+    for (const result of results) out.push(...toMessages(result));
+    for (const payload of payloads) out.push(...toMessages(payload));
+    i = j - 1;
+  }
+  return out;
 }
 
 function toMessages(message) {

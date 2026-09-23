@@ -44,5 +44,4 @@ Before launch, choose the hosting provider and configure HTTPS plus permanent re
 
 - Product landing page and install instructions
 - Documentation and security-contact links
-- Repository, issue tracker, and release links after the public GitHub repository exists
 - Privacy/contact pages as needed
