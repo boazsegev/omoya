@@ -1,0 +1,231 @@
+[
+  [
+    {
+      "thinking": "Preparing an interactive UI tour."
+    },
+    {
+      "toolCall": {
+        "name": "note-set",
+        "arguments": {
+          "title": "UI tour",
+          "type": "todo",
+          "summary": "Demonstrate notes",
+          "content": "This temporary note demonstrates note creation and updates."
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "note-get",
+        "arguments": {
+          "title": "UI tour",
+          "only": [
+            "summary",
+            "content"
+          ],
+          "keys": false
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "note-done",
+        "arguments": {
+          "notes": [
+            "UI tour"
+          ]
+        }
+      }
+    }
+  ],
+  [
+    {
+      "text": "The note was created, read, and marked done. Next is the question UI — highlight an option to see its extra information (description and focused preview)."
+    },
+    {
+      "toolCall": {
+        "name": "question",
+        "arguments": {
+          "questions": [
+            {
+              "header": "Single choice",
+              "question": "Choose one demonstration option?",
+              "details": "Details render under the question; the highlighted option's description and preview render under the menu.",
+              "options": [
+                {
+                  "label": "Continue",
+                  "description": "Continue the UI tour.",
+                  "preview": {
+                    "type": "code",
+                    "language": "js",
+                    "title": "Continue",
+                    "content": "// a code preview renders with syntax highlighting\nfunction advance() {\n  return tour.next();\n}"
+                  }
+                },
+                {
+                  "label": "Pause",
+                  "description": "Pause the tour here.",
+                  "preview": {
+                    "type": "text",
+                    "title": "Pause",
+                    "content": "A plain-text preview: the tour resumes whenever you are ready."
+                  }
+                },
+                {
+                  "label": "Stop",
+                  "description": "Stop the tour (this option carries no preview)."
+                }
+              ]
+            },
+            {
+              "header": "Multiple choice",
+              "question": "Select any useful variations? (multi-select)",
+              "multiSelect": true,
+              "options": [
+                {
+                  "label": "Files",
+                  "description": "Show file operations.",
+                  "preview": {
+                    "type": "code",
+                    "language": "bash",
+                    "title": "Files",
+                    "content": "write → read → edit → read → rm"
+                  }
+                },
+                {
+                  "label": "Workers",
+                  "description": "Show an attributed child-worker response."
+                },
+                {
+                  "label": "Queue",
+                  "description": "Show queued input."
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  [
+    {
+      "text": "Thanks. Opening a mock child worker next. Worker creation requires this Agent's spawn permission."
+    },
+    {
+      "toolCall": {
+        "name": "write",
+        "arguments": {
+          "path": "ai-tmp/test-ui-demo.txt",
+          "content": "before\n",
+          "ask": false
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "read",
+        "arguments": {
+          "path": "ai-tmp/test-ui-demo.txt",
+          "startLine": 1,
+          "endLine": 20,
+          "startChar": 0,
+          "endChar": 1000,
+          "binary": false,
+          "base64": false,
+          "search": "",
+          "ignoreCase": false,
+          "maxMatches": 100,
+          "recursive": false,
+          "info": false
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "edit",
+        "arguments": {
+          "path": "ai-tmp/test-ui-demo.txt",
+          "edits": [
+            {
+              "oldText": "before",
+              "newText": "after"
+            }
+          ],
+          "ask": false,
+          "rollback": ""
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "read",
+        "arguments": {
+          "path": "ai-tmp/test-ui-demo.txt",
+          "startLine": 1,
+          "endLine": 20,
+          "startChar": 0,
+          "endChar": 1000,
+          "binary": false,
+          "base64": false,
+          "search": "",
+          "ignoreCase": false,
+          "maxMatches": 100,
+          "recursive": false,
+          "info": false
+        }
+      }
+    }
+  ],
+  [
+    {
+      "toolCall": {
+        "name": "bash",
+        "arguments": {
+          "command": "rm ./ai-tmp/test-ui-demo.txt"
+        }
+      }
+    }
+  ],
+  [
+    {
+      "text": "Now opening a mock child worker."
+    },
+    {
+      "toolCall": {
+        "name": "worker",
+        "arguments": {
+          "name": "ui-response-demo",
+          "description": "UI response demonstrator",
+          "model": "test/ui-response",
+          "prompt": "Reply with the child-worker UI demonstration."
+        }
+      }
+    }
+  ],
+  [
+    {
+      "thinking": "Waiting briefly so you can type and edit a queued message."
+    },
+    {
+      "delay": 750
+    },
+    {
+      "text": "The attributed worker reply can now appear while this session remains usable."
+    }
+  ],
+  [
+    {
+      "text": "UI tour complete. Queued messages, tool states, questions, file operations, thinking, and child-worker routing were demonstrated."
+    }
+  ]
+]

@@ -1,0 +1,150 @@
+#!/usr/bin/env bun
+/**
+ * tool — call any registered tool directly from the terminal (a
+ * thin wrapper over Env.callTool, see lib/env/tool-registry.js and
+ * the "Tool contract" section of API.md). Mainly for exercising a
+ * tool ad hoc or scripting one from bash — the harness (Agent) is the
+ * normal caller; this is the manual door.
+ *
+ * Usage:
+ *   ai-tool <name> [json-args] [--list] [--help]
+ *
+ *   ai-tool                       list every tool: name — description
+ *   ai-tool <name>                call it with no arguments ({})
+ *   ai-tool <name> '<json>'       call it with these arguments
+ *   ai-tool <name> --help         show THAT tool's help (description
+ *                                   and input schema), not this usage
+ *
+ *   A JSON OBJECT is passed through as-is (the tool's {arg: value, ...}).
+ *   A bare JSON value (array, string, number, ...) is a SHORTHAND: it
+ *   becomes the value of the tool's FIRST schema property — so
+ *   `ai-tool skill '["core"]'` is `ai-tool skill '{"names":["core"]}'`,
+ *   the long way to load a skill (compare: `ai-skills core`).
+ *
+ * Runs OUTSIDE any Agent: no question bridge, no calling agent, no
+ * call linkage — an interactive tool (the `question` tool, `chat`'s
+ * peer operations) refuses or no-ops exactly as it does for a forked,
+ * sandboxed tool call (see the Tool contract's REQUIRES section).
+ * Also UNSANDBOXED: unlike Agent's dispatch, a `sandbox: true` tool
+ * (write, edit) runs in THIS process, no OS write jail — this is a
+ * manual door, not a hardened one.
+ *
+ * stdout: the tool's `result` — a string printed as-is, anything else
+ * JSON-pretty-printed. A `system`/`display` side payload prints to
+ * stderr (labeled), never mixed into stdout. Exit: 0 success, 1
+ * usage/unknown tool/bad JSON, 2 the tool call itself failed.
+ */
+
+import { basename } from "node:path";
+import Agent from "../../lib/agent.js";
+import CLI from "../../lib/cli.js";
+const { Env, NAMES } = Agent;
+const { resolveCliToolArgs, unwrapToolResult, formatToolResult, close } = CLI;
+
+// The invoked name: argv[1] holds the wrapper's file name; a bare
+// `bun bin/scripts/tool` has none, so the namespace-derived prefix
+// fills in (never a stale literal).
+const NAME = basename(process.argv[1] ?? "") || `${NAMES.cliPrefix}-tool`;
+
+const USAGE = `Usage: ${NAME} [<name> [json-args]] [--list] [--help]
+
+  ${NAME}                  List every registered tool: name — description
+  ${NAME} <name>           Call it with no arguments
+  ${NAME} <name> '<json>'  Call it with these arguments (a JSON object),
+                        or a bare JSON value as shorthand for the
+                        tool's FIRST schema property (see below)
+  ${NAME} <name> --help    Show THAT tool's help: its full description
+                        and input schema (JSON)
+
+Example: ${NAME} skill '["core"]'  ==  the long way to load the "core"
+skill (a bare array becomes {names: [...]}, skill's first property).
+
+Runs OUTSIDE any Agent — no question bridge, no calling agent: an
+interactive tool refuses or no-ops exactly as it does for a forked,
+sandboxed tool call.
+`;
+
+/** Print the catalog: one "- name — description" line per tool. */
+function printCatalog(env) {
+  for (const { name, description } of env.toolSchemas(undefined, { includeSecret: true })) {
+    const first = String(description ?? "").split("\n")[0];
+    process.stdout.write(`- ${name}${first ? ` — ${first}` : ""}\n`);
+  }
+}
+
+/** Print one tool's help: full description, input schema, shorthand hint. */
+function printToolHelp(name, entry) {
+  const description = String(entry.schema?.description ?? "").trim();
+  process.stdout.write(`${NAME} ${name}\n`);
+  if (description) process.stdout.write(`\n${description}\n`);
+  const schema = entry.schema?.inputSchema;
+  if (schema && Object.keys(schema).length > 0) {
+    process.stdout.write(`\nInput schema:\n${JSON.stringify(schema, null, 2)}\n`);
+  } else {
+    process.stdout.write(`\nTakes no arguments ({}).\n`);
+  }
+  const [firstProp] = Object.keys(schema?.properties ?? {});
+  if (firstProp) {
+    process.stdout.write(`\nShorthand: a bare JSON value becomes {${firstProp}: <value>}\n` +
+      `and shell words (key:value / bare words) resolve the same way.\n`);
+  }
+}
+
+async function main(argv) {
+  // --help/-h after a tool name asks for THAT tool's help, not this usage.
+  const help = argv.includes("--help") || argv.includes("-h");
+  const positional = help ? argv.filter((a) => a !== "--help" && a !== "-h") : argv;
+  if (help && (positional.length === 0 || positional[0].startsWith("-"))) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  // Direct tool calls need the complete registry, so use the async factory.
+  const env = await Env.create();
+  if (!help && (argv.includes("--list") || argv.length === 0)) {
+    printCatalog(env);
+    return 0;
+  }
+  const [name, ...rawArgs] = help ? positional : argv;
+  const entry = env.toolEntry(name);
+  if (!entry) {
+    console.error(`${NAME}: unknown tool "${name}" (see \`${NAME} --list\`)`);
+    return 1;
+  }
+  if (help) {
+    printToolHelp(name, entry);
+    return 0;
+  }
+  let args;
+  try {
+    args = resolveCliToolArgs(rawArgs, { ...entry, name });
+  } catch (err) {
+    console.error(`${NAME}: ${err.message}`);
+    return 1;
+  }
+  let value;
+  try {
+    value = await env.callTool(name, args, { question: null, env, call: undefined, agent: undefined });
+  } catch (err) {
+    console.error(`${NAME}: ${name} failed: ${err.message}`);
+    return 2;
+  }
+  // the {result, system?, display?} envelope (see the Tool contract's
+  // RETURNS section): result is the answer, system/display are side
+  // channels the harness would route elsewhere — here, stderr, labeled
+  const { result, system, display } = unwrapToolResult(value);
+  process.stdout.write(`${formatToolResult(result)}\n`);
+  for (const text of system) console.error(`[system] ${text}`);
+  for (const text of display) console.error(`[display] ${text}`);
+  return 0;
+}
+
+let exitCode;
+try {
+  exitCode = await main(process.argv.slice(2));
+} catch (error) {
+  console.error(`${NAME}: ${error instanceof Error ? error.message : String(error)}`);
+  exitCode = 1;
+} finally {
+  close();
+}
+process.exit(exitCode);

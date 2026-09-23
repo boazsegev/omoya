@@ -1,0 +1,126 @@
+#!/usr/bin/env bun
+/**
+ * bin/scripts/rename — switch the product namespace and regenerate bin wrappers.
+ *
+ * Usage:
+ *   bun bin/scripts/rename <namespace> [shortName]
+ *
+ *   <namespace>  the new NAMESPACE written into lib/namespace.js
+ *                (env vars, settings folders, session dirs, and every
+ *                runtime name derive from it — see NAMES).
+ *   [shortName]  the new PREFIX written alongside NAMESPACE (cliPrefix,
+ *                the bin wrapper prefix). `skills`/`tools2bash` are
+ *                always wrapped twice — with and without the prefix.
+ *                Default: the lowercase namespace.
+ *
+ * What it does, in order:
+ *   1. updates the NAMESPACE and PREFIX consts in lib/namespace.js — the
+ *      two switches; NAMES (and with it the library's named export, which
+ *      tracks NAMES.Namespace) derives from them;
+ *   2. nothing else in the library needs a sweep: the entry points export
+ *      ONE default (no named export could ever hold a runtime-dynamic name
+ *      — export keys are static link-time literals), so no source file
+ *      outside lib/namespace.js restates the namespace;
+ *   3. removes the FILES directly in the bin folder (the scripts
+ *      sub-folder and its implementations are kept intact);
+ *   4. writes fresh shims in the bin folder forwarding to bin/scripts/*;
+ *   5. adds the lowercase package name as the full app command when it
+ *      differs from the short prefix;
+ *   6. rewrites package.json's "bin" map to the same wrapper set.
+ *
+ * This project is backwards-compatibility-agnostic: nothing else is
+ * migrated. Run `bun test` and `bun ai-tools/ai-check.js` afterwards.
+ */
+import { readdirSync, statSync, rmSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { wrapperMap } from "./index.js";
+// NOTE: NAMES is deliberately NOT imported — this tool rewrites the very
+// consts NAMES derives from, so an import would hold the PRE-rename
+// values (the module evaluates before the rewrite). The post-rename
+// state is computed from the arguments alone.
+
+const ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const NAMESPACE_FILE = join(ROOT, "lib", "namespace.js");
+const BIN_DIR = join(ROOT, "bin");
+const PACKAGE_FILE = join(ROOT, "package.json");
+
+function fail(message) {
+  console.error(`rename: ${message}`);
+  process.exit(1);
+}
+
+const argv = process.argv.slice(2);
+const positional = [];
+for (const arg of argv) {
+  if (arg.startsWith("-")) fail(`unknown option: ${arg}`);
+  positional.push(arg);
+}
+const [namespace, shortName] = positional;
+if (!namespace) fail("usage: bun bin/scripts/rename <namespace> [shortName]");
+if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(namespace)) {
+  fail(`invalid namespace "${namespace}" — a leading letter, then letters/digits/_/-`);
+}
+const prefix = (shortName ?? namespace).toLowerCase();
+if (!/^[a-z][a-z0-9_-]*$/.test(prefix)) {
+  fail(`invalid short name "${prefix}" — lowercase, a leading letter, then letters/digits/_/-`);
+}
+// 1. the namespace AND prefix values (the two switches — every runtime
+//    name derives from them)
+const source = readFileSync(NAMESPACE_FILE, "utf8");
+const PATTERN = /const NAMESPACE = "[^"]*";/;
+if (!PATTERN.test(source)) fail("no NAMESPACE const found in lib/namespace.js");
+const PREFIX_PATTERN = /const PREFIX = "[^"]*";/;
+if (!PREFIX_PATTERN.test(source)) fail("no PREFIX const found in lib/namespace.js");
+const rewritten = source
+  .replace(PATTERN, `const NAMESPACE = "${namespace}";`)
+  .replace(PREFIX_PATTERN, `const PREFIX = "${prefix}";`);
+writeFileSync(NAMESPACE_FILE, rewritten);
+
+// 1b. package.json's name mirrors the namespace (lowercase — npm naming)
+const pkgForName = JSON.parse(readFileSync(PACKAGE_FILE, "utf8"));
+pkgForName.name = namespace.toLowerCase();
+writeFileSync(PACKAGE_FILE, `${JSON.stringify(pkgForName, null, 2)}\n`);
+
+// 2. no library export sweep: index.js / index_app.js export ONE default
+//    and never restate the namespace (only lib/namespace.js holds it).
+//    Guard them anyway: refuse a tree whose entry points grow a named
+//    export or lose the default, instead of renaming into an inconsistent
+//    library surface.
+for (const entry of ["index.js", "index_app.js"]) {
+  const file = join(ROOT, "lib", entry);
+  const text = readFileSync(file, "utf8");
+  if (!/export default/.test(text)) fail(`lib/${entry} lost its default export`);
+  if (/^export (const|let|var|class|function) /m.test(text) || /export \{/m.test(text)) {
+    fail(`lib/${entry} must export the default ONLY — named export keys are static literals`);
+  }
+}
+
+// 3. remove the files directly in the bin folder (folders stay intact)
+let removed = 0;
+for (const entry of readdirSync(BIN_DIR)) {
+  const file = join(BIN_DIR, entry);
+  if (statSync(file).isFile()) {
+    rmSync(file);
+    removed++;
+  }
+}
+
+// 4. fresh shims: the bare prefix is the short app command; the
+// lowercase namespace is the full app command when it differs.
+const map = wrapperMap(prefix, namespace.toLowerCase());
+for (const [name, body] of Object.entries(map)) {
+  const file = join(BIN_DIR, name);
+  writeFileSync(file, body, { mode: 0o755 });
+  chmodSync(file, 0o755);
+}
+
+// 5. package.json's bin map mirrors the wrapper set
+const pkg = JSON.parse(readFileSync(PACKAGE_FILE, "utf8"));
+pkg.bin = Object.fromEntries(Object.keys(map).sort().map((name) => [name, ["bin", name].join("/")]));
+writeFileSync(PACKAGE_FILE, `${JSON.stringify(pkg, null, 2)}\n`);
+
+console.log(`namespace: ${namespace} (bin prefix "${prefix}")`);
+console.log(`removed ${removed} bin file(s); wrote ${Object.keys(map).length}: ${Object.keys(map).sort().join(" ")}`);
+console.log(`package.json bin: ${Object.keys(pkg.bin).length} entries`);
+console.log("run: bun test && bun ai-tools/ai-check.js");

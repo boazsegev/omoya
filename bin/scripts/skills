@@ -1,0 +1,72 @@
+#!/usr/bin/env bun
+/**
+ * skills — the skill-registry CLI.
+ *
+ * This standalone project's skills come from its own ACCUMULATED roots
+ * (lib/env.js Env.defaultSkillRoots: package/settings/configured/
+ * environment/project roots — see lib/env/registry.js for how
+ * same-named skills across roots EXTEND rather than replace). The
+ * package's own `skills/core/SKILL.md` is an ordinary local skill named
+ * "core" — no sibling source tree or special-case loader is required.
+ *
+ * No args: print the merged skill catalog (`- \`name\` — description`
+ * lines; `--debug` appends each skill's source root(s)).
+ * With names: print the complete body of each named skill, wrapped in
+ * <skill name="..."> tags — unknown names are reported on stderr and
+ * set a nonzero exit, never fatal to the ones that DID resolve.
+ */
+
+import { basename } from "node:path";
+import Agent from "../../lib/agent.js";
+import CLI from "../../lib/cli.js";
+const { Env, NAMES } = Agent;
+
+// The invoked name: argv[1] holds the wrapper's file name; a bare
+// `bun bin/scripts/skills` has none, so the namespace-derived prefix
+// fills in (never a stale literal).
+const NAME = basename(process.argv[1] ?? "") || `${NAMES.cliPrefix}-skills`;
+
+const USAGE = `Usage: ${NAME} [name...]
+Use when loading domain knowledge: no args prints the merged skill catalog, names print full skill bodies.
+
+  ${NAME}            Print the skill catalog: one '- name — description' line per skill
+  ${NAME} --debug    Same catalog with sources appended (e.g. <dir>/skills+<dir2>)
+  ${NAME} <name...>  Print the complete content of one or more skills
+
+Skill roots ACCUMULATE: this package's own \`skills/\` folder, always,
+plus \`settings.skills\` (string or array), plus $${NAMES.skillsEnv}
+(delimiter-separated). A name repeated across roots EXTENDS (its
+bodies concatenate) rather than replacing the earlier one.
+`;
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes("-h") || args.includes("--help")) {
+    process.stdout.write(USAGE);
+    return;
+  }
+  const debug = args.includes("--debug");
+  const names = args.filter((arg) => arg !== "--debug");
+  // The factory returns a ready environment; skill lookup is synchronous after it.
+  const env = await Env.create();
+  try {
+    if (names.length === 0) {
+      process.stdout.write(env.skillCatalog({ debug }));
+      return;
+    }
+    const { text, unknown } = env.skillBodies(names);
+    for (const name of unknown) {
+      console.error(`${NAME}: unknown skill: ${name}`);
+      process.exitCode = 1;
+    }
+    if (text) process.stdout.write(text);
+  } finally {
+    // Every executable closes through the shared teardown boundary.
+    CLI.close({ env });
+  }
+}
+
+main().catch((error) => {
+  console.error(`${NAME}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});

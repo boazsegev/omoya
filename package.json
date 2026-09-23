@@ -1,0 +1,34 @@
+{
+  "name": "omoya",
+  "version": "0.1.0",
+  "description": "A transparent, composable Bun AI agent harness library for people and things.",
+  "homepage": "https://omoya.ai",
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js",
+    "./agent": "./lib/agent.js",
+    "./app": "./lib/index_app.js"
+  },
+  "bin": {
+    "om": "bin/om",
+    "om-agent": "bin/om-agent",
+    "om-app": "bin/om-app",
+    "om-io": "bin/om-io",
+    "om-jobs": "bin/om-jobs",
+    "om-skills": "bin/om-skills",
+    "om-tool": "bin/om-tool",
+    "om-tools2bash": "bin/om-tools2bash",
+    "omoya": "bin/omoya",
+    "skills": "bin/skills",
+    "tools2bash": "bin/tools2bash"
+  },
+  "scripts": {
+    "test": "bun test",
+    "check": "bun ./ai-tools/ai-check.js",
+    "build:site": "bun ./website/build.js"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "license": "MIT"
+}

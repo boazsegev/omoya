@@ -1,0 +1,241 @@
+#!/usr/bin/env bun
+/**
+ * agent — headless tool-loop CLI (thin binding over lib/agent.js).
+ *
+ * Usage:
+ *   <prefix>-agent [--model <endpoint>/<model>] [--url <url>]
+ *            [--token <key>] [--timeout <ms>] [--tools <list>]
+ *            [--session <id> | --resume <id>]
+ *            [--max-turns <n>] [--max-tool-calls <n>] [--login] [--logout <endpoint>] [--help]
+ *
+ * Contract:
+ *   - Reads stdin to EOF (shared grammar: whole JSON context first,
+ *     otherwise JSON-per-line with non-JSON lines as user messages).
+ *   - Runs the Agent tool loop: provider request → tool calls executed
+ *     in-process → results appended → next request, until done/error.
+ *   - stdout: normalized response events, one JSON object per line
+ *     (every request's events stream in order; the last done carries
+ *     the final assembled message). stderr: diagnostics only.
+ *   - --session <id> persists the context to a JSONL session log;
+ *     --resume <id> replays it first. Session wiring lives in Agent.
+ *   - SIGINT/SIGTERM cancels the in-flight request: the terminal
+ *     partial is persisted, exit 130.
+ *
+ * Exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
+ *             4 provider error · 5 malformed input · 130 cancelled
+ */
+
+import { basename } from "node:path";
+import Agent from "../../lib/agent.js";
+import CLI from "../../lib/cli.js";
+const { Env, IO, NAMES } = Agent;
+const { ProviderError } = IO;
+const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, logoutEndpoint, selectEndpointModel, adoptResumeOrigin } = CLI;
+
+// The invoked name, like the TUI's: argv[1] holds the wrapper's file
+// name; a bare `bun bin/scripts/agent` has none, so the namespace-
+// derived prefix fills in (never a stale literal).
+const NAME = basename(process.argv[1] ?? "") || `${NAMES.cliPrefix}-agent`;
+
+const PROGRAM = "{{program}}";
+const HELP_TEMPLATE = `${PROGRAM} — headless tool-loop CLI
+
+usage: ${PROGRAM} [--model <endpoint>/<model>] [--url <url>]
+                [--token <key>] [--timeout <ms>] [--tools <list>]
+                [--session <id> | --resume <id>]
+                [--max-turns <n>] [--max-tool-calls <n>] [--login] [--logout <endpoint>] [--help]
+
+stdin:   one context, buffered to EOF (whole JSON context, else
+         JSON-per-line; non-JSON lines become user messages)
+stdout:  normalized response events, one JSON object per line —
+         the tool loop streams every request's events in order;
+         the last done carries the final assembled message
+stderr:  diagnostics only (progress, tool executions, errors, usage)
+
+options:
+  --model <endpoint>/<model>  model id, optionally endpoint-prefixed; a
+                              bare endpoint selects its first available
+                              model (default endpoint: none unless selected)
+  --url <url>          endpoint URL (overrides settings)
+  --token <key>        auth token for this invocation only (never persisted)
+  --timeout <dur>      overall cap per invocation (default 1048575ms);
+                          a ms numeral or a unit string ("20m", "1h").
+                          Hung-connection (connectTimeout 30s) and
+                          stuck-model (stuckTimeout 120s) timeouts are
+                          separate provider settings
+  --tools <list>       tool availability: "*" or comma-separated names
+                       (default: all discovered tools)
+  --no-tool-fork      disable the tool sandbox: file tools run in-process
+                       (default: forked — a crashing tool can't kill ${PROGRAM})
+  --tool-timeout <dur> host override of Env.toolTimeout (default 120s);
+                       a ms numeral or unit string ("30s", "5m"); a tool's
+                       declared request is capped at toolTimeoutLimit (20m)
+  --tool-async        execute one message's tool calls concurrently
+  --session <id>       persist under <settings>/${NAMES.sessionsDir}/
+                       (the file name is date + sessionUUID + name — see
+                       lib/agent/session.js; <id> stays the stable identity)
+  --resume <id>        replay that session log first, then continue it
+                       (an explicit id resumes anywhere: the cwd becomes the
+                       session's own folder)
+  --max-turns <n>      FALLBACK runaway guard (for when the context window
+                       is unknown): provider requests per invocation (32)
+  --max-tool-calls <n> same fallback: tool executions per invocation (64)
+                       (the PRIMARY guard is context usage, settings.
+                       contextGuardCap/contextGuardTurnCap — 90%/40%)
+  --login              configure an endpoint with the interactive wizard, then exit
+  --logout <endpoint> remove an endpoint from settings.json and auth, then exit
+  --help               show this text and exit
+
+exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
+            4 provider error · 5 malformed input · 130 cancelled`;
+
+const HELP = HELP_TEMPLATE.replaceAll(PROGRAM, NAME);
+
+const FLAGS = [
+  "model", "url", "token", "timeout", "tools", "tool-timeout",
+  "session", "resume", "max-turns", "max-tool-calls", "logout",
+];
+const BOOL_FLAGS = ["no-tool-fork", "tool-async", "login"];
+
+async function main() {
+  let args;
+  try {
+    args = parseFlags(process.argv.slice(2), { flags: FLAGS, bools: BOOL_FLAGS });
+    if (args.session && args.resume) throw new Error("--session and --resume are mutually exclusive");
+    if (typeof args.tools === "string" && args.tools !== "*") args.tools = args.tools.split(",").map((name) => name.trim()).filter(Boolean);
+  } catch (err) {
+    console.error(`${NAME}: ${err.message} (see --help)`);
+    process.exit(EXIT.usage);
+  }
+  if (args.help) {
+    console.log(HELP);
+    process.exit(EXIT.ok);
+  }
+
+  const out = (event) => process.stdout.write(JSON.stringify(event) + "\n");
+  const log = (line) => process.stderr.write(`${NAME}: ${line}\n`);
+
+  // Resume-anywhere (lib/cli/resume.js): an explicit --resume <id>
+  // continues the session in ITS recorded folder — adopted before the
+  // environment is built.
+  try {
+    adoptResumeOrigin({
+      resume: args.resume,
+      anonymous: ["0", "false", "anon"].includes(args.session),
+    });
+  } catch (err) {
+    log(err.message);
+    process.exit(EXIT.usage);
+  }
+
+  // Async construction belongs in Env.create(): the returned environment has
+  // its provider and tool registries ready for Agent.
+  const env = await Env.create();
+  if (args.login) {
+    try {
+      const result = await runLoginWizard(env);
+      log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
+      process.exitCode = EXIT.ok;
+      return;
+    } catch (err) {
+      log(`login failed: ${err.message}`);
+      process.exitCode = EXIT.usage;
+      return;
+    }
+  }
+  if (args.logout) {
+    try {
+      const result = logoutEndpoint(env, args.logout);
+      log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
+      process.exitCode = EXIT.ok;
+      return;
+    } catch (err) {
+      log(`logout failed: ${err.message}`);
+      process.exitCode = EXIT.usage;
+      return;
+    }
+  }
+  // Startup model-cache renewal: every endpoint reports its available
+  // models in the BACKGROUND (failures keep the stale/static list) —
+  // startup never waits on a slow or busy endpoint; selection paths
+  // that need a live list refresh it themselves (endpointOnly, login).
+  env.refreshModels().catch(() => {});
+
+  // Resolve the --model combo AFTER providers load (needs the registry
+  // and known model lists): explicit combo, cached model match,
+  // provider-only (first available model), or bare model name.
+  let selection;
+  try {
+    selection = await selectEndpointModel(env, args);
+  } catch (err) {
+    log(err.message);
+    process.exit(EXIT.usage);
+  }
+  const endpoint = selection.endpoint;
+  args.model = selection.model;
+  if (!endpoint || !args.model) {
+    log("Please load a model with --model <endpoint>/<model>");
+    process.exit(EXIT.usage);
+  }
+
+  const context = await readContextFromStdin();
+
+  let agent;
+  try {
+    agent = new Agent({
+      env,
+      model: `${endpoint}/${args.model}`,
+      url: args.url,
+      timeout: args.timeout,
+      settings: args.token ? { auth: { token: args.token } } : undefined,
+      tools: args.tools,
+      maxTurns: args["max-turns"],
+      maxToolCalls: args["max-tool-calls"],
+      toolCall: {
+        fork: !args["no-tool-fork"],
+        timeout: args["tool-timeout"],
+        async: args["tool-async"] === true,
+      },
+      session: args.session ?? args.resume,
+      context,
+    });
+    const responseEvents = [
+      [Agent.EVENT.START, "start"], [Agent.EVENT.TEXT_START, "text_start"], [Agent.EVENT.TEXT_DELTA, "text_delta"], [Agent.EVENT.TEXT_END, "text_end"],
+      [Agent.EVENT.THINKING_START, "thinking_start"], [Agent.EVENT.THINKING_DELTA, "thinking_delta"], [Agent.EVENT.THINKING_END, "thinking_end"],
+      [Agent.EVENT.TOOLCALL_START, "toolcall_start"], [Agent.EVENT.TOOLCALL_DELTA, "toolcall_delta"], [Agent.EVENT.TOOLCALL_END, "toolcall_end"],
+      [Agent.EVENT.DONE, "done"], [Agent.EVENT.ERROR, "error"],
+    ];
+    for (const [event, type] of responseEvents) agent.onEvent(event, (value) => out({ type, ...value }));
+    agent.onEvent(Agent.EVENT.LOG, log);
+  } catch (err) {
+    log(err.message);
+    process.exit(err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage);
+  }
+  if (!agent.model) {
+    log("no model selected; use --model or provider settings");
+    process.exit(EXIT.usage);
+  }
+
+  // Cancellation: graceful async kill — the loop persists the partial
+  // and returns the cancelled terminal; main maps it to exit 130.
+  // (finish.js exit hooks remain the crash backstop; signals are NOT
+  // armed here — the two signal paths must not fight.)
+  const disarm = armCancelSignals({
+    onCancel: (signal) => {
+      log(`${signal} received; cancelling`);
+      agent.cancel();
+    },
+  });
+
+  const terminal = await agent.run();
+  disarm();
+  close({ env, agent });
+
+  if (terminal?.usage) log(usageSummary(terminal.usage));
+  process.exit(exitCodeFor(terminal));
+}
+
+main().catch((err) => {
+  console.error(`${NAME}: ${err?.message ?? err}`);
+  process.exit(EXIT.usage);
+});

@@ -1,0 +1,91 @@
+#!/usr/bin/env bun
+/** app — map command-line syntax into normalized application state. */
+import { basename } from "node:path";
+import AI from "../../lib/index_app.js";
+import { formatHelp } from "./help.js";
+
+const { CLI, TUI, NAMES } = AI;
+// The invoked name: argv[1] holds the wrapper's file name; a bare
+// `bun bin/scripts/app` has none, so the app's own command — the bare
+// prefix — fills in (never a stale literal).
+const program = basename(process.argv[1] ?? "") || NAMES.cliPrefix;
+const valueFlags = ["model", "url", "token", "timeout", "tools", "tool-timeout", "session", "resume", "max-turns", "max-tool-calls", "input", "logout", "screen", "port", "host"];
+const booleanFlags = ["no-tool-fork", "tool-async", "safe", "login", "init", "force", "serve", "list"];
+
+function sessionState(args) {
+  if (["0", "false", "anon"].includes(args.session)) return { kind: "anonymous" };
+  if (args.resume) return { kind: "resume", id: ["true", "latest"].includes(args.resume) ? "latest" : args.resume };
+  return { kind: "new", id: args.session };
+}
+
+function launchState(args) {
+  return {
+    mode: args.screen,
+    port: args.port === undefined ? 9900 : args.port,
+    model: { model: args.model, url: args.url, token: args.token },
+    session: sessionState(args),
+    inputFile: args.input,
+    timeout: args.timeout,
+    safe: args.safe === true,
+    tools: {
+      names: typeof args.tools === "string" && args.tools !== "*"
+        ? args.tools.split(",").map((name) => name.trim()).filter(Boolean)
+        : args.tools,
+      call: { fork: !args["no-tool-fork"], timeout: args["tool-timeout"], async: args["tool-async"] === true },
+    },
+    limits: { maxTurns: args["max-turns"], maxToolCalls: args["max-tool-calls"] },
+    input: process.stdin,
+    output: process.stdout,
+    diagnostics: process.stderr,
+    signals: process,
+  };
+}
+
+async function administrativeCommand(args) {
+  const command = args.login
+    ? { type: "login" }
+    : args.logout
+      ? { type: "logout", endpoint: args.logout }
+      : args.init
+        ? { type: "initialize", force: args.force === true }
+        : args.list
+          ? { type: "listModels" }
+          : null;
+  if (!command) return false;
+  const result = await CLI.execute(command);
+  if (result.type === "login") process.stderr.write(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})\n`);
+  if (result.type === "logout") process.stderr.write(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}\n`);
+  if (result.type === "initialize") process.stderr.write(`wrote ${result.file}\n`);
+  if (result.type === "listModels") {
+    for (const { name, models } of result.endpoints) {
+      for (const model of models) process.stdout.write(`${name}/${model}\n`);
+    }
+  }
+  return true;
+}
+
+async function main() {
+  const args = CLI.parseFlags(process.argv.slice(2), { flags: valueFlags, bools: booleanFlags });
+  if (args.session && args.resume) throw new Error("--session and --resume are mutually exclusive");
+  if (args.help) {
+    process.stdout.write(`${formatHelp(program)}\n`);
+    return;
+  }
+  if (await administrativeCommand(args)) return;
+  if (args.serve) {
+    const { serve } = (await import("../../lib/web.js")).default;
+    const web = await serve({ ...launchState(args), host: args.host });
+    process.stderr.write(`web: ${web.url}\n`);
+    await web.done;
+    return;
+  }
+  const result = await TUI.run(launchState(args));
+  if (result.session) process.stderr.write(`session: ${result.session.id} (resume with: ${program} --resume ${result.session.id})\n`);
+  else process.stderr.write("session: anonymous (not persisted)\n");
+  process.exitCode = result.code;
+}
+
+main().catch((error) => {
+  process.stderr.write(`${program}: ${error?.message ?? error} (see --help)\n`);
+  process.exit(CLI.EXIT.usage);
+});

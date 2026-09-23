@@ -1,0 +1,29 @@
+# Publish only Omoya's runtime and public documentation.
+*.DS_Store
+*
+!bin/
+!bin/**
+!lib/
+!lib/**
+!prompts/
+!prompts/**
+!providers/
+!providers/**
+!skills/
+!skills/**
+!themes/
+!themes/**
+!tools/
+!tools/**
+!AGENTS.md
+!API.md
+!API-schema.md
+!LICENSE.md
+!README.md
+!SECURITY.md
+!settings.json
+!bunfig.toml
+!package.json
+
+# Website source is version-controlled but deployed separately.
+website/

@@ -1,0 +1,10 @@
+.DS_Store
+.claude/
+ai-tmp/
+ai-tasks/
+ai-cache/
+ai-output/
+ai-research/
+tmp/
+AI-*.md
+ai-*/

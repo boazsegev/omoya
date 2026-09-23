@@ -1,0 +1,171 @@
+#!/usr/bin/env bun
+/**
+ * io — one-request provider CLI (thin binding over lib/io.js).
+ *
+ * Usage:
+ *   <prefix>-io [--model <endpoint>/<model>] [--url <url>]
+ *         [--token <key>] [--timeout <ms>] [--login] [--logout <endpoint>] [--help]
+ *
+ * Contract:
+ *   - Reads stdin to EOF (shared grammar: whole JSON context first,
+ *     otherwise JSON-per-line with non-JSON lines as user messages).
+ *   - Makes exactly ONE provider request, streaming normalized response
+ *     events as JSONL on stdout. Diagnostics only on stderr, never mixed.
+ *   - Explicit arguments override settings; settings fill gaps. With no
+ *     provider/ prefix, a single registered provider is selected implicitly.
+ *   - SIGINT/SIGTERM cancels: the terminal partial event is emitted.
+ *
+ * Exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
+ *             4 provider error · 5 malformed input · 130 cancelled
+ */
+
+import { basename } from "node:path";
+import Agent from "../../lib/agent.js";
+import CLI from "../../lib/cli.js";
+const { Env, IO, NAMES } = Agent;
+const { ProviderError } = IO;
+const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, logoutEndpoint, selectEndpointModel } = CLI;
+
+// The invoked name, like the TUI's: argv[1] holds the wrapper's file
+// name; a bare `bun bin/scripts/io` has none, so the namespace-derived
+// prefix fills in (never a stale literal).
+const NAME = basename(process.argv[1] ?? "") || `${NAMES.cliPrefix}-io`;
+
+const PROGRAM = "{{program}}";
+const HELP_TEMPLATE = `${PROGRAM} — one-request provider CLI
+
+usage: ${PROGRAM} [--model <endpoint>/<model>] [--url <url>]
+             [--token <key>] [--timeout <ms>] [--login] [--logout <endpoint>] [--help]
+
+stdin:   one context, buffered to EOF (whole JSON context, else
+         JSON-per-line; non-JSON lines become user messages)
+stdout:  normalized response events, one JSON object per line
+stderr:  diagnostics only (progress, errors, usage summary)
+
+options:
+  --model <endpoint>/<model>  model id, optionally endpoint-prefixed; a
+                              bare endpoint selects its first available
+                              model (default endpoint: none unless selected)
+  --url <url>        endpoint URL (overrides settings)
+  --token <key>      auth token for this invocation only (never persisted)
+  --timeout <dur>    overall cap per request (default 1048575ms);
+                     a ms numeral or a unit string ("20m", "1h").
+                     Hung-connection (connectTimeout 30s) and stuck-model
+                     (stuckTimeout 120s) timeouts are separate settings
+  --login            configure an endpoint with the interactive wizard, then exit
+  --logout <endpoint> remove an endpoint from settings.json and auth, then exit
+  --help             show this text and exit
+
+exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
+            4 provider error · 5 malformed input · 130 cancelled`;
+
+const HELP = HELP_TEMPLATE.replaceAll(PROGRAM, NAME);
+
+async function main() {
+  let args;
+  try {
+    args = parseFlags(process.argv.slice(2), {
+      flags: ["model", "url", "token", "timeout", "logout"],
+      bools: ["login"],
+    });
+  } catch (err) {
+    console.error(`${NAME}: ${err.message} (see --help)`);
+    process.exit(EXIT.usage);
+  }
+  if (args.help) {
+    console.log(HELP);
+    process.exit(EXIT.ok);
+  }
+
+  const out = (event) => process.stdout.write(JSON.stringify(event) + "\n");
+  const log = (line) => process.stderr.write(`${NAME}: ${line}\n`);
+
+  // Env.create() resolves only after the runtime registries are ready.
+  const env = await Env.create();
+  if (args.login) {
+    try {
+      const result = await runLoginWizard(env);
+      log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
+      process.exitCode = EXIT.ok;
+      return;
+    } catch (err) {
+      log(`login failed: ${err.message}`);
+      process.exitCode = EXIT.usage;
+      return;
+    }
+  }
+  if (args.logout) {
+    try {
+      const result = logoutEndpoint(env, args.logout);
+      log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
+      process.exitCode = EXIT.ok;
+      return;
+    } catch (err) {
+      log(`logout failed: ${err.message}`);
+      process.exitCode = EXIT.usage;
+      return;
+    }
+  }
+  // Startup model-cache renewal: every endpoint reports its available
+  // models in the BACKGROUND (failures keep the stale/static list) —
+  // startup never waits on a slow or busy endpoint; selection paths
+  // that need a live list refresh it themselves (endpointOnly, login).
+  env.refreshModels().catch(() => {});
+
+  // Resolve the --model combo AFTER providers load (needs the registry
+  // and known model lists): explicit combo, cached model match,
+  // provider-only (first available model), or bare model name.
+  let selection;
+  try {
+    selection = await selectEndpointModel(env, args);
+  } catch (err) {
+    log(err.message);
+    process.exit(EXIT.usage);
+  }
+  const endpoint = selection.endpoint;
+  args.model = selection.model;
+  if (!endpoint || !args.model) {
+    log("Please load a model with --model <endpoint>/<model>");
+    process.exit(EXIT.usage);
+  }
+
+  let aiio;
+  try {
+    aiio = new IO({
+      env,
+      model: `${endpoint}/${args.model}`,
+      url: args.url,
+      timeout: args.timeout,
+      settings: args.token ? { auth: { token: args.token } } : undefined,
+      onData: out,
+      onLog: log,
+    });
+  } catch (err) {
+    log(err.message);
+    process.exit(err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage);
+  }
+  if (!aiio.model) {
+    log("no model selected; use --model or provider settings");
+    process.exit(EXIT.usage);
+  }
+
+  const disarm = armCancelSignals({
+    onCancel: (signal) => {
+      log(`${signal} received; cancelling`);
+      aiio.kill().finally(() => process.exit(EXIT.cancelled));
+    },
+  });
+
+  const context = await readContextFromStdin();
+  const terminal = await aiio.write(context);
+  disarm();
+  close({ env });
+
+  if (terminal?.usage) log(usageSummary(terminal.usage));
+  process.exit(exitCodeFor(terminal));
+}
+
+main().catch((err) => {
+  console.error(`${NAME}: ${err?.message ?? err}`);
+  process.exit(EXIT.usage);
+});

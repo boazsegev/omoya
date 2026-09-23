@@ -1,0 +1,4 @@
+[
+  [{"delay":200},{"thinking":"Preparing the worker response."},{"text":"Hello from test/ui-response. This is a child-worker response."}],
+  [{"delay":200},{"text":"Worker response received; the manager can show it as an attributed queued message."}]
+]

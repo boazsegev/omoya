@@ -1,0 +1,6 @@
+# bunfig.toml — Bun configuration.
+# The test preload (ollama-independence gate + AI_SETTINGS_DIR
+# isolation) applies to every `bun test` invocation; the CI gate's
+# explicit `--preload ./test/preload.js` loads the same file.
+[test]
+preload = ["./test/preload.js"]

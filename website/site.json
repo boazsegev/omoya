@@ -1,0 +1,9 @@
+{
+  "origin": "https://omoya.ai",
+  "title": "Omoya — transparent Bun agent harness",
+  "description": "A transparent Bun agent harness for people, scripts, and the things you build next.",
+  "domains": {
+    "canonical": "omoya.ai",
+    "vanity": ["omoya.dev", "omoya.io"]
+  }
+}
