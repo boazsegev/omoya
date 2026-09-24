@@ -70,6 +70,7 @@ export function page({ title, description, path, body, apiNav }) {
   <link rel="canonical" href="${canonical}">
   <link rel="alternate" type="text/plain" title="LLM documentation" href="${site.origin}/llms.txt">
   <link rel="sitemap" type="application/xml" href="${site.origin}/sitemap.xml">
+  <link rel="icon" href="${prefix}assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="${prefix}assets/style.css">
   <script>${THEME_BOOTSTRAP}</script>
   <script type="module" src="${prefix}assets/app.js"></script>
@@ -78,7 +79,7 @@ export function page({ title, description, path, body, apiNav }) {
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="${rebase(prefix, "/")}">omoya</a>
+    <a class="brand" href="${rebase(prefix, "/")}"><img src="${prefix}assets/logo.svg" width="36" height="36" alt=""><span>omoya</span></a>
     <nav class="site-nav" aria-label="Site">${nav}<a href="${site.repository}">Repository</a></nav>
     <div class="header-controls">
       <search class="site-search">

@@ -9,12 +9,43 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { collect, contractProblems, renderApiReference } from "./api-reference.js";
+import { buildApiLinks, linkApiReferences } from "../website/lib/api.js";
 import { generate } from "./api-schema.js";
 
 describe("generated API documentation", () => {
   test("every public export is documented, every contract source resolves", async () => {
     const problems = contractProblems(await collect());
     expect(problems).toEqual([]);
+  }, 20_000);
+
+  test("GTUI frozen namespaces and factory protocols expose documented callables", async () => {
+    const data = await collect();
+    const gtui = data.modules.find((module) => module.name === "GTUI");
+    const names = (symbol) => symbol.members.map((member) => member.name);
+    expect(names(gtui.exports.find((symbol) => symbol.name === "view"))).toEqual(expect.arrayContaining(["text", "row", "menu"]));
+    expect(names(gtui.exports.find((symbol) => symbol.name === "effect"))).toEqual(expect.arrayContaining(["task", "quit"]));
+    expect(names(gtui.exports.find((symbol) => symbol.name === "event"))).toEqual(expect.arrayContaining(["key", "taskFailed"]));
+    expect(names(gtui.exports.find((symbol) => symbol.name === "host"))).toEqual(["memory", "terminal"]);
+    const text = await renderApiReference();
+    expect(text).toContain("### `GTUI.view.text(props = {…}, content = \"\")`");
+    expect(text).toContain("### `GTUI.effect.task(key, run)`");
+    expect(text).toContain("### `GTUI.event.key(payload)`");
+  }, 20_000);
+
+  test("composition-boundary prototype methods appear on their owning class", async () => {
+    const data = await collect();
+    const env = data.modules.find((module) => module.name === "Env");
+    const klass = env.exports.find((symbol) => symbol.name === "Env");
+    expect(klass.members.find((member) => member.name === "createAgent")).toMatchObject({
+      signature: "createAgent(options = {…})",
+      from: "lib/agent.js",
+    });
+  }, 20_000);
+
+  test("API cross-references link method-call notation across modules", async () => {
+    const data = await collect();
+    const html = linkApiReferences("<p><code>Agent.close()</code></p>", buildApiLinks(data), "Env");
+    expect(html).toBe('<p><a href="./agent/#Agent-close"><code>Agent.close()</code></a></p>');
   }, 20_000);
 
   test("API.md regenerates from the live tree on every run", async () => {

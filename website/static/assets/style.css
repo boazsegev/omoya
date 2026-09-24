@@ -52,7 +52,12 @@ html[data-theme="dark"] .skip-link { color: #131a20; }
   gap: .75rem 1.5rem; max-width: 78rem; margin: auto; padding: 1.25rem 1.5rem;
   border-bottom: 3px solid var(--ink);
 }
-.brand { color: var(--ink); font-size: 1.45rem; font-weight: 800; letter-spacing: -.08em; text-decoration: none; }
+.brand {
+  display: inline-flex; align-items: center; gap: .65rem; color: var(--ink);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 1.45rem; font-weight: 700; letter-spacing: .035em; text-decoration: none;
+}
+.brand img { width: 2.25rem; height: 2.25rem; flex: none; border-radius: .5rem; }
 .site-nav { display: flex; align-items: center; gap: 1.1rem; }
 .site-nav a[aria-current="page"] { color: var(--orange); font-weight: 800; }
 .nav-note { color: var(--ink); opacity: .55; font-size: .85rem; cursor: help; }
@@ -113,12 +118,25 @@ main { max-width: 78rem; margin: auto; padding: 3rem 1.5rem 5rem; }
 .api-nav a[aria-current="page"] { color: var(--orange); font-weight: 800; border-left-color: var(--orange); }
 
 /* ------------------------------------------------------------ content */
-.hero { max-width: 52rem; padding: 2rem 0 4rem; }
-.eyebrow { color: var(--orange); font-size: .8rem; font-weight: 800; letter-spacing: .12em; }
-h1 { max-width: 14ch; margin: .2rem 0 1rem; font-size: clamp(2.8rem, 9vw, 6.5rem); line-height: .94; letter-spacing: -.09em; }
+.hero { max-width: 68rem; padding: clamp(2rem, 6vw, 5rem) 0 clamp(4rem, 8vw, 7rem); }
+.hero-brand { display: flex; align-items: center; gap: clamp(1.5rem, 4vw, 3rem); }
+.hero-brand img {
+  width: clamp(6.5rem, 16vw, 10rem); height: auto; flex: none;
+  border-radius: clamp(1.4rem, 3vw, 2.2rem); box-shadow: .6rem .6rem 0 var(--line);
+}
+.eyebrow { margin: 0 0 .65rem; color: var(--orange); font-size: .8rem; font-weight: 800; letter-spacing: .12em; }
+h1 {
+  max-width: 14ch; margin: 0 0 1rem; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: clamp(2.8rem, 8vw, 6.5rem); line-height: .98; letter-spacing: -.045em;
+}
+.product-name {
+  display: block; margin-bottom: clamp(1rem, 2.5vw, 1.75rem);
+  font-size: .68em; font-weight: 700; letter-spacing: .045em; line-height: 1.1;
+}
+.hero-claim { display: block; font-weight: 800; }
 h2 { margin-top: 2.5rem; line-height: 1.1; }
 h3 { margin-top: 2rem; }
-.lede { max-width: 47rem; font-size: clamp(1.1rem, 2vw, 1.4rem); }
+.lede { max-width: 56rem; font-size: clamp(1.1rem, 2vw, 1.4rem); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1.2rem; margin: 2rem 0; }
 .button {
   display: inline-block; padding: .65rem 1rem; color: #fff; background: var(--orange);
@@ -132,10 +150,12 @@ pre { overflow-x: auto; padding: 1.25rem; color: #e6f5ee; background: var(--dark
 code { font-family: inherit; }
 p code, li code, dd code, td code { padding: .08rem .25rem; background: var(--code-inline); border: 1px solid var(--line); }
 pre code { padding: 0; background: none; border: 0; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1.25rem; }
-.grid article { padding: 1.25rem; background: var(--panel); border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--line); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: 1.25rem; }
+.features { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid article { min-width: 0; padding: 1.25rem; background: var(--panel); border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--line); }
 .grid h3 { margin-top: 0; }
-.features article pre { box-shadow: none; font-size: .82rem; }
+.features article pre { max-width: 100%; box-shadow: none; font-size: .78rem; }
+.features article pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------ docs */
 .documentation { max-width: 62rem; }
@@ -168,6 +188,9 @@ blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--or
 /* ------------------------------------------------------------ footer */
 .site-footer { max-width: 78rem; margin: auto; padding: 1.5rem; border-top: 3px solid var(--ink); font-size: .85rem; }
 
+@media (max-width: 64rem) {
+  .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 56rem) {
   .with-sidebar { display: block; }
   .api-nav { position: static; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 2px solid var(--line); }
@@ -178,7 +201,11 @@ blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--or
 @media (max-width: 38rem) {
   .site-header { padding: 1rem; }
   main, .with-sidebar { padding: 2rem 1rem 3rem; }
-  h1 { letter-spacing: -.07em; }
+  .features { grid-template-columns: 1fr; }
+  .hero-brand { align-items: flex-start; gap: 1rem; }
+  .hero-brand img { width: 5rem; border-radius: 1.1rem; box-shadow: .35rem .35rem 0 var(--line); }
+  h1 { font-size: clamp(2.45rem, 12vw, 4rem); letter-spacing: -.035em; }
+  .product-name { margin-bottom: .8rem; letter-spacing: .04em; }
   #search-input { width: 100%; }
   .site-search { flex: 1 1 100%; order: 3; }
 }

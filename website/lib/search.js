@@ -38,8 +38,9 @@ export function searchIndex(pageEntries, data, generated) {
         const title = symbol.name === mod.name
           ? `${mod.name}.${member.name}`
           : `${mod.name}.${symbol.name}.${member.name}`;
+        const anchor = `${symbol.name}-${member.name}`;
         entries.push({
-          t: title, u: `${base}#${member.name}`, p: base,
+          t: title, u: `${base}#${anchor}`, p: base,
           s: `${mod.name}.${symbol.name}`, x: clean(`${member.signature ?? ""} ${member.doc.description}`, 400),
         });
       }

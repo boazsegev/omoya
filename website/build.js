@@ -68,24 +68,40 @@ for (const p of apiPages(data)) {
 }
 
 /**
- * Link integrity gate: every root-relative /api/<slug>/#anchor link emitted
- * into a page and every search-index URL must resolve to an anchor that
- * EXISTS on its target page. A resolver that falls back to a parent anchor
- * (a symbol mention landing on its module) fails here instead of shipping
- * a broken UX.
+ * Link integrity gate for every generated page link. Resolve relative URLs
+ * exactly as a browser would, require each same-origin target page to exist,
+ * and require fragments to name an ID on that target. This covers API cards,
+ * architecture edges, sidebars, cross-references, and search-index URLs.
  */
 function linkProblems(pages, indexEntries) {
   const ids = new Map(pages.map((p) => [p.path,
     new Set([...p.html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]))]));
   const problems = [];
-  const check = (from, url) => {
-    const m = /^(\/api\/[a-z]+\/)#(.+)$/.exec(url);
-    if (m && !ids.get(m[1])?.has(m[2])) problems.push(`${from}: ${url} has no anchor on its target page`);
+  const canonicalPath = (pathname) => pathname === "/" ? "/" : `${pathname.replace(/\/(?:index\.html)?$/, "")}/`;
+  const check = (from, href) => {
+    // API cross-references use `./<module>/` because deployed clean page URLs
+    // are extensionless (`/api/env`): browser resolution then targets the API
+    // sibling (`/api/agent`), not the site-root sibling (`/agent`). Model that
+    // deployment form here while retaining directory paths as build keys.
+    const basePath = from.startsWith("/api/") && /^\.\/[a-z]+\/#/.test(href)
+      ? "/api/"
+      : from;
+    const url = new URL(href, `https://omoya.invalid${basePath}`);
+    if (url.origin !== "https://omoya.invalid") return;
+    const target = canonicalPath(url.pathname);
+    if (!ids.has(target)) {
+      problems.push(`${from}: ${href} resolves to missing page ${target}`);
+      return;
+    }
+    const fragment = decodeURIComponent(url.hash.slice(1));
+    if (fragment && !ids.get(target).has(fragment)) {
+      problems.push(`${from}: ${href} has no #${fragment} on ${target}`);
+    }
   };
   for (const p of pages) {
-    for (const m of p.html.matchAll(/ href="(\/api\/[a-z]+\/#[^"]+)"/g)) check(p.path, m[1]);
+    for (const m of p.html.matchAll(/<a\b[^>]*\bhref="([^"]+)"/g)) check(p.path, m[1]);
   }
-  for (const e of indexEntries) check(`search "${e.t}"`, e.u);
+  for (const e of indexEntries) check("/", e.u);
   return problems;
 }
 

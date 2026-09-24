@@ -70,6 +70,22 @@ describe("TUI agent navigation", () => {
   });
 });
 
+describe("TUI login wizard", () => {
+  test("/endpoint-login replaces an open non-menu overlay with the preset picker", async () => {
+    const { memory, ui, running } = await harness();
+    try {
+      ui.dispatch({ type: "key", key: "ctrl+o" });
+      await tick();
+      ui.dispatch(msg.submit("/endpoint-login"));
+      await until(() => memory.snapshot().lines.some((line) => line.includes("Login — choose an endpoint")));
+      expect(memory.snapshot().lines.some((line) => line.includes("Login — choose an endpoint"))).toBe(true);
+    } finally {
+      ui.stop();
+      await running;
+    }
+  });
+});
+
 describe("TUI add-agent", () => {
   test("selecting an endpoint/model creates and views an additional Agent", async () => {
     const env = await testEnv();

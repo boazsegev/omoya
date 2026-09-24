@@ -72,6 +72,9 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
     expect(home.status).toBe(200);
     expect(home.headers.get("content-security-policy")).toContain("default-src");
     expect((await fetch(`${origin(web)}/app.js`)).headers.get("content-type")).toContain("javascript");
+    const logo = await fetch(`${origin(web)}/logo.svg`);
+    expect(logo.headers.get("content-type")).toContain("image/svg+xml");
+    expect(await logo.text()).toContain("Omoya logo");
     expect((await fetch(`${origin(web)}/ws`)).status).toBe(403);
     expect((await fetch(`${origin(web)}/ws`, { headers: { Origin: "http://evil.invalid" } })).status).toBe(403);
     const socket = await connect(web);

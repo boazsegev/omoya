@@ -473,6 +473,7 @@ export class Env {
   contextGuardTurnCap: number;
   contextWindow: (endpoint: string, model: string) => number|null;
   static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
+  createAgent: (options?: object) => Agent;
   defaultPromptRoots: () => string[];
   defaultProviderRoots: () => unknown;
   defaultSkillRoots: () => string[];

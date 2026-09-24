@@ -272,6 +272,65 @@ function blockEnd(src, open) {
 
 /** Class members: methods, getters, static methods AND static/instance
  *  fields (`static EVENT = EVENT;`) with their docs. */
+/**
+ * Callable own properties of a frozen object literal. This deliberately
+ * recognizes syntax rather than names: exported namespaces and a function's
+ * returned protocol object are both ordinary frozen objects.
+ * @param {string} body - text inside the object braces
+ * @returns {Array<{name: string, kind: string, signature: string, doc: object|null}>}
+ */
+function frozenObjectMembers(body) {
+  const candidates = [...body.matchAll(/^(\s*)(?:(get|set)\s+)?([\w$]+)\s*(?::\s*(async\s*)?)?\(/gm)];
+  const indents = [...body.matchAll(/^(\s*)\S/gm)].map((m) => m[1].length);
+  const indent = Math.min(...indents);
+  if (!Number.isFinite(indent)) return [];
+  const members = [];
+  for (const m of candidates) {
+    if (m[1].length !== indent) continue;
+    const open = m.index + m[0].length - 1;
+    const close = open + paramList(body.slice(open), 0).length + 2;
+    const following = body.slice(close).trimStart();
+    // A callable object property is either shorthand (`name() {}`) or an
+    // arrow property (`name: () =>`). Do not mistake calls in a value for it.
+    if (!(following.startsWith("{") || following.startsWith("=>"))) continue;
+    const accessor = m[2];
+    const name = m[3];
+    const async = Boolean(m[4]);
+    const params = compactParams(paramList(body, open));
+    members.push({
+      name,
+      kind: accessor ? `${accessor}ter` : "method",
+      async,
+      signature: `${async ? "async " : ""}${accessor ? `${accessor} ` : ""}${name}(${params})`,
+      doc: docBefore(body, m.index),
+    });
+  }
+  // Arrow properties are the dominant object-namespace form. Capture both
+  // parenthesized and single-argument arrows, preserving their signature.
+  for (const m of body.matchAll(/^(\s*)([\w$]+)\s*:\s*(async\s+)?(?:\(([^)]*)\)|([\w$]+))\s*=>/gm)) {
+    if (m[1].length !== indent || members.some((member) => member.name === m[2])) continue;
+    const doc = docBefore(body, m.index);
+    members.push({ name: m[2], kind: "method", async: Boolean(m[3]), signature: `${m[3] ? "async " : ""}${m[2]}(${compactParams(m[4] ?? m[5] ?? "")})`, doc });
+  }
+  // A documented `name: factory(...)` or shorthand `factory,` is callable
+  // when it references a local constructor helper. Its arguments are
+  // implementation detail here, so retain a truthful variadic signature.
+  for (const m of body.matchAll(/^(\s*)([\w$]+)(?:\s*:\s*[\w$]+\s*\(|\s*,|\s*$)/gm)) {
+    if (m[1].length !== indent || members.some((member) => member.name === m[2])) continue;
+    const doc = docBefore(body, m.index);
+    if (doc) members.push({ name: m[2], kind: "method", async: false, signature: `${m[2]}(...)`, doc });
+  }
+  return members;
+}
+
+/** Locate a frozen object literal starting at an exported declaration's end. */
+function frozenObjectAt(src, start) {
+  const match = /=\s*(?:Object\.)?freeze\s*\(\s*\{/.exec(src.slice(start));
+  if (!match) return null;
+  const open = start + match.index + match[0].lastIndexOf("{");
+  return { open, end: blockEnd(src, open) };
+}
+
 function classMembers(body) {
   const members = [];
   // class-level members sit at exactly two spaces of indentation; nested
@@ -369,12 +428,30 @@ function collectModule(file, cache) {
       entry.signature = `class ${name}${ext ? ` extends ${ext[1]}` : ""}`;
       entry.members = classMembers(src.slice(open + 1, end));
     } else {
+      // Frozen object exports are public namespaces. Their callable own
+      // properties are API members just like methods on an exported class.
+      const object = frozenObjectAt(src, after);
+      if (object) entry.members = frozenObjectMembers(src.slice(object.open + 1, object.end));
       const line = src.slice(after, src.indexOf("\n", after));
       let value = /^\s*=\s*(.*?);?\s*$/.exec(line)?.[1] ?? "";
       // a multi-line literal: show its opening with an ellipsis, balanced
       const opens = (value.match(/[({[]/g) ?? []).length - (value.match(/[)}\]]/g) ?? []).length;
       if (opens > 0) value = `${value}…${value.includes("({") ? "})" : value.endsWith("{") ? "}" : value.endsWith("[") ? "]" : ")"}`;
       entry.signature = `${name} = ${value.length > 72 ? `${value.slice(0, 69)}…` : value}`;
+    }
+    if (kind === "function") {
+      // A public factory may return a frozen protocol object. Expose its
+      // callable contract without coupling this collector to any library.
+      const paramsOpen = src.indexOf("(", after);
+      const paramsClose = paramsOpen + paramList(src.slice(paramsOpen), 0).length + 1;
+      const open = src.indexOf("{", paramsClose);
+      const end = blockEnd(src, open);
+      const functionBody = src.slice(open + 1, end);
+      const returned = /\breturn\s+(?:Object\.)?freeze\s*\(\s*\{/.exec(functionBody);
+      if (returned) {
+        const objectOpen = open + 1 + returned.index + returned[0].lastIndexOf("{");
+        entry.members = frozenObjectMembers(src.slice(objectOpen + 1, blockEnd(src, objectOpen)));
+      }
     }
     mod.exports.push(entry);
   }
@@ -828,6 +905,28 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   return { layers, executables, connectors };
 }
 
+/** Methods installed on another exported class prototype at a composition
+ * boundary (`Object.defineProperty(Env.prototype, "createAgent", …)`). */
+function installedPrototypeMembers(src) {
+  const members = [];
+  const re = /Object\.defineProperty\(([\w$]+)\.prototype,\s*["']([\w$]+)["'],\s*\{/g;
+  for (const m of src.matchAll(re)) {
+    const open = src.indexOf("{", m.index + m[0].length - 1);
+    const body = src.slice(open + 1, blockEnd(src, open));
+    const value = /\bvalue\s*\(([^)]*)\)\s*\{/.exec(body);
+    if (!value) continue;
+    members.push({
+      owner: m[1],
+      member: {
+        name: m[2], kind: "method", async: false,
+        signature: `${m[2]}(${compactParams(value[1])})`,
+        doc: docBefore(src, m.index),
+      },
+    });
+  }
+  return members;
+}
+
 /**
  * Collect the reference for a set of public modules (plus architecture,
  * contracts, and the auto-detected package tool catalog).
@@ -842,19 +941,30 @@ export async function collect(modules = PUBLIC_MODULES) {
   missing.push(...catalog.missing);
   const settingsSchema = await collectSettingsSchema();
   contracts.push(settingsSchema.contract);
+  const collectedModules = modules.map(({ name, file }) => {
+    const mod = collectModule(join(ROOT, file), cache);
+    return {
+      name, file, doc: mod.doc,
+      exports: mod.exports.map((e) => ({ ...e, from: e.from.startsWith(ROOT) ? e.from.slice(ROOT.length) : e.from })),
+    };
+  });
+  for (const { file } of modules) {
+    const sourceFile = join(ROOT, file);
+    for (const installed of installedPrototypeMembers(readFileSync(sourceFile, "utf8"))) {
+      const ownerModule = collectedModules.find((mod) => mod.exports.some((symbol) => symbol.kind === "class" && symbol.name === installed.owner));
+      const owner = ownerModule?.exports.find((symbol) => symbol.kind === "class" && symbol.name === installed.owner);
+      if (owner && !owner.members.some((member) => member.name === installed.member.name)) {
+        owner.members.push({ ...installed.member, from: sourceFile.startsWith(ROOT) ? sourceFile.slice(ROOT.length) : sourceFile });
+      }
+    }
+  }
   return {
     generated: new Date().toISOString().slice(0, 10),
     root: ".",
     architecture: collectArchitecture(modules),
     contracts,
     contractDrift: missing,
-    modules: modules.map(({ name, file }) => {
-      const mod = collectModule(join(ROOT, file), cache);
-      return {
-        name, file, doc: mod.doc,
-        exports: mod.exports.map((e) => ({ ...e, from: e.from.startsWith(ROOT) ? e.from.slice(ROOT.length) : e.from })),
-      };
-    }),
+    modules: collectedModules,
   };
 }
 
@@ -950,7 +1060,7 @@ export function contractProblems(data) {
     for (const e of m.exports) {
       if (!e.doc || !e.doc.description) missing.push(`${m.file}: ${e.name} (${e.from})`);
       for (const member of e.members ?? []) {
-        if (e.kind !== "namespace" && (!member.doc || !member.doc.description)) missing.push(`${m.file}: ${e.name}.${member.name} (${e.from})`);
+        if (!member.doc || !member.doc.description) missing.push(`${m.file}: ${e.name}.${member.name} (${e.from})`);
       }
     }
   }

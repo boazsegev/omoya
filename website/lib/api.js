@@ -25,12 +25,14 @@ export function buildApiLinks(data) {
   // ("onEvent") → same; a bare name shared by several modules is ambiguous
   // and resolves only through the scoped dotted form.
   const exact = new Map();
-  const bare = new Map();
+  const bareCandidates = new Map();
   const register = (path, slug, hash) => {
     exact.set(path, { slug, hash });
     const name = path.split(".").at(-1);
-    if (bare.has(name)) bare.set(name, null); // ambiguous: never bare-link
-    else bare.set(name, { slug, hash });
+    const key = `${slug}#${hash}`;
+    const candidates = bareCandidates.get(name) ?? new Map();
+    candidates.set(key, { slug, hash });
+    bareCandidates.set(name, candidates);
   };
   for (const mod of data.modules) {
     if (mod.name === "index") continue;
@@ -42,10 +44,13 @@ export function buildApiLinks(data) {
       const symbolPath = symbol.name === mod.name ? mod.name : `${mod.name}.${symbol.name}`;
       register(symbolPath, slug, symbol.name);
       for (const member of symbol.members ?? []) {
-        register(`${symbolPath}.${member.name}`, slug, member.name);
+        // Qualify every member anchor by its owning symbol. Multiple classes
+        // on one module page commonly share names such as close()/flush().
+        const anchor = `${symbol.name}-${member.name}`;
+        register(`${symbolPath}.${member.name}`, slug, anchor);
         // A member of the module's same-named class is addressable directly
         // as Module.member (Agent.onEvent for class Agent's method).
-        if (symbol.name === mod.name) register(`${mod.name}.${member.name}`, slug, member.name);
+        if (symbol.name === mod.name) register(`${mod.name}.${member.name}`, slug, anchor);
       }
     }
   }
@@ -54,9 +59,10 @@ export function buildApiLinks(data) {
      *  A dotted mention that matches nothing exactly falls back to its
      *  longest known PREFIX (`Agent.EVENT.START` → `Agent.EVENT`). */
     resolve(mention, moduleName) {
+      const bare = bareCandidates.get(mention);
       const direct = mention.includes(".")
         ? exact.get(`${moduleName}.${mention}`) ?? exact.get(mention)
-        : exact.get(`${moduleName}.${mention}`) ?? bare.get(mention);
+        : exact.get(`${moduleName}.${mention}`) ?? (bare?.size === 1 ? bare.values().next().value : null);
       if (direct) return direct;
       let prefix = mention;
       while (prefix.includes(".")) {
@@ -87,17 +93,20 @@ export function apiNavLinks(data) {
  * spans whose whole text is one identifier path (`onEvent`, `Env.onEvent`,
  * `Agent.SessionStore.append`): those are exactly the API-point mentions.
  * A span inside an existing <a> is left alone (lookahead up to the tag end).
- * Links are emitted root-relative ("/api/<slug>/#<anchor>"), matching the
- * built site's canonical paths.
+ * Links are relative to the current API page. Same-page references use only
+ * a fragment, avoiding a needless path reload and making the target explicit.
  */
 export function linkApiReferences(html, links, moduleName) {
   if (!links) return html;
   return String(html).replace(
-    /<code>([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*){0,3})<\/code>(?![^<]*<\/a>)/g,
-    (match, mention) => {
+    /<code>([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*){0,3})(\(\))?<\/code>(?![^<]*<\/a>)/g,
+    (match, mention, call) => {
       const target = links.resolve(mention, moduleName);
       if (!target) return match;
-      return `<a href="/api/${target.slug}/#${escapeHtml(target.hash)}"><code>${escapeHtml(mention)}</code></a>`;
+      const href = target.slug === slugOf(moduleName)
+        ? `#${escapeHtml(target.hash)}`
+        : `./${target.slug}/#${escapeHtml(target.hash)}`;
+      return `<a href="${href}"><code>${escapeHtml(mention)}${call ?? ""}</code></a>`;
     },
   );
 }
@@ -142,7 +151,8 @@ function modulePageBody(mod, links) {
     const members = (symbol.members ?? []).map((m) => {
       const count = seen.get(m.name) ?? 0;
       seen.set(m.name, count + 1);
-      return memberHtml(m, mod.name, links, count === 0 ? m.name : `${m.name}-${count}`);
+      const base = `${symbol.name}-${m.name}`;
+      return memberHtml(m, mod.name, links, count === 0 ? base : `${base}-${count}`);
     }).join("\n");
     return `${symbolHtml(symbol, mod.name, links)}${members}`;
   }).join("\n");
@@ -156,9 +166,9 @@ ${exports || "<p>This module is a namespace wrapper; its surface is documented o
 function overviewBody(data) {
   return `<p class="eyebrow">GENERATED FROM THE CURRENT SOURCE TREE · ${escapeHtml(data.generated)}</p>
 <h1>API reference</h1>
-<p class="lede">Every page in this section is generated at build time from the package's public modules, their JSDoc contracts, live tool schemas, and real import edges — never from copied prose. Pick a module below, or browse <a href="./architecture">architecture</a>, <a href="./contracts">contracts</a>, the <a href="./tools">tool catalog</a>, and the <a href="./settings">settings schema</a>.</p>
+<p class="lede">Every page in this section is generated at build time from the package's public modules, their JSDoc contracts, live tool schemas, and real import edges — never from copied prose. Pick a module below, or browse <a href="./architecture/">architecture</a>, <a href="./contracts/">contracts</a>, the <a href="./tools/">tool catalog</a>, and the <a href="./settings/">settings schema</a>.</p>
 <div class="grid">
-${data.modules.map((m) => `  <article><h3><a href="./${slugOf(m.name)}">${escapeHtml(m.name)}</a></h3><p><code>${escapeHtml(m.file)}</code></p><p>${escapeHtml(firstSentence(m.doc))}</p></article>`).join("\n")}
+${data.modules.map((m) => `  <article><h3><a href="./${slugOf(m.name)}/">${escapeHtml(m.name)}</a></h3><p><code>${escapeHtml(m.file)}</code></p><p>${escapeHtml(firstSentence(m.doc))}</p></article>`).join("\n")}
 </div>`;
 }
 
@@ -172,8 +182,8 @@ function firstSentence(text) {
 /** /api/architecture/ — layers, import edges, helper groups, executables, IO modes. */
 function architectureBody(arch) {
   const layers = arch.layers.map((layer) => `<section class="arch-layer" id="${escapeHtml(slugOf(layer.name))}">
-  <h3><a href="./${slugOf(layer.name)}">${escapeHtml(layer.name)}</a> <code>${escapeHtml(layer.file)}</code></h3>
-  ${layer.publicDependencies.length ? `<p>Depends on: ${layer.publicDependencies.map((d) => `<a href="./${slugOf(d)}">${escapeHtml(d)}</a>`).join(", ")}</p>` : "<p>Depends on no other public module.</p>"}
+  <h3><a href="../${slugOf(layer.name)}/">${escapeHtml(layer.name)}</a> <code>${escapeHtml(layer.file)}</code></h3>
+  ${layer.publicDependencies.length ? `<p>Depends on: ${layer.publicDependencies.map((d) => `<a href="../${slugOf(d)}/">${escapeHtml(d)}</a>`).join(", ")}</p>` : "<p>Depends on no other public module.</p>"}
   ${layer.helperGroups.map((g) => `<p class="helper">Owns <code>${escapeHtml(g.path)}/</code> (${g.files.length} files${g.label ? ` — ${escapeHtml(g.label)}` : ""})</p>`).join("\n  ")}
 </section>`).join("\n");
   const executables = arch.executables.filter((e) => e.doc).map((e) =>

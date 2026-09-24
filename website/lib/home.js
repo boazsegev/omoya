@@ -15,17 +15,17 @@ const FEATURES = [
   {
     title: "Drive it from a script",
     body: "om-agent runs the complete tool loop without the TUI: one context in on stdin, normalized JSONL events out on stdout, diagnostics on stderr. om-io performs exactly one provider request — stable streams, distinct exit codes, real cancellation.",
-    code: 'echo "Summarize this project" \\\n  | om-agent --model ollama/gpt-oss:20b',
+    code: 'echo "Summarize this" \\\n  | om-agent \\\n    --model ollama/gpt-oss:20b',
   },
   {
     title: "Embed the library",
     body: "lib/agent.js is the headless core entry point, publishing Agent.Context, Agent.Env, and Agent.IO. Import omoya/app when CLI, Markdown, and UI concerns are needed — headless applications stay free of the interface graph.",
-    code: 'import Agent from "omoya/agent";\nconst env = await Agent.Env.create();\nconst agent = new Agent({ env, model: "ollama/gpt-oss:20b" });',
+    code: 'import Agent from "omoya/agent";\n\nconst env = await Agent.Env.create();\nconst agent = new Agent({\n  env, model: "ollama/gpt-oss:20b"\n});',
   },
   {
     title: "Serve it to a browser",
     body: "om --serve starts a standalone chat SPA over HTTP with a WebSocket carrying the same Agent/Env events used everywhere else. The server owns the agent; the browser only renders it. Loopback-bound by default.",
-    code: "om --serve --port 9900",
+    code: "om --serve \\\n  --port 9900",
   },
   {
     title: "Sessions that outlive the UI",
@@ -35,7 +35,7 @@ const FEATURES = [
   {
     title: "Project jobs, under your control",
     body: "om-jobs runs project-local Markdown tasks by explicit init/run/disable. Manual run is primary; an optional daemon scans immediately and then five minutes after each child completes. Cron and restart policy stay yours: use an explicit runtime, wrapper, and project cwd.",
-    code: "om-jobs init\nom-jobs run\nom-jobs daemon foreground",
+    code: "om-jobs init\nom-jobs run\nom-jobs daemon \\\n  foreground",
   },
 ];
 
@@ -52,8 +52,13 @@ export function homePage() {
     description: site.description,
     path: "/",
     body: `<section class="hero">
-  <p class="eyebrow">TRANSPARENT BUN AGENT HARNESS</p>
-  <h1>See what your agent sees.</h1>
+  <div class="hero-brand">
+    <img src="./assets/logo.svg" width="160" height="160" alt="">
+    <div>
+      <p class="eyebrow">TRANSPARENT BUN AGENT HARNESS</p>
+      <h1><span class="product-name">Omoya</span><span class="hero-claim">See what your agent sees.</span></h1>
+    </div>
+  </div>
   <p class="lede">Omoya puts the whole agent loop in your hands — model selection, system instructions, context, tools, sessions, and security policy. Work in the terminal, stream structured events through a headless process, or embed the Bun library in your own project.</p>
   <div class="actions"><a class="button" href="https://www.npmjs.com/package/omoya">Install from npm</a><a class="text-link" href="${site.repository}">View the source on GitHub →</a></div>
   <pre><code>bun add -g omoya

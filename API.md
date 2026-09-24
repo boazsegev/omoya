@@ -1,4 +1,4 @@
-# API (2026-09-23)
+# API (2026-09-24)
 
 ## Markdown
 
@@ -505,6 +505,10 @@ Wrap a program invocation in the OS write sandbox: the [file, argv] to spawn (th
 ### `Env.callTool(name, args, context)`
 
 Exact flattened lookup + invoke.
+
+### `Env.createAgent(options = {…})`
+
+Convenience Agent factory, creating an agent attached to this `Env` instance.
 
 ### `Env.deepMerge(a, b)`
 
@@ -1530,17 +1534,193 @@ Create the piped, cooked-mode front end; one input message per line.
 
 Immutable constructors for renderable view nodes.
 
+### `GTUI.view.text(props = {…}, content = "")`
+
+Create immutable text content.
+
+### `GTUI.view.table(props = {…}, rows = [])`
+
+Create an immutable table with frozen rows and cells.
+
+### `GTUI.view.feed(props = {…})`
+
+Create an immutable feed control.
+
+### `GTUI.view.input(props = {…})`
+
+Create an immutable text input control.
+
+### `GTUI.view.menu(props = {…})`
+
+Create an immutable menu control.
+
+### `GTUI.view.row(...)`
+
+Create an immutable horizontal container.
+
+### `GTUI.view.column(...)`
+
+Create an immutable vertical container.
+
+### `GTUI.view.grid(...)`
+
+Create an immutable grid container.
+
+### `GTUI.view.panel(...)`
+
+Create an immutable bordered panel.
+
+### `GTUI.view.scroll(...)`
+
+Create an immutable scroll container.
+
+### `GTUI.view.overlay(...)`
+
+Create an immutable overlay container.
+
 ### `GTUI.effect = freeze({…})`
 
 Immutable constructors for host, task, timer, theme, and lifecycle effects.
+
+### `GTUI.effect.task(key, run)`
+
+Run an abortable asynchronous task.
+
+### `GTUI.effect.cancel(key)`
+
+Cancel the task for a key.
+
+### `GTUI.effect.after(ms, message)`
+
+Deliver a message after a delay.
+
+### `GTUI.effect.copy(text, id)`
+
+Copy text through the host.
+
+### `GTUI.effect.open(url)`
+
+Ask the host to open a URL.
+
+### `GTUI.effect.notify(text)`
+
+Ask the host to show a notification.
+
+### `GTUI.effect.theme(tokens)`
+
+Replace theme tokens.
+
+### `GTUI.effect.refresh()`
+
+Request a render without changing the model.
+
+### `GTUI.effect.quit(code = 0)`
+
+End the application with a status code.
 
 ### `GTUI.event = freeze({…})`
 
 Immutable constructors for messages delivered to an application update function.
 
+### `GTUI.event.key(payload)`
+
+Create a key event.
+
+### `GTUI.event.paste(payload)`
+
+Create a paste event.
+
+### `GTUI.event.pointer(payload)`
+
+Create a pointer event.
+
+### `GTUI.event.resize(payload)`
+
+Create a resize event.
+
+### `GTUI.event.focus(payload)`
+
+Create a focus event.
+
+### `GTUI.event.inputChange(payload)`
+
+Create an input-change event.
+
+### `GTUI.event.inputSubmit(payload)`
+
+Create an input-submit event.
+
+### `GTUI.event.menuSelect(payload)`
+
+Create a menu-selection event.
+
+### `GTUI.event.menuCancel(payload = {…})`
+
+Create a menu-cancel event.
+
+### `GTUI.event.selectionCopy(payload)`
+
+Create a selection-copy event.
+
+### `GTUI.event.linkOpen(payload)`
+
+Create a link-open event.
+
+### `GTUI.event.taskDone(payload)`
+
+Create a completed-task event.
+
+### `GTUI.event.taskFailed(payload)`
+
+Create a failed-task event.
+
+### `GTUI.event.copyDone(payload)`
+
+Create a completed-copy event.
+
 ### `GTUI.memory({ width = 80, height = 24, scrollBar } = {…})`
 
 Create an in-memory host for application tests.
+
+### `GTUI.memory.send(message)`
+
+Send a host input message to the mounted application.
+
+### `GTUI.memory.flush()`
+
+Finish pending host output; memory hosts have nothing to flush.
+
+### `GTUI.memory.snapshot()`
+
+Return the current rendered scene in semantic, testable form.
+
+### `GTUI.memory.get effects()`
+
+Recorded effects, copied so callers cannot mutate host state.
+
+### `GTUI.memory.get restoreCount()`
+
+Number of completed host restoration cycles.
+
+### `GTUI.memory._start(listener, binding)`
+
+Start the runtime-to-host message protocol.
+
+### `GTUI.memory._render(next)`
+
+Render a view through the in-memory layout engine.
+
+### `GTUI.memory._setTheme(theme)`
+
+Install the resolved theme for subsequent layouts.
+
+### `GTUI.memory._effect(value, send)`
+
+Record an effect and acknowledge copy effects asynchronously.
+
+### `GTUI.memory._restore()`
+
+Clear runtime callbacks and record host restoration.
 
 ### `GTUI.terminal(options = {…})`
 
@@ -1562,9 +1742,17 @@ Stop the application, canceling tasks and timers and restoring the host.
 
 Start an application and return its eventual completion result.
 
-### `GTUI.host = freeze({ memory, terminal })`
+### `GTUI.host = freeze({…})`
 
 Host constructors for tests and terminal execution.
+
+### `GTUI.host.memory(...)`
+
+Create a memory host for deterministic application tests.
+
+### `GTUI.host.terminal(...)`
+
+Create a terminal host for interactive execution.
 
 ### `GTUI.scrollGlyph(value, fallback)`
 
