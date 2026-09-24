@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { Env } from "../lib/env.js";
 import { NAMES } from "../lib/namespace.js";
-import { mcp } from "../tools/mcp.js";
+import { callMcp, mcp } from "../tools/mcp.js";
 
 const SERVER = "./test/fixtures/mcp-server.js";
 const ENV_PREFIX = NAMES.NAMESPACE;
@@ -57,6 +57,12 @@ describe("the mcp tool", () => {
     const { context } = await fixtureContext();
     await expect(mcp({ action: "call", server: "fixture", tool: "fail" }, context))
       .rejects.toThrow(/^Fix the remote tool arguments/);
+    try {
+      await callMcp({ server: "fixture", tool: "fail" }, context);
+      throw new Error("expected callMcp failure");
+    } catch (error) {
+      expect(error.mcpDetail).toBe("the fixture failed on purpose");
+    }
     await expect(mcp({ action: "call", server: "nope", tool: "x" }, context))
       .rejects.toThrow(/^Choose a server listed by servers/);
     await expect(mcp({ action: "tools", server: "nope" }, context))

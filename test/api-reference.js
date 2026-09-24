@@ -161,7 +161,7 @@ const CONTRACTS = [
   {
     name: "Endpoint/auth entity",
     sources: [
-      { file: "lib/env.js", members: { class: "Env", names: ["endpointSettings", "authSet", "saveEndpoint"] } },
+      { file: "lib/env.js", members: { class: "Env", names: ["endpointSettings", "refreshEndpointSettings", "authSet", "saveEndpoint"] } },
       { file: "settings.json", example: true },
     ],
   },
@@ -695,7 +695,9 @@ export async function collectToolCatalog(dir = join(ROOT, "tools")) {
       continue;
     }
     for (const [tool, schema] of Object.entries(described ?? {})) {
-      if (typeof mod[tool] !== "function") continue; // described but not exported: the scan ignores it too
+      // the same acceptance the tool scan applies: a static export, or a
+      // schema-carried fn (tools/web.js's web-search/web-fetch pattern)
+      if (typeof mod[tool] !== "function" && typeof schema?.fn !== "function") continue;
       if (typeof schema?.description !== "string" || schema.description === "") {
         missing.push(`tools/${name}: "${tool}" has no description`);
       }
@@ -933,14 +935,30 @@ function installedPrototypeMembers(src) {
  * @param {Array<{name: string, file: string}>} modules
  * @returns {Promise<{generated: string, root: string, architecture: object, contracts: Array, contractDrift: string[], modules: Array}>} the JSON document
  */
+/** The one alphabetical order every generated API artifact shares:
+ *  case-insensitive by name, so API.md, API-schema.md, and the website
+ *  pages/nav/search all present the same A–Z listing regardless of the
+ *  source files' declaration order. */
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+
 export async function collect(modules = PUBLIC_MODULES) {
   const cache = new Map();
   const { contracts, missing } = collectContracts(cache);
   const catalog = await collectToolCatalog();
+  // Every presented list is alphabetical: declaration order in a source
+  // file is no order at all for a reference. (Contract SOURCES keep
+  // their specified narrative order — PUBLISHES → REQUIRES → RETURNS.)
+  catalog.contract.tools.sort(byName);
   contracts.push(catalog.contract);
   missing.push(...catalog.missing);
   const settingsSchema = await collectSettingsSchema();
   contracts.push(settingsSchema.contract);
+  contracts.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  for (const contract of contracts) {
+    for (const source of contract.sources ?? []) {
+      if (source.typedefs) source.typedefs = [...source.typedefs].sort(byName);
+    }
+  }
   const collectedModules = modules.map(({ name, file }) => {
     const mod = collectModule(join(ROOT, file), cache);
     return {
@@ -958,6 +976,11 @@ export async function collect(modules = PUBLIC_MODULES) {
       }
     }
   }
+  for (const mod of collectedModules) {
+    mod.exports.sort(byName);
+    for (const symbol of mod.exports) symbol.members?.sort(byName);
+  }
+  collectedModules.sort(byName);
   return {
     generated: new Date().toISOString().slice(0, 10),
     root: ".",

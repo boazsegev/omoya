@@ -321,6 +321,59 @@ describe("secret endpoints and models", () => {
   });
 });
 
+describe("Env.refreshEndpointSettings (multi-process auth rotation)", () => {
+  test("a changed auth file merges over the stale in-memory record", () => {
+    const env = new Env({ dir, cwd: dir, settingsDir: dir });
+    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
+    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
+    expect(env.endpointSettings("acme").auth.token).toBe("old-token");
+    // another process rotates the token on disk (its own auth file write)
+    writeFileSync(join(dir, "auth-acme.json"), JSON.stringify({
+      acme: { auth: { type: "token", token: "new-token" } },
+    }));
+    const section = env.refreshEndpointSettings("acme");
+    expect(section.auth.token).toBe("new-token");
+    expect(env.endpointSettings("acme").auth.token).toBe("new-token");
+    expect(env.endpointSettings("acme").url).toBe("http://x"); // connection config survives
+  });
+
+  test("the settings.json providers entry's auth section is re-read too", () => {
+    const env = new Env({ dir, cwd: dir, settingsDir: dir });
+    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
+    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
+    // another process wrote BOTH files (saveEndpoint + authSet)
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({
+      providers: { acme: { provider: "ollama", url: "http://x" } },
+      acme: { auth: { type: "token", token: "newer-token" } },
+    }));
+    writeFileSync(join(dir, "auth-acme.json"), JSON.stringify({
+      acme: { auth: { type: "token", token: "new-token" } },
+    }));
+    const section = env.refreshEndpointSettings("acme");
+    // the settings file's own section wins over the auth file (layer order)
+    expect(section.auth.token).toBe("newer-token");
+  });
+
+  test("a vanished auth file is a no-op, never a settings drop", () => {
+    const env = new Env({ dir, cwd: dir, settingsDir: dir });
+    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
+    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
+    rmSync(join(dir, "auth-acme.json"));
+    const section = env.refreshEndpointSettings("acme");
+    expect(section.auth.token).toBe("old-token"); // live settings survive
+    expect(env.endpointSettings("acme").url).toBe("http://x");
+  });
+
+  test("a dynamic (environment-detected) endpoint has nothing to re-read", () => {
+    const env = new Env({ dir, cwd: dir, settingsDir: dir });
+    env.endpoints.dyn = { provider: "ollama", url: "http://x" };
+    env._dynamicEndpoints.add("dyn");
+    env._mergeAuthInMemory("dyn", { auth: { type: "token", token: "env-token" } });
+    const section = env.refreshEndpointSettings("dyn");
+    expect(section.auth.token).toBe("env-token"); // unchanged, no disk read
+  });
+});
+
 describe("Env.removeEndpoint (logout)", () => {
   test("a configured endpoint: settings.json entry and auth file go, memory forgets", async () => {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({

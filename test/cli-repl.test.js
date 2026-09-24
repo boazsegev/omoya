@@ -209,16 +209,35 @@ describe("the TUI REPL: one long-lived Agent across turns", () => {
     expect(requests[0].model).toBe("first-model"); // live discovery reached the wire
   });
 
-  test("no --model restores the last-used combo", async () => {
-    writeFileSync(`${SPAWN_SETTINGS}/last-model.json`, JSON.stringify({ model: "ollama/last-m" }) + "\n");
+  test("--url without --model never restores last-model (no configuration, no memory)", async () => {
+    // A stored combo for an UNCONFIGURED endpoint is no selection: last-model
+    // memory belongs to configured endpoints only, so the REPL starts
+    // model-less even with --url pointing at a live server.
+    writeFileSync(`${SPAWN_SETTINGS}/last-model.json`, JSON.stringify({ endpoint: "ollama", model: "last-m" }) + "\n");
     const { requests, url } = scriptServer(["answer"], { models: [{ name: "m" }] });
     const { stderr, exit } = await runRepl({
       input: "question\n",
       args: ["--url", url, "--session", "0"],
       settingsDir: SPAWN_SETTINGS, // the test seeds last-model.json here
     });
-    expect(requests[0].model).toBe("last-m");
+    expect(exit).toBe(0);
+    expect(stderr).toContain("Please load a model");
+    expect(stderr).not.toContain("(last used)");
+    expect(requests).toHaveLength(0); // nothing reached the provider
     // (last-model.json lives in the per-test SPAWN_SETTINGS now)
+  });
+
+  test("--model with --url selects the invocation-only endpoint combo", async () => {
+    writeFileSync(`${SPAWN_SETTINGS}/last-model.json`, JSON.stringify({ endpoint: "ollama", model: "last-m" }) + "\n");
+    const { requests, url } = scriptServer(["answer"], { models: [{ name: "m" }] });
+    const { exit } = await runRepl({
+      input: "question\n",
+      args: ["--model", "ollama/m", "--url", url, "--session", "0"],
+      settingsDir: SPAWN_SETTINGS,
+    });
+    expect(exit).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].model).toBe("m"); // the explicit selection reached the wire
   });
 });
 

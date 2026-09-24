@@ -92,7 +92,7 @@ Both accept structured context as JSON or JSONL; plain input becomes a user mess
 
 ### Serve it to a browser
 
-`om --serve` starts a standalone chat SPA over HTTP with a WebSocket carrying the same Agent/Env events used everywhere else — the server owns the Agent, the browser only renders it.
+`om --serve` starts a standalone chat SPA over HTTP with a WebSocket carrying the same Agent/Env events used everywhere else — the server owns the Agent, the browser only renders it. Closing or reloading the browser detaches that view only: active agents and their workers continue running until they finish, are cancelled, or the web server stops; reconnect to view their retained state.
 
 ```sh
 om --serve --port 9900 --host 127.0.0.1
@@ -141,6 +141,16 @@ Named sessions persist as JSONL under the user settings directory, outside the w
 
 The terminal interface is built in-process on the same agent and context layers used by scripts, with streaming Markdown, expandable tool and thinking blocks, menus, questionnaires, and session-aware background work.
 
+### Web search and fetch
+
+`web-search` and `web-fetch` are the built-in internet tools. Every call resolves through a fixed priority order:
+
+1. the **provider's own web backend**, when the connected provider offers one (disable it with `settings.web.provider: false`)
+2. an **MCP server** mapped by `settings.web.mcp` (`server`, `searchTool`/`fetchTool`, `shadow`) — MCP errors fall through with a diagnostic note
+3. the **package backend**, which needs no account
+
+The search package backend tries any configured **SearXNG** instances first — `SEARXNG_URL`/`SEARXNG_BASE` (or `web.search.backends`) is auto-detected the same way local provider servers are — then aggregates the enabled engines (**DuckDuckGo** and **Mojeek** by default, **Brave** when `BRAVE_API_KEY` is set, plus optional **Swisscows**) with rank fusion across engines, de-duplication, and tracking-parameter removal. `web-fetch` converts pages to Markdown (using the optional `@mozilla/readability` when installed, else the built-in converter), returning text and JSON bodies as-is. Both are bounded: result/output caps, redirects, timeouts, burst and rolling rate limits, and short-lived caches; `settings.web.debug: true` prefixes the taken code path to the result.
+
 ## Filesystem security
 
 Omoya treats the **current working folder as the agent's root**, enforced in layers rather than by prompt instructions alone.
@@ -154,7 +164,7 @@ Omoya treats the **current working folder as the agent's root**, enforced in lay
 - With no supported sandbox available, the agent **forces safe mode**: only read-only tools are published. This cannot be disabled.
 - `--safe` at any time publishes and executes read-only tools only; unsafe calls are refused, not hidden.
 - Tool schemas exclude harness security metadata; operator-only secret tools are never published to models.
-- Project settings cannot add executable tool roots, provider code, or MCP server commands — those come only from the package, user settings, or administrator-controlled roots.
+- Project settings cannot add executable tool roots, provider code, or MCP server commands — those come only from the package or the user settings folder.
 - Session logs live outside the project tree, so cwd-scoped file tools cannot rewrite their own history.
 - A configured refusal list strips sensitive environment variables from tool child processes.
 
@@ -178,7 +188,7 @@ Configuration is layered; later layers override earlier ones, same-named skills 
 
 1. package settings, providers, tools, skills, prompts
 2. the user settings directory (`$<NS>_SETTINGS_DIR`, normally `~/.<ns>-settings`)
-3. optional environment-selected skill and prompt roots, plus the administrator-controlled system tool root
+3. optional environment-selected skill and prompt roots
 4. the project folder — only its `ai-settings.json`, `ai-auth-*.json`, `ai-skills/`, `ai-prompts/`
 
 `lib/namespace.js` is the single switch for runtime identity: env vars (`<NS>`), the settings folder (`<ns>`), and every `bin/` executable. `bin/scripts/rename` rewrites it and regenerates all wrappers plus `package.json`'s `bin`/`name` fields in one step. The project-local `ai-` prefix is the one exception — deliberately constant across renames.
@@ -195,6 +205,39 @@ Configuration is layered; later layers override earlier ones, same-named skills 
 | `timeout` / `toolTimeout` | Provider and tool execution limits |
 
 Write a documented project settings template with `./bin/om --init`. Command-line tokens apply only to that invocation and are never persisted.
+
+## Environment variables
+
+The harness reads a small set of environment variables. `OMOYA_*` names are namespace-derived (`lib/namespace.js` — `OMOYA_`/`omoya` become `<NS>_`/`<ns>` when the package is renamed); the plain `AI_*` settings names are the legacy spellings, still honored.
+
+**Configuration and discovery:**
+
+| variable | effect |
+|---|---|
+| `OMOYA_SETTINGS_DIR` / `OMOYA_SETTINGS` / `AI_SETTINGS_DIR` / `AI_SETTINGS` | Override the user settings folder (first non-empty wins; created when missing). Without one, an existing `~/.ai-settings` legacy home is used, else the namespace home. |
+| `OMOYA_SKILLS_DIR` | Delimiter-separated extra skill roots, scanned after the package and settings layers. |
+| `OMOYA_PROMPTS_DIR` | Delimiter-separated extra prompt roots, accumulated the same way. |
+| `OMOYA_OS_SANDBOX` | Set to `none` to disable the OS write-sandbox probe (the Agent then forces safe mode). Intended for tests and restricted hosts. |
+
+**Endpoint auto-detection.** At startup every loaded provider may probe the process environment and the local network for endpoints (`Env.detectEndpoints()`). Discoveries are DYNAMIC: they live in memory only — never persisted, re-detected every startup, and a key or server removed from the environment leaves nothing behind. An endpoint already configured in settings always wins.
+
+| variable | detected endpoint |
+|---|---|
+| `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`) | `openai` (OpenAI Responses) |
+| `AZURE_OPENAI_API_KEY` (+ required `AZURE_OPENAI_BASE_URL`) | `azure-openai` (OpenAI Responses) |
+| `XAI_API_KEY` | `xai` (OpenAI Responses) |
+| `MOONSHOT_API_KEY` (+ optional `MOONSHOT_BASE_URL`) | `kimi` (Moonshot platform) |
+| `KIMI_API_KEY` | `kimi-coding` (Kimi for Coding relay) |
+| `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) (+ optional `ANTHROPIC_BASE_URL`) | `anthropic` (Anthropic Messages) |
+
+Local servers are probed on their well-known ports — no variables needed:
+
+| probe | detected endpoint |
+|---|---|
+| `http://localhost:11434` (Ollama `/api/tags`) | `ollama` |
+| `http://localhost:1234/v1` (LM Studio `/models`) | `lm-studio` (OpenAI-compatible) |
+
+The `web-search` tool also reads `SEARXNG_URL` / `SEARXNG_BASE` (a SearXNG backend — point one at a local instance to search without any API key) and `BRAVE_API_KEY` (the Brave Search API credential for the default `brave-api` engine). See [Web search and fetch](#web-search-and-fetch).
 
 ## Project jobs
 

@@ -5,12 +5,16 @@
     },
     {
       "toolCall": {
-        "name": "note-set",
+        "name": "note",
         "arguments": {
-          "title": "UI tour",
-          "type": "todo",
-          "summary": "Demonstrate notes",
-          "content": "This temporary note demonstrates note creation and updates."
+          "action": "set",
+          "notes": {
+            "UI tour": {
+              "type": "todo",
+              "summary": "Demonstrate notes",
+              "content": "This temporary note demonstrates note creation and updates."
+            }
+          }
         }
       }
     }
@@ -18,14 +22,16 @@
   [
     {
       "toolCall": {
-        "name": "note-get",
+        "name": "note",
         "arguments": {
-          "title": "UI tour",
+          "action": "get",
+          "notes": [
+            "UI tour"
+          ],
           "only": [
             "summary",
             "content"
-          ],
-          "keys": false
+          ]
         }
       }
     }
@@ -33,11 +39,14 @@
   [
     {
       "toolCall": {
-        "name": "note-done",
+        "name": "note",
         "arguments": {
-          "notes": [
-            "UI tour"
-          ]
+          "action": "set",
+          "notes": {
+            "UI tour": {
+              "type": "done"
+            }
+          }
         }
       }
     }

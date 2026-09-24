@@ -766,11 +766,117 @@ async function login(input = {}) {
   return auth;
 }
 
+/* --------------------------------------------------- web capabilities */
+
+/**
+ * The settings gate every server-side web capability checks first:
+ * `web.provider === false` opts OUT of provider web backends (the
+ * caller then falls through to MCP/package routing). App-level
+ * settings live on the ENV (aiio.settings is only the endpoint's
+ * namespaced view), so the handler reads aiio.env.settings.
+ */
+function providerWebDisabled(aiio) {
+  return aiio?.env?.settings?.web?.provider === false;
+}
+
+/**
+ * Anthropic hosts the server tools ONLY on its own API. Third-party
+ * /messages routes (DeepSeek, Z.ai, MiniMax) have no web_search /
+ * web_fetch server blocks — an unsupported endpoint answers undefined
+ * (honest fall-through), never a request that could only 400. The
+ * handler receives the IO instance: its `url` IS the endpoint's base
+ * URL (the /messages suffix lives on the provider CONNECTION, which
+ * the capability contract does not pass).
+ */
+function anthropicHosted(aiio) {
+  return String(aiio?.url ?? "").replace(/\/$/, "") === ANTHROPIC_URL;
+}
+
+/**
+ * One server-tool request against POST {baseUrl}/messages: a single
+ * tight user prompt plus the documented tool block, non-streaming.
+ * The returned Markdown is the concatenation of the response's text
+ * content blocks. A rejected request (4xx/5xx) THROWS with the status
+ * — the Agent wraps it as a failure and dispatch falls through; the
+ * result is never fabricated.
+ */
+async function serverToolRequest(aiio, tool, prompt, { signal, deadline }) {
+  const settings = aiio?.settings ?? {};
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener?.("abort", onAbort, { once: true });
+  let timer;
+  if (Number.isFinite(deadline)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
+    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
+    timer?.unref?.();
+  }
+  try {
+    const response = await fetch(`${String(aiio.url).replace(/\/$/, "")}/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authHeaders(settings.auth) },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: aiio.currentModel,
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+        tools: [tool],
+      }),
+    });
+    if (!response.ok) throw await statusError(response);
+    const body = await response.json();
+    return (body?.content ?? [])
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+  }
+}
+
+/** The documented web_search server tool (docs.claude.com, verified
+ *  2026-09-22): type "web_search_20250305", name "web_search",
+ *  max_uses caps the server's searches per request. */
+const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_uses: 3 };
+/** The documented web_fetch server tool: type "web_fetch_20250910",
+ *  name "web_fetch", max_uses caps the server's fetches. */
+const WEB_FETCH_TOOL = { type: "web_fetch_20250910", name: "web_fetch", max_uses: 1 };
+
 /** Anthropic Messages protocol. */
 export default class AnthropicProvider {
   static provider = {
     label: "Anthropic (Claude)",
-    capabilities: { tools: true, thinking: true, streaming: true },
+    capabilities: {
+      tools: true,
+      thinking: true,
+      streaming: true,
+      "web-search": async function ({ aiio, args, signal, deadline }) {
+        if (providerWebDisabled(aiio)) return undefined;
+        // server tools are NOT available on a Claude subscription
+        // (OAuth) token — fall through honestly instead of sending a
+        // request the endpoint must reject
+        if (isSubscription(aiio?.settings?.auth)) return undefined;
+        if (!anthropicHosted(aiio)) return undefined;
+        const query = String(args?.query ?? "").trim();
+        if (query === "") return undefined;
+        return serverToolRequest(aiio, WEB_SEARCH_TOOL,
+          `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet from the page.`,
+          { signal, deadline });
+      },
+      "web-fetch": async function ({ aiio, args, signal, deadline }) {
+        if (providerWebDisabled(aiio)) return undefined;
+        if (isSubscription(aiio?.settings?.auth)) return undefined;
+        if (!anthropicHosted(aiio)) return undefined;
+        const url = String(args?.url ?? "").trim();
+        if (url === "") return undefined;
+        return serverToolRequest(aiio, WEB_FETCH_TOOL,
+          `Fetch ${url} and answer with the page's main content as clean Markdown, preserving its headings and links.`,
+          { signal, deadline });
+      },
+    },
   };
 
   /** Endpoints speaking this dialect (login wizard presets). The

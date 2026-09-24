@@ -43,7 +43,14 @@ describe("anthropic provider: construction and metadata", () => {
       expect(typeof connection[method], method).toBe("function");
     }
     expect(typeof Protocol.provider.label).toBe("string"); // the label text is content
-    expect(Protocol.provider.capabilities).toEqual({ tools: true, thinking: true, streaming: true });
+    // flags stay boolean; the proven server web tools join the surface
+    expect(Protocol.provider.capabilities).toEqual({
+      tools: true,
+      thinking: true,
+      streaming: true,
+      "web-search": expect.any(Function),
+      "web-fetch": expect.any(Function),
+    });
   });
 
   test("knownEndpoints: Anthropic (registry + offline models) and message-verified compatible routes", () => {

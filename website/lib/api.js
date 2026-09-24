@@ -93,8 +93,9 @@ export function apiNavLinks(data) {
  * spans whose whole text is one identifier path (`onEvent`, `Env.onEvent`,
  * `Agent.SessionStore.append`): those are exactly the API-point mentions.
  * A span inside an existing <a> is left alone (lookahead up to the tag end).
- * Links are relative to the current API page. Same-page references use only
- * a fragment, avoiding a needless path reload and making the target explicit.
+ * Links are root-relative: pages deploy as extensionless clean URLs
+ * (`/api/env`), where relative `./env/` would resolve to `/env` — outside
+ * the API tree. Same-page references use only a fragment.
  */
 export function linkApiReferences(html, links, moduleName) {
   if (!links) return html;
@@ -105,7 +106,7 @@ export function linkApiReferences(html, links, moduleName) {
       if (!target) return match;
       const href = target.slug === slugOf(moduleName)
         ? `#${escapeHtml(target.hash)}`
-        : `./${target.slug}/#${escapeHtml(target.hash)}`;
+        : `/api/${target.slug}/#${escapeHtml(target.hash)}`;
       return `<a href="${href}"><code>${escapeHtml(mention)}${call ?? ""}</code></a>`;
     },
   );
@@ -142,18 +143,25 @@ function memberHtml(member, moduleName, links, anchor = member.name) {
 </section>`;
 }
 
+/** The exports/members of a module, in render order, shared by the page body
+ *  and the sidebar section list so anchors can never drift apart. */
+function moduleAnchors(symbol) {
+  const seen = new Map();
+  return (symbol.members ?? []).map((m) => {
+    const count = seen.get(m.name) ?? 0;
+    seen.set(m.name, count + 1);
+    const base = `${symbol.name}-${m.name}`;
+    return { member: m, anchor: count === 0 ? base : `${base}-${count}` };
+  });
+}
+
 /** A whole public module page: module doc, then every export with members. */
 function modulePageBody(mod, links) {
   const exports = mod.exports.map((symbol) => {
     // get/set pairs collect as two same-named members; one anchor can only
     // ever carry one target, so the later blocks get a suffixed id
-    const seen = new Map();
-    const members = (symbol.members ?? []).map((m) => {
-      const count = seen.get(m.name) ?? 0;
-      seen.set(m.name, count + 1);
-      const base = `${symbol.name}-${m.name}`;
-      return memberHtml(m, mod.name, links, count === 0 ? base : `${base}-${count}`);
-    }).join("\n");
+    const members = moduleAnchors(symbol)
+      .map(({ member, anchor }) => memberHtml(member, mod.name, links, anchor)).join("\n");
     return `${symbolHtml(symbol, mod.name, links)}${members}`;
   }).join("\n");
   return `<p class="eyebrow">PUBLIC MODULE · <code>${escapeHtml(mod.file)}</code></p>
@@ -162,13 +170,15 @@ ${mod.doc ? linkApiReferences(markdownHtml(mod.doc), links, mod.name) : ""}
 ${exports || "<p>This module is a namespace wrapper; its surface is documented on the individual module pages it re-exports.</p>"}`;
 }
 
+const moduleCard = (href, name, file, blurb) => `  <a class="card" href="${href}"><article><h3>${escapeHtml(name)}</h3><p><code>${escapeHtml(file)}</code></p><p>${escapeHtml(blurb)}</p></article></a>`;
+
 /** /api/ overview: what the reference is, plus the module index cards. */
 function overviewBody(data) {
   return `<p class="eyebrow">GENERATED FROM THE CURRENT SOURCE TREE · ${escapeHtml(data.generated)}</p>
 <h1>API reference</h1>
-<p class="lede">Every page in this section is generated at build time from the package's public modules, their JSDoc contracts, live tool schemas, and real import edges — never from copied prose. Pick a module below, or browse <a href="./architecture/">architecture</a>, <a href="./contracts/">contracts</a>, the <a href="./tools/">tool catalog</a>, and the <a href="./settings/">settings schema</a>.</p>
+<p class="lede">Every page in this section is generated at build time from the package's public modules, their JSDoc contracts, live tool schemas, and real import edges — never from copied prose. Pick a module below, or browse <a href="/api/architecture/">architecture</a>, <a href="/api/contracts/">contracts</a>, the <a href="/api/tools/">tool catalog</a>, and the <a href="/api/settings/">settings schema</a>.</p>
 <div class="grid">
-${data.modules.map((m) => `  <article><h3><a href="./${slugOf(m.name)}/">${escapeHtml(m.name)}</a></h3><p><code>${escapeHtml(m.file)}</code></p><p>${escapeHtml(firstSentence(m.doc))}</p></article>`).join("\n")}
+${data.modules.map((m) => moduleCard(`/api/${slugOf(m.name)}/`, m.name, m.file, firstSentence(m.doc))).join("\n")}
 </div>`;
 }
 
@@ -182,8 +192,8 @@ function firstSentence(text) {
 /** /api/architecture/ — layers, import edges, helper groups, executables, IO modes. */
 function architectureBody(arch) {
   const layers = arch.layers.map((layer) => `<section class="arch-layer" id="${escapeHtml(slugOf(layer.name))}">
-  <h3><a href="../${slugOf(layer.name)}/">${escapeHtml(layer.name)}</a> <code>${escapeHtml(layer.file)}</code></h3>
-  ${layer.publicDependencies.length ? `<p>Depends on: ${layer.publicDependencies.map((d) => `<a href="../${slugOf(d)}/">${escapeHtml(d)}</a>`).join(", ")}</p>` : "<p>Depends on no other public module.</p>"}
+  <h3><a href="/api/${slugOf(layer.name)}/">${escapeHtml(layer.name)}</a> <code>${escapeHtml(layer.file)}</code></h3>
+  ${layer.publicDependencies.length ? `<p>Depends on: ${layer.publicDependencies.map((d) => `<a href="/api/${slugOf(d)}/">${escapeHtml(d)}</a>`).join(", ")}</p>` : "<p>Depends on no other public module.</p>"}
   ${layer.helperGroups.map((g) => `<p class="helper">Owns <code>${escapeHtml(g.path)}/</code> (${g.files.length} files${g.label ? ` — ${escapeHtml(g.label)}` : ""})</p>`).join("\n  ")}
 </section>`).join("\n");
   const executables = arch.executables.filter((e) => e.doc).map((e) =>
@@ -199,7 +209,34 @@ ${layers}
     ${executables}
 </ul>
 <h2>Built-in IO modes</h2>
-<p>${connectors}</p>`;
+<p>${connectors}</p>
+<h2>Environment auto-detection</h2>
+<p>At startup <a href="/api/env/#Env-detectEndpoints"><code>Env.detectEndpoints()</code></a> lets every loaded provider probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection.</p>
+<table>
+  <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
+  <tbody>
+    <tr><td><code>OPENAI_API_KEY</code> (+ optional <code>OPENAI_BASE_URL</code>)</td><td><code>openai</code> (OpenAI Responses)</td></tr>
+    <tr><td><code>AZURE_OPENAI_API_KEY</code> (+ required <code>AZURE_OPENAI_BASE_URL</code>)</td><td><code>azure-openai</code> (OpenAI Responses)</td></tr>
+    <tr><td><code>XAI_API_KEY</code></td><td><code>xai</code> (OpenAI Responses)</td></tr>
+    <tr><td><code>MOONSHOT_API_KEY</code> (+ optional <code>MOONSHOT_BASE_URL</code>)</td><td><code>kimi</code> (Moonshot platform)</td></tr>
+    <tr><td><code>KIMI_API_KEY</code></td><td><code>kimi-coding</code> (Kimi for Coding relay)</td></tr>
+    <tr><td><code>ANTHROPIC_API_KEY</code> or <code>ANTHROPIC_AUTH_TOKEN</code> (+ optional <code>ANTHROPIC_BASE_URL</code>)</td><td><code>anthropic</code> (Anthropic Messages)</td></tr>
+    <tr><td>Ollama server probe, <code>http://localhost:11434/api/tags</code></td><td><code>ollama</code></td></tr>
+    <tr><td>LM Studio server probe, <code>http://localhost:1234/v1/models</code></td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>
+  </tbody>
+</table>
+<h2>Harness environment variables</h2>
+<p>The namespace-derived set the harness itself reads (<code>OMOYA_</code>/<code>omoya</code> become <code>&lt;NS&gt;_</code>/<code>&lt;ns&gt;</code> when the package is renamed; the plain <code>AI_*</code> settings names are the still-honored legacy spellings):</p>
+<table>
+  <thead><tr><th>variable</th><th>effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>OMOYA_SETTINGS_DIR</code> / <code>OMOYA_SETTINGS</code> / <code>AI_SETTINGS_DIR</code> / <code>AI_SETTINGS</code></td><td>Override the user settings folder (first non-empty wins; created when missing).</td></tr>
+    <tr><td><code>OMOYA_SKILLS_DIR</code></td><td>Delimiter-separated extra skill roots, scanned after the package and settings layers.</td></tr>
+    <tr><td><code>OMOYA_PROMPTS_DIR</code></td><td>Delimiter-separated extra prompt roots, accumulated the same way.</td></tr>
+    <tr><td><code>OMOYA_OS_SANDBOX</code></td><td>Set to <code>none</code> to disable the OS write-sandbox probe — the Agent then forces safe mode. Intended for tests and restricted hosts.</td></tr>
+    <tr><td><code>OMOYA_TOOL_WORKER</code></td><td>Internal marker the tool sandbox sets on forked mutating-tool workers.</td></tr>
+  </tbody>
+</table>`;
 }
 
 /** One contract source block, whichever fields the collector lifted out. */
@@ -243,6 +280,13 @@ ${c.sources.map((s) => contractSourceHtml(s, links)).join("\n")}`).join("\n")}`;
 }
 
 /** /api/tools/ — the auto-detected live tool catalog. */
+// Live schemas stay the source of truth; a few tools earn a short static
+// companion note about runtime behavior a JSON schema cannot express
+// (routing order, environment auto-detection). Keyed by tool name.
+const TOOL_NOTES = {
+  "web-search": `<p>Each call routes provider web backend → MCP mapping (<code>settings.web.mcp</code>) → package backend. The package backend tries configured SearXNG instances first (auto-detected from <code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code>, or <code>web.search.backends</code>), then aggregates the enabled engines — DuckDuckGo and Mojeek by default, Brave when <code>BRAVE_API_KEY</code> is set, optional Swisscows — with reciprocal-rank fusion, de-duplication, and tracking-parameter removal. Results are bounded, cached briefly, and rate-limited; <code>settings.web.debug</code> prefixes the taken code path.</p>`,
+  "web-fetch": `<p>Same provider → MCP → package routing as web-search. The package backend converts HTML to Markdown (using the optional <code>@mozilla/readability</code> when installed — <code>settings.web.readability: false</code> forces the built-in converter), returning text and JSON bodies as-is. Redirects, size, timeouts, caching, and rate limits are all bounded.</p>`,
+};
 function toolsBody(data, links) {
   const catalog = data.contracts.find((c) => c.tools);
   if (!catalog) return "<h1>Tool catalog</h1><p>No tool catalog was collected.</p>";
@@ -253,6 +297,7 @@ ${catalog.tools.map((tool) => `<section class="symbol" id="${escapeHtml(tool.nam
   <h3><code>${escapeHtml(tool.name)}</code>${tool.flags.map((f) => ` <span class="flag">${escapeHtml(f)}</span>`).join("")}</h3>
   <p><code>${escapeHtml(tool.file)}</code></p>
   ${linkApiReferences(markdownHtml(tool.description), links, "")}
+  ${TOOL_NOTES[tool.name] ?? ""}
   ${tool.inputSchema?.properties ? `<details><summary>Input schema</summary><pre><code>${escapeHtml(JSON.stringify(tool.inputSchema, null, 2))}</code></pre></details>` : ""}
 </section>`).join("\n")}`;
 }
@@ -273,6 +318,17 @@ ${schema.entries.map((entry) => `<section class="symbol" id="${escapeHtml(entry.
 </section>`).join("\n")}`;
 }
 
+/** Sidebar sub-sections for one module page: every export and its members,
+ *  mirroring the anchor scheme the page renderer uses (Symbol-member, with
+ *  numeric suffixes for repeated get/set-style member names). */
+function moduleSections(mod) {
+  return mod.exports.map((symbol) => ({
+    hash: symbol.name,
+    label: symbol.name,
+    children: moduleAnchors(symbol).map(({ member, anchor }) => ({ hash: anchor, label: member.name })),
+  }));
+}
+
 /**
  * Render every API page. Returns [{path, html, search}] where search entries
  * feed the site-wide search index.
@@ -282,10 +338,10 @@ export function apiPages(data) {
   const nav = apiNavLinks(data);
   const links = buildApiLinks(data);
   const pages = [];
-  const add = (path, title, description, body, searchText) => {
+  const add = (path, title, description, body, searchText, sections = []) => {
     pages.push({
       path,
-      html: page({ title: `${title} — Omoya API`, description, path, body: `<article class="documentation">${body}</article>`, apiNav: nav }),
+      html: page({ title: `${title} — Omoya API`, description, path, body: `<article class="documentation">${body}</article>`, apiNav: nav, apiSections: sections }),
       search: { title, url: path, text: searchText },
     });
   };
@@ -297,7 +353,7 @@ export function apiPages(data) {
   for (const mod of data.modules) {
     const text = [mod.doc, ...mod.exports.flatMap((e) => [e.name, e.signature, e.doc?.description, ...(e.members ?? []).map((m) => `${m.name} ${m.doc?.description ?? ""}`)])].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 6000);
     add(`/api/${slugOf(mod.name)}/`, `${mod.name} module`, `Omoya ${mod.name} module (${mod.file}) — generated API reference.`,
-      modulePageBody(mod, links), text);
+      modulePageBody(mod, links), text, moduleSections(mod));
   }
   const contracts = data.contracts.filter((c) => c.sources);
   add("/api/contracts/", "Contracts", "Omoya schemas and contracts collected from source.", contractsBody(data, links),

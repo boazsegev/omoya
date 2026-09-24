@@ -86,6 +86,47 @@ describe("TUI login wizard", () => {
   });
 });
 
+describe("TUI status settings", () => {
+  test("offers a session logging toggle for persisted sessions", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [], session: "persistent", createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const app = createApp(agent, { env });
+    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
+
+    const items = opened.overlay.stack.at(-1).items;
+    expect(items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "header", label: "Session logging" }),
+      expect.objectContaining({
+        kind: "action",
+        label: "session logging: on (toggle)",
+        value: { type: "session-save", value: false },
+      }),
+    ]));
+  });
+
+  test("uses the current disabled state when toggling session logging", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [], session: "memory", sessionSave: false, createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const app = createApp(agent, { env });
+    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
+
+    const items = opened.overlay.stack.at(-1).items;
+    expect(items).toContainEqual(expect.objectContaining({
+      label: "session logging: off (memory only) (toggle)",
+      value: { type: "session-save", value: true },
+    }));
+  });
+
+  test("omits session logging for anonymous sessions", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const app = createApp(agent, { env });
+    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
+
+    expect(opened.overlay.stack.at(-1).items.some((item) => item.label === "Session logging")).toBe(false);
+  });
+});
+
 describe("TUI add-agent", () => {
   test("selecting an endpoint/model creates and views an additional Agent", async () => {
     const env = await testEnv();

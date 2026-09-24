@@ -79,14 +79,12 @@ function linkProblems(pages, indexEntries) {
   const problems = [];
   const canonicalPath = (pathname) => pathname === "/" ? "/" : `${pathname.replace(/\/(?:index\.html)?$/, "")}/`;
   const check = (from, href) => {
-    // API cross-references use `./<module>/` because deployed clean page URLs
-    // are extensionless (`/api/env`): browser resolution then targets the API
-    // sibling (`/api/agent`), not the site-root sibling (`/agent`). Model that
-    // deployment form here while retaining directory paths as build keys.
-    const basePath = from.startsWith("/api/") && /^\.\/[a-z]+\/#/.test(href)
-      ? "/api/"
-      : from;
-    const url = new URL(href, `https://omoya.invalid${basePath}`);
+    // Intra-API links are root-relative (`/api/env/#Env-safe`) and resolve
+    // identically under directory and extensionless clean-URL deployment;
+    // remaining relative links use only depth prefixes that behave the same
+    // in both forms, so plain browser resolution against the page path is
+    // the correct expectation for every link on the site.
+    const url = new URL(href, `https://omoya.invalid${from}`);
     if (url.origin !== "https://omoya.invalid") return;
     const target = canonicalPath(url.pathname);
     if (!ids.has(target)) {

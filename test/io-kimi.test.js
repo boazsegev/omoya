@@ -38,7 +38,14 @@ describe("kimi provider: construction and metadata", () => {
       expect(typeof connection[method], method).toBe("function"); // completed defaults
     }
     expect(typeof Protocol.provider.label).toBe("string"); // the label text is content
-    expect(Protocol.provider.capabilities).toEqual({ tools: true, thinking: true, streaming: true });
+    // flags stay boolean; the proven $web_search builtin joins the
+    // surface (Kimi documents no fetch tool)
+    expect(Protocol.provider.capabilities).toEqual({
+      tools: true,
+      thinking: true,
+      streaming: true,
+      "web-search": expect.any(Function),
+    });
   });
 
   // Endpoint names and model catalogs are CONTENT (free to change

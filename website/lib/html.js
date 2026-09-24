@@ -29,6 +29,16 @@ function rebase(prefix, rootRelative) {
   return prefix === "./" ? (bare === "" ? "/" : `.${bare}`) : `${prefix.slice(0, -1)}${bare}`;
 }
 
+/**
+ * Wordmark: the word stays real text (copy/paste, find-in-page, screen
+ * readers); its first letter is transparent and overlaid with an inline SVG
+ * mark — the logo ring + prompt glyph in currentColor, so it tracks themes.
+ */
+export function wordmark(word) {
+  const rest = escapeHtml(String(word).slice(1));
+  return `<span class="wordmark"><span class="wordmark-o"><span class="wordmark-o-text">${escapeHtml(String(word)[0])}</span><svg class="wordmark-mark" viewBox="0 0 512 512" aria-hidden="true" focusable="false"><circle cx="256" cy="256" r="142"/><path d="M218 207 274 256 218 305 M282 305h38" stroke-linecap="round" stroke-linejoin="round"/></svg></span>${rest}</span>`;
+}
+
 const NAV_ITEMS = [
   { href: "/", label: "Home" },
   { href: "/api/", label: "API" },
@@ -42,18 +52,24 @@ const NAV_ITEMS = [
  * @param {string} options.path - canonical clean path, e.g. "/" or "/api/agent/"
  * @param {string} options.body - trusted, already-escaped main content HTML
  * @param {Array<{href: string, label: string}>} [options.apiNav] - API sidebar links
+ * @param {Array<{hash: string, label: string, children?: Array<{hash: string, label: string}>}>} [options.apiSections]
+ *   - in-page sections listed under the current sidebar entry
  */
-export function page({ title, description, path, body, apiNav }) {
+export function page({ title, description, path, body, apiNav, apiSections }) {
   const canonical = `${site.origin}${path}`;
   const prefix = depthPrefix(path);
   const nav = NAV_ITEMS.map((item) => {
     const current = item.href === "/" ? path === "/" : path.startsWith(item.href);
     return `<a href="${rebase(prefix, item.href)}"${current ? ' aria-current="page"' : ""}>${item.label}</a>`;
   }).join("");
+  const sectionList = (sections) => `<ul class="api-sections">${sections.map((s) =>
+    `<li><a href="#${escapeHtml(s.hash)}">${escapeHtml(s.label)}</a>${s.children?.length
+      ? `<ul>${s.children.map((c) => `<li><a href="#${escapeHtml(c.hash)}">${escapeHtml(c.label)}</a></li>`).join("")}</ul>`
+      : ""}</li>`).join("")}</ul>`;
   const sidebar = apiNav
     ? `<nav class="api-nav" aria-label="API sections"><h2 class="api-nav-title">API sections</h2><ul>${apiNav.map((item) => {
         const current = item.href === path;
-        return `<li><a href="${rebase(prefix, item.href)}"${current ? ' aria-current="page"' : ""}>${escapeHtml(item.label)}</a></li>`;
+        return `<li${current ? ' class="current"' : ""}><a href="${rebase(prefix, item.href)}"${current ? ' aria-current="page"' : ""}>${escapeHtml(item.label)}</a>${current && apiSections?.length ? sectionList(apiSections) : ""}</li>`;
       }).join("")}</ul></nav>`
     : "";
   return `<!doctype html>
@@ -79,7 +95,7 @@ export function page({ title, description, path, body, apiNav }) {
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="${rebase(prefix, "/")}"><img src="${prefix}assets/logo.svg" width="36" height="36" alt=""><span>omoya</span></a>
+    <a class="brand" href="${rebase(prefix, "/")}">${wordmark("omoya")}</a>
     <nav class="site-nav" aria-label="Site">${nav}<a href="${site.repository}">Repository</a></nav>
     <div class="header-controls">
       <search class="site-search">

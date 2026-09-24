@@ -4,7 +4,7 @@
 
 import { NAMES } from "../lib/namespace.js";
 import Env from "../lib/env.js";
-const { singleShot } = Env;
+const { singleShot, openaiWebSearch } = Env;
 
 const LM_STUDIO_URL = "http://localhost:1234/v1";
 
@@ -27,7 +27,16 @@ const ENV_ENDPOINTS = [
 export default class OpenAIProvider {
   static provider = {
     label: "OpenAI",
-    capabilities: { tools: true, thinking: true, streaming: true },
+    capabilities: {
+      tools: true,
+      thinking: true,
+      streaming: true,
+      // the Responses API `web_search` server tool (implementation in
+      // lib/env/openai.js — this module is metadata only, but the
+      // Agent's capability lookup reads THIS static object, so the
+      // handler is referenced here)
+      "web-search": openaiWebSearch,
+    },
   };
 
   /** Endpoints the OpenAI Responses protocol can talk to (login wizard presets). */

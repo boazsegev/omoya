@@ -1,4 +1,5 @@
 .DS_Store
+debug.json
 .claude/
 ai-tmp/
 ai-tasks/

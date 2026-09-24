@@ -44,13 +44,27 @@
 }
 ```
 
-### `Context.TextContent`
+### `Context.BinaryContent`
 
 ```schema
 {
-  "text": "string",
-  "type": "\"text\"",
+  "[filename]": "string",
+  "[mimetype]": "string",
+  "content": "string",
+  "type": "\"binary\"",
 }
+```
+
+### `Context.Content`
+
+```schema
+"TextContent|ImageContent|BinaryContent|ThinkingContent|ToolCallContent|Object"
+```
+
+### `Context.Context`
+
+```schema
+"Message[]"
 ```
 
 ### `Context.ImageContent`
@@ -63,14 +77,21 @@
 }
 ```
 
-### `Context.BinaryContent`
+### `Context.Message`
 
 ```schema
 {
-  "[filename]": "string",
-  "[mimetype]": "string",
-  "content": "string",
-  "type": "\"binary\"",
+  "content": "Content[]",
+  "type": "number",
+}
+```
+
+### `Context.TextContent`
+
+```schema
+{
+  "text": "string",
+  "type": "\"text\"",
 }
 ```
 
@@ -94,21 +115,6 @@
 }
 ```
 
-### `Context.Content`
-
-```schema
-"TextContent|ImageContent|BinaryContent|ThinkingContent|ToolCallContent|Object"
-```
-
-### `Context.Message`
-
-```schema
-{
-  "content": "Content[]",
-  "type": "number",
-}
-```
-
 ### `Context.ToolResultMessage`
 
 ```schema
@@ -119,12 +125,6 @@
   "content": "Content[]",
   "type": "4",
 }
-```
-
-### `Context.Context`
-
-```schema
-"Message[]"
 ```
 
 ### `Env.toolContext`
@@ -219,57 +219,16 @@
 }
 ```
 
-### `Env.toolDescription.note-set.inputSchema`
+### `Env.toolDescription.note.inputSchema`
 
 ```schema
 {
-  "content?": "string",
-  "notes?": "array",
-  "summary?": "string",
-  "title?": "string",
-  "type?": ["todo", "active", "done", "info", "secret"],
-}
-```
-
-### `Env.toolDescription.note-done.inputSchema`
-
-```schema
-{
-  "notes": "array",
-}
-```
-
-### `Env.toolDescription.note-remove.inputSchema`
-
-```schema
-{
-  "title": "string",
-}
-```
-
-### `Env.toolDescription.note-get.inputSchema`
-
-```schema
-{
-  "keys?": "boolean",
-  "only?": "array",
-  "title": "string",
-}
-```
-
-### `Env.toolDescription.note-list.inputSchema`
-
-```schema
-{}
-```
-
-### `Env.toolDescription.note-search.inputSchema`
-
-```schema
-{
+  "action": ["set", "get", "list", "remove", "search"],
   "field?": "string",
   "max?": "number",
-  "pattern": "string",
+  "notes?": ["array", "object"],
+  "only?": "array",
+  "pattern?": "string",
 }
 ```
 
@@ -309,6 +268,23 @@
 }
 ```
 
+### `Env.toolDescription.web-fetch.inputSchema`
+
+```schema
+{
+  "url": "string",
+}
+```
+
+### `Env.toolDescription.web-search.inputSchema`
+
+```schema
+{
+  "limit?": "integer",
+  "query": "string",
+}
+```
+
 ### `Env.toolDescription.worker.inputSchema`
 
 ```schema
@@ -321,6 +297,7 @@
   "name?": "string",
   "prompt?": "string",
   "reset?": "boolean",
+  "safe?": "boolean",
 }
 ```
 
@@ -331,261 +308,6 @@
   "ask?": "boolean",
   "content": "string",
   "path": "string",
-}
-```
-
-### `Markdown module`
-
-```ts
-export const classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
-export const lexMarkdown: (text: string) => Promise<Array<object>>;
-export const markdownEngine: () => Promise<"marked"|"builtin">;
-export const parseGitDiff: (text: unknown) => unknown;
-export const parseInline: (text: string) => Array<{type: string, text: string, href?: string}>;
-export const renderInline: (text: string, renderer?: object) => string;
-export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
-export const walkTokens: (tokens: Array<object>, renderer?: object) => string;
-```
-
-### `Markdown`
-
-```ts
-export class Markdown {
-
-}
-```
-
-### `Context module`
-
-```ts
-export const appendMessage: (context: Array, message: object, { merge?: unknown) => object;
-export const assemblyCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object;
-export const assistantMessage: (content?: unknown) => Message;
-export const at: (context: Array, i: number) => object;
-export const binaryContent: (path: unknown, buffer: unknown) => unknown;
-export const blockAt: (context: Array, i: number, j: number) => object;
-export const callbackName: (eventName: string) => string;
-export const ContentType: unknown;
-export const createAssembler: () => {consume: (event: object) => void, message: () => object};
-export const detectMime: (options?: object) => unknown;
-export const dispatch: (set: Object, event: object) => unknown;
-export const editBlock: (context: Array, i: number, j: number, newBlock: object) => object;
-export const editMessage: (context: Array, i: number, newMessage: object) => object;
-export const estimateContextTokens: (context?: Array) => number;
-export const estimateTokens: (text: string) => unknown;
-export const estimateUsage: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
-export const EventType: unknown;
-export const fileMessage: (path: unknown, buffer: unknown) => unknown;
-export const finalizeUsage: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string};
-export const foldContent: (content: Array) => Array;
-export const hasContent: (msg: *) => boolean;
-export const isContext: (ctx: *) => boolean;
-export const isMessage: (msg: *) => boolean;
-export const isRecord: (msg: *) => boolean;
-export const isResponseEvent: (event: *) => boolean;
-export const mergeableMessages: (a: object, b: object) => boolean;
-export const MessageType: unknown;
-export const MIME_BY_EXTENSION: unknown;
-export const mimetypeOf: (block: unknown) => unknown;
-export const normalizeCallbacks: (callbacks?: Object, binding?: Object) => Object;
-export const parseContext: (input: string) => Array<object>;
-export const parseInput: (input: unknown) => unknown;
-export const pop: (context: Array) => object|undefined;
-export const rebuildBlock: (block: *) => object;
-export const rebuildMessage: (msg: object) => object;
-export const removeMessages: (context: unknown, indexes: unknown) => unknown;
-export const rollbackTo: (context: Array, i: number) => Array;
-export const systemMessage: (text: unknown) => Message;
-export const textContent: (text: unknown) => unknown;
-export const TOKENS_PER_WORD: unknown;
-export const usageSummary: (usage: unknown) => unknown;
-export const userMessage: (text: unknown, metadata?: unknown) => Message;
-export const validateContext: (ctx: *) => Array;
-export const validateMessage: (msg: *, at?: string) => object;
-export const validateResponseEvent: (event: *) => object;
-export const wordCount: (text: string) => unknown;
-```
-
-### `Context`
-
-```ts
-export class Context {
-
-}
-```
-
-### `Env module`
-
-```ts
-export const awaitTimeout: (ms: number, wait: (signal: AbortSignal) => Promise<unknown>) => Promise<boolean>;
-export const classifyError: (err: unknown, providerName: unknown) => unknown;
-export const deepMerge: (a: *, b: *) => *;
-export const DEFAULT_CONTEXT_GUARD_CAP: unknown;
-export const DEFAULT_CONTEXT_GUARD_TURN_CAP: unknown;
-export const DEFAULT_THINKING: unknown;
-export const DEFAULT_TOOL_TIMEOUT: unknown;
-export const DEFAULT_TOOL_TIMEOUT_LIMIT: unknown;
-export const defaultClose: (connection: unknown) => unknown;
-export const defaultConnect: (url: unknown, aiio: unknown) => {url: string, aiio: object};
-export const defaultRead: (connection: unknown) => Promise<object|null>;
-export const defaultSend: (connection: unknown, msg: unknown) => unknown;
-export const defaultSendBody: (connection: unknown, body: unknown) => unknown;
-export const defaultSendHeaders: (connection: object, headers: unknown) => unknown;
-export const defaultSessionsDir: () => unknown;
-export const defaultSettingsDir: () => string;
-export const defineProvider: (Protocol: Function, { name }?: unknown) => Function;
-export const depletionError: (classified: object) => boolean;
-export const ENV_EVENT: unknown;
-export const isToolModuleFile: (name: string) => boolean;
-export const osSandboxAvailable: () => boolean;
-export const osSandboxKind: () => "seatbelt"|"bwrap"|"delegated"|null;
-export const osSandboxWrap: (file: string, args?: string[], cwd?: string, workingDirectory?: string) => [string, string[]];
-export const parseDuration: (value: number|string|undefined|null) => number|undefined;
-export const registryEffortLevels: (entry: object) => string[]|undefined;
-export const resolveEffort: (think: boolean|string|undefined, { levels: unknown, defaultLevel }?: unknown) => string;
-export const RETRYABLE_KINDS: unknown;
-export const retryDelay: (settings: object, attempt: number) => number;
-export const scanToolRoots: (roots: string[], env: object, { trustedRoots?: unknown) => Promise<{tools: Map<string, {fn: Function, schema: object, file: string, safe?: true, trusted?: true}>, settingsSchema: Object}>;
-export const singleShot: (init?: object) => object;
-export const sortEfforts: (levels: string[]) => string[];
-export const supportedValues: (message: string) => string[]|undefined;
-export const THINKING_LEVELS: unknown;
-export const TOOL_ON_TIMEOUT_LIMIT: unknown;
-export const tryDuration: (value: unknown) => unknown;
-export const writeJsonAtomic: (file: string, value: *) => unknown;
-```
-
-### `Env`
-
-```ts
-export class Env {
-  agentEndpointAvailable: (endpoint: unknown, model: unknown) => unknown;
-  agents: () => object[];
-  agentsAt: (endpoint: unknown, model: unknown) => unknown;
-  agentsEndpointLimit: (endpoint: unknown, model: unknown) => unknown;
-  agentsEndpointLimitSet: (options: unknown) => unknown;
-  authSet: (endpoint: string, data: object, { scope }?: unknown) => object;
-  batch: (fn: Function) => Promise<*>;
-  callTool: (name: string, args: object, context: object) => Promise<*>;
-  constructor(options?: Object);
-  contextConsumption: (context: Array, lastUsage: object) => number;
-  contextGuardCap: number;
-  contextGuardTurnCap: number;
-  contextWindow: (endpoint: string, model: string) => number|null;
-  static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
-  createAgent: (options?: object) => Agent;
-  defaultPromptRoots: () => string[];
-  defaultProviderRoots: () => unknown;
-  defaultSkillRoots: () => string[];
-  defaultsSchema: () => Object} key -> {default, description;
-  defaultToolRoots: () => string[];
-  detectEndpoints: (options?: Object) => Promise<string[]>;
-  endpoint: (name: unknown) => Object|undefined;
-  endpointLocal: (name: string) => boolean;
-  endpointModels: (name: string, { refresh?: unknown, url: unknown, signal }?: unknown) => Promise<Object>} the model map ({;
-  endpointNames: (options?: object) => unknown;
-  endpointScope: (name: string) => "package"|"local";
-  endpointSettings: (endpoint: unknown) => unknown;
-  flushSettings: () => unknown;
-  hasTool: (name: string) => unknown;
-  isDynamic: (name: string) => boolean;
-  knownEndpoints: () => Array<{name: string, label: string, url: string, provider: string, oauth?: object}>;
-  loadProviders: (options?: object) => unknown;
-  loadTools: (options?: Object) => Promise<string[]>;
-  local: unknown;
-  maxAttempts: number;
-  offEvent: (handle: unknown) => unknown;
-  onEvent: (event: symbol, callback: (payload: object) => void) => number;
-  static osSandboxAvailable: () => boolean;
-  static osSandboxKind: () => "seatbelt"|"bwrap"|"delegated"|null;
-  static osSandboxWrap: (file: string, args: string[], cwd: string) => [string, string[]];
-  promptBody: (name: string, { roots }?: unknown) => string|null;
-  promptCatalog: (options?: object) => string;
-  promptNames: (options?: object) => string[];
-  promptNamesAsync: (options?: object) => Promise<string[]>;
-  provider: (name: unknown) => Function|undefined;
-  providerNames: () => string[];
-  refreshModels: (options?: Object) => Promise<string[]>;
-  refreshToolAvailability: () => Promise<string[]>;
-  refreshTools: () => Promise<string[]>;
-  registerAgent: (agent: object) => object;
-  registerProvider: (name: unknown, ProviderClass: unknown) => unknown;
-  registerTool: (name: string, fn: Function, schema: object, { builtin?: unknown, file }?: unknown) => Function;
-  remote: unknown;
-  removeAgent: (agent: object) => boolean;
-  removeEndpoint: (name: string) => {name: string, dynamic: boolean};
-  resolveSystemPrompt: () => string[];
-  retryDelay: (attempt: number) => number;
-  safe: Env;
-  safeToolNames: () => string[];
-  saveEndpoint: (name: unknown, endpoint: unknown, { scope?: unknown) => unknown;
-  saveTheme: (name: unknown) => unknown;
-  skillBodies: (names: string[], { roots }?: unknown) => {text: string, unknown: string[]};
-  skillCatalog: (options?: Object) => string;
-  toolEntry: (name: string) => object|undefined;
-  toolNames: () => string[];
-  toolSchemas: (names: string[], options: unknown) => Array} [{name, ...schema;
-  toolStatus: () => Array<{name: string, status: Object}>;
-  toolTimeout: number;
-  toolTimeoutLimit: number;
-  static toolTimestamp: () => number;
-  updateToolStatus: (name: string, info: Object) => Object;
-}
-```
-
-### `ProviderError`
-
-```ts
-export class ProviderError {
-  constructor(kind: "auth"|"network"|"provider"|"malformed", message: string, detail?: object);
-}
-```
-
-### `HttpStatusError`
-
-```ts
-export class HttpStatusError {
-  constructor(status: number, statusText: string, body: string);
-}
-```
-
-### `IO module`
-
-```ts
-export const bodyBytes: (body: *) => number;
-export const classifyError: (err: unknown, providerName: unknown) => unknown;
-export const connectBudget: (baseMs: number, bytes: number) => number;
-export const Context: unknown;
-export const defaultClose: (connection: unknown) => unknown;
-export const defaultConnect: (url: unknown, aiio: unknown) => {url: string, aiio: object};
-export const defaultRead: (connection: unknown) => Promise<object|null>;
-export const defaultSend: (connection: unknown, msg: unknown) => unknown;
-export const defaultSendBody: (connection: unknown, body: unknown) => unknown;
-export const defaultSendHeaders: (connection: object, headers: unknown) => unknown;
-export const defineProvider: (Protocol: Function, { name }?: unknown) => Function;
-export const Env: unknown;
-export const resolveTimeout: (options?: Object) => number;
-export const sanitizeRequest: (msg: *) => [object, *];
-```
-
-### `IO`
-
-```ts
-export class IO {
-  authSet: (auth: object, options: unknown) => object;
-  constructor(options?: Object);
-  contextUsage: {used: number|undefined, total: number|undefined};
-  currentModel: string|undefined;
-  kill: () => unknown;
-  planUsage: {label?: string, quotas: Object}|null;
-  requestSignal: AbortSignal|undefined;
-  setContextUsage: (options?: object) => {used: number|undefined, total: number|undefined};
-  setOption: (key: string, value: *) => unknown;
-  setPlanUsage: (options?: object) => {label?: string, quotas: Object}|null;
-  settings: object;
-  state: unknown;
-  tools: () => Array;
-  write: (context: Array, callbacks?: Object, options?: Object) => Promise<object>;
 }
 ```
 
@@ -618,6 +340,8 @@ export const thinkValue: (level: unknown) => unknown;
 export class Agent {
   append: (message: unknown) => unknown;
   busy: unknown;
+  callProviderCapability: (name: unknown, args: unknown, options: unknown) => unknown;
+  canCallTool: (name: unknown) => unknown;
   cancel: () => unknown;
   childAdd: (child: unknown) => unknown;
   childRemove: (child: unknown) => unknown;
@@ -636,7 +360,7 @@ export class Agent {
   edit: (i: number, message: object) => object;
   editBlock: (i: number, j: number, block: object) => object;
   endRequested: unknown;
-  enqueue: (message: object) => object;
+  enqueue: (message: object) => object|null;
   enqueueFile: (fileName: string) => Promise<object>;
   static EVENT: unknown;
   folder: unknown;
@@ -754,6 +478,267 @@ export class CLI {
 }
 ```
 
+### `Context module`
+
+```ts
+export const appendMessage: (context: Array, message: object, { merge?: unknown) => object;
+export const assemblyCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object;
+export const assistantMessage: (content?: unknown) => Message;
+export const at: (context: Array, i: number) => object;
+export const binaryContent: (path: unknown, buffer: unknown) => unknown;
+export const blockAt: (context: Array, i: number, j: number) => object;
+export const callbackName: (eventName: string) => string;
+export const ContentType: unknown;
+export const createAssembler: () => {consume: (event: object) => void, message: () => object};
+export const detectMime: (options?: object) => unknown;
+export const dispatch: (set: Object, event: object) => unknown;
+export const editBlock: (context: Array, i: number, j: number, newBlock: object) => object;
+export const editMessage: (context: Array, i: number, newMessage: object) => object;
+export const estimateContextTokens: (context?: Array) => number;
+export const estimateTokens: (text: string) => unknown;
+export const estimateUsage: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
+export const EventType: unknown;
+export const fileMessage: (path: unknown, buffer: unknown) => unknown;
+export const finalizeUsage: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string};
+export const foldContent: (content: Array) => Array;
+export const hasContent: (msg: *) => boolean;
+export const isContext: (ctx: *) => boolean;
+export const isMessage: (msg: *) => boolean;
+export const isRecord: (msg: *) => boolean;
+export const isResponseEvent: (event: *) => boolean;
+export const mergeableMessages: (a: object, b: object) => boolean;
+export const MessageType: unknown;
+export const MIME_BY_EXTENSION: unknown;
+export const mimetypeOf: (block: unknown) => unknown;
+export const normalizeCallbacks: (callbacks?: Object, binding?: Object) => Object;
+export const parseContext: (input: string) => Array<object>;
+export const parseInput: (input: unknown) => unknown;
+export const pop: (context: Array) => object|undefined;
+export const rebuildBlock: (block: *) => object;
+export const rebuildMessage: (msg: object) => object;
+export const removeMessages: (context: unknown, indexes: unknown) => unknown;
+export const rollbackTo: (context: Array, i: number) => Array;
+export const systemMessage: (text: unknown) => Message;
+export const textContent: (text: unknown) => unknown;
+export const TOKENS_PER_WORD: unknown;
+export const usageSummary: (usage: unknown) => unknown;
+export const userMessage: (text: unknown, metadata?: unknown) => Message;
+export const validateContext: (ctx: *) => Array;
+export const validateMessage: (msg: *, at?: string) => object;
+export const validateResponseEvent: (event: *) => object;
+export const wordCount: (text: string) => unknown;
+```
+
+### `Context`
+
+```ts
+export class Context {
+
+}
+```
+
+### `Env module`
+
+```ts
+export const awaitTimeout: (ms: number, wait: (signal: AbortSignal) => Promise<unknown>) => Promise<boolean>;
+export const classifyError: (err: unknown, providerName: unknown) => unknown;
+export const deepMerge: (a: *, b: *) => *;
+export const DEFAULT_CONTEXT_GUARD_CAP: unknown;
+export const DEFAULT_CONTEXT_GUARD_TURN_CAP: unknown;
+export const DEFAULT_THINKING: unknown;
+export const DEFAULT_TOOL_TIMEOUT: unknown;
+export const DEFAULT_TOOL_TIMEOUT_LIMIT: unknown;
+export const defaultClose: (connection: unknown) => unknown;
+export const defaultConnect: (url: unknown, aiio: unknown) => {url: string, aiio: object};
+export const defaultRead: (connection: unknown) => Promise<object|null>;
+export const defaultSend: (connection: unknown, msg: unknown) => unknown;
+export const defaultSendBody: (connection: unknown, body: unknown) => unknown;
+export const defaultSendHeaders: (connection: object, headers: unknown) => unknown;
+export const defaultSessionsDir: () => unknown;
+export const defaultSettingsDir: () => string;
+export const defineProvider: (Protocol: Function, { name }?: unknown) => Function;
+export const depletionError: (classified: object) => boolean;
+export const ENV_EVENT: unknown;
+export const isToolModuleFile: (name: string) => boolean;
+export const mergeAuthUpdate: (existing: unknown, data: unknown) => unknown;
+export const openaiWebSearch: (options?: object) => unknown;
+export const osSandboxAvailable: () => boolean;
+export const osSandboxKind: () => "seatbelt"|"bwrap"|"delegated"|null;
+export const osSandboxWrap: (file: string, args?: string[], cwd?: string, workingDirectory?: string) => [string, string[]];
+export const parseDuration: (value: number|string|undefined|null) => number|undefined;
+export const registryEffortLevels: (entry: object) => string[]|undefined;
+export const resolveEffort: (think: boolean|string|undefined, { levels: unknown, defaultLevel }?: unknown) => string;
+export const RETRYABLE_KINDS: unknown;
+export const retryDelay: (settings: object, attempt: number) => number;
+export const scanToolRoots: (roots: string[], env: object, { trustedRoots?: unknown) => Promise<{tools: Map<string, {fn: Function, schema: object, file: string, safe?: true, trusted?: true}>, settingsSchema: Object}>;
+export const singleShot: (init?: object) => object;
+export const sortEfforts: (levels: string[]) => string[];
+export const supportedValues: (message: string) => string[]|undefined;
+export const THINKING_LEVELS: unknown;
+export const TOOL_ON_TIMEOUT_LIMIT: unknown;
+export const tryDuration: (value: unknown) => unknown;
+export const writeJsonAtomic: (file: string, value: *) => unknown;
+```
+
+### `Env`
+
+```ts
+export class Env {
+  agentEndpointAvailable: (endpoint: unknown, model: unknown) => unknown;
+  agents: () => object[];
+  agentsAt: (endpoint: unknown, model: unknown) => unknown;
+  agentsEndpointLimit: (endpoint: unknown, model: unknown) => unknown;
+  agentsEndpointLimitSet: (options: unknown) => unknown;
+  authSet: (endpoint: string, data: object, { scope }?: unknown) => object;
+  batch: (fn: Function) => Promise<*>;
+  callTool: (name: string, args: object, context: object) => Promise<*>;
+  constructor(options?: Object);
+  contextConsumption: (context: Array, lastUsage: object) => number;
+  contextGuardCap: number;
+  contextGuardTurnCap: number;
+  contextWindow: (endpoint: string, model: string) => number|null;
+  static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
+  createAgent: (options?: object) => Agent;
+  defaultPromptRoots: () => string[];
+  defaultProviderRoots: () => unknown;
+  defaultSkillRoots: () => string[];
+  defaultsSchema: () => Object} key -> {default, description;
+  defaultToolRoots: () => string[];
+  detectEndpoints: (options?: Object) => Promise<string[]>;
+  endpoint: (name: unknown) => Object|undefined;
+  endpointLocal: (name: string) => boolean;
+  endpointModels: (name: string, { refresh?: unknown, url: unknown, signal }?: unknown) => Promise<Object>} the model map ({;
+  endpointNames: (options?: object) => unknown;
+  endpointScope: (name: string) => "package"|"local";
+  endpointSettings: (endpoint: unknown) => unknown;
+  flushSettings: () => unknown;
+  hasTool: (name: string) => unknown;
+  isDynamic: (name: string) => boolean;
+  knownEndpoints: () => Array<{name: string, label: string, url: string, provider: string, oauth?: object}>;
+  lastModel: () => unknown;
+  loadProviders: (options?: object) => unknown;
+  loadTools: (options?: Object) => Promise<string[]>;
+  local: unknown;
+  maxAttempts: number;
+  offEvent: (handle: unknown) => unknown;
+  onEvent: (event: symbol, callback: (payload: object) => void) => number;
+  static osSandboxAvailable: () => boolean;
+  static osSandboxKind: () => "seatbelt"|"bwrap"|"delegated"|null;
+  static osSandboxWrap: (file: string, args: string[], cwd: string) => [string, string[]];
+  promptBody: (name: string, { roots }?: unknown) => string|null;
+  promptCatalog: (options?: object) => string;
+  promptNames: (options?: object) => string[];
+  promptNamesAsync: (options?: object) => Promise<string[]>;
+  provider: (name: unknown) => Function|undefined;
+  providerNames: () => string[];
+  refreshEndpointSettings: (endpoint: string) => Object|undefined;
+  refreshModels: (options?: Object) => Promise<string[]>;
+  refreshToolAvailability: () => Promise<string[]>;
+  refreshTools: () => Promise<string[]>;
+  registerAgent: (agent: object) => object;
+  registerProvider: (name: unknown, ProviderClass: unknown) => unknown;
+  registerTool: (name: string, fn: Function, schema: object, { builtin?: unknown, file }?: unknown) => Function;
+  remote: unknown;
+  removeAgent: (agent: object) => boolean;
+  removeEndpoint: (name: string) => {name: string, dynamic: boolean};
+  resolveSystemPrompt: () => string[];
+  retryDelay: (attempt: number) => number;
+  safe: Env;
+  safeToolNames: () => string[];
+  saveEndpoint: (name: unknown, endpoint: unknown, { scope?: unknown) => unknown;
+  saveTheme: (name: unknown) => unknown;
+  skillBodies: (names: string[], { roots }?: unknown) => {text: string, unknown: string[]};
+  skillCatalog: (options?: Object) => string;
+  toolEntry: (name: string) => object|undefined;
+  toolNames: () => string[];
+  toolSchemas: (names: string[], options: unknown) => Array} [{name, ...schema;
+  toolStatus: () => Array<{name: string, status: Object}>;
+  toolTimeout: number;
+  toolTimeoutLimit: number;
+  static toolTimestamp: () => number;
+  updateToolStatus: (name: string, info: Object) => Object;
+}
+```
+
+### `HttpStatusError`
+
+```ts
+export class HttpStatusError {
+  constructor(status: number, statusText: string, body: string);
+}
+```
+
+### `ProviderError`
+
+```ts
+export class ProviderError {
+  constructor(kind: "auth"|"network"|"provider"|"malformed", message: string, detail?: object);
+}
+```
+
+### `GTUI module`
+
+```ts
+export const effect: unknown;
+export const event: unknown;
+export const host: unknown;
+export const memory: (options?: object) => object;
+export const scrollGlyph: (value: unknown, fallback: unknown) => unknown;
+export const terminal: (options?: object) => object;
+export const view: unknown;
+```
+
+### `GTUI`
+
+```ts
+export class GTUI {
+  constructor(options?: object);
+  dispatch: (message: object) => void;
+  run: (app: unknown) => Promise<{reason: string, code: number}>;
+  stop: (reason?: string, code?: number) => void;
+}
+```
+
+### `IO module`
+
+```ts
+export const bodyBytes: (body: *) => number;
+export const classifyError: (err: unknown, providerName: unknown) => unknown;
+export const connectBudget: (baseMs: number, bytes: number) => number;
+export const Context: unknown;
+export const defaultClose: (connection: unknown) => unknown;
+export const defaultConnect: (url: unknown, aiio: unknown) => {url: string, aiio: object};
+export const defaultRead: (connection: unknown) => Promise<object|null>;
+export const defaultSend: (connection: unknown, msg: unknown) => unknown;
+export const defaultSendBody: (connection: unknown, body: unknown) => unknown;
+export const defaultSendHeaders: (connection: object, headers: unknown) => unknown;
+export const defineProvider: (Protocol: Function, { name }?: unknown) => Function;
+export const Env: unknown;
+export const resolveTimeout: (options?: Object) => number;
+export const sanitizeRequest: (msg: *) => [object, *];
+```
+
+### `IO`
+
+```ts
+export class IO {
+  authSet: (auth: object, options: unknown) => object;
+  constructor(options?: Object);
+  contextUsage: {used: number|undefined, total: number|undefined};
+  currentModel: string|undefined;
+  kill: () => unknown;
+  planUsage: {label?: string, quotas: Object}|null;
+  requestSignal: AbortSignal|undefined;
+  setContextUsage: (options?: object) => {used: number|undefined, total: number|undefined};
+  setOption: (key: string, value: *) => unknown;
+  setPlanUsage: (options?: object) => {label?: string, quotas: Object}|null;
+  settings: object;
+  state: unknown;
+  tools: () => Array;
+  write: (context: Array, callbacks?: Object, options?: Object) => Promise<object>;
+}
+```
+
 ### `Jobs module`
 
 ```ts
@@ -820,6 +805,27 @@ export class JobsError {
 }
 ```
 
+### `Markdown module`
+
+```ts
+export const classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
+export const lexMarkdown: (text: string) => Promise<Array<object>>;
+export const markdownEngine: () => Promise<"marked"|"builtin">;
+export const parseGitDiff: (text: unknown) => unknown;
+export const parseInline: (text: string) => Array<{type: string, text: string, href?: string}>;
+export const renderInline: (text: string, renderer?: object) => string;
+export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
+export const walkTokens: (tokens: Array<object>, renderer?: object) => string;
+```
+
+### `Markdown`
+
+```ts
+export class Markdown {
+
+}
+```
+
 ### `TUI module`
 
 ```ts
@@ -835,29 +841,6 @@ export const TUI_ENGINES: unknown;
 ```ts
 export class TUI {
 
-}
-```
-
-### `GTUI module`
-
-```ts
-export const effect: unknown;
-export const event: unknown;
-export const host: unknown;
-export const memory: (options?: object) => object;
-export const scrollGlyph: (value: unknown, fallback: unknown) => unknown;
-export const terminal: (options?: object) => object;
-export const view: unknown;
-```
-
-### `GTUI`
-
-```ts
-export class GTUI {
-  constructor(options?: object);
-  dispatch: (message: object) => void;
-  run: (app: unknown) => Promise<{reason: string, code: number}>;
-  stop: (reason?: string, code?: number) => void;
 }
 ```
 

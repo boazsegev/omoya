@@ -616,11 +616,167 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
   if (supportsFiles(this)) return reportBalance(this, aiio);
 }
 
+/* --------------------------------------------------- web capabilities */
+
+/**
+ * The settings gate every server-side web capability checks first:
+ * `web.provider === false` opts OUT of provider web backends (the
+ * caller then falls through to MCP/package routing). App-level
+ * settings live on the ENV (aiio.settings is only the endpoint's
+ * namespaced view), so the handler reads aiio.env.settings.
+ */
+function providerWebDisabled(aiio) {
+  return aiio?.env?.settings?.web?.provider === false;
+}
+
+/**
+ * The `$web_search` builtin is a Moonshot-server feature of the
+ * PLATFORM endpoints (verified against platform.moonshot.ai's docs).
+ * Arbitrary OpenAI-compatible proxies certainly have no builtin
+ * tools — unsupported endpoints answer undefined (honest
+ * fall-through), never a request that could only 400.
+ */
+function webSearchHosted(aiio) {
+  const base = String(aiio?.url ?? "").replace(/\/$/, "");
+  return base === KIMI_URL || base === KIMI_CN_URL;
+}
+
+/**
+ * The coding relay (api.kimi.com/coding, the Kimi Code subscription)
+ * has no `$web_search` builtin, but it DOES expose a dedicated search
+ * API: POST {baseUrl}/search with `{text_query}` answers
+ * `{search_results: [{url, title, snippet}]}` under the same Bearer
+ * credential (verified against the Kimi Code third-party docs and a
+ * live integration, 2026). Same honesty rule: only this exact base
+ * URL takes the relay path.
+ */
+function webSearchRelay(aiio) {
+  return String(aiio?.url ?? "").replace(/\/$/, "") === KIMI_CODING_URL;
+}
+
+/**
+ * One POST {baseUrl}/search against the coding relay. A rejected
+ * request (4xx/5xx) THROWS with the status — the Agent wraps it as a
+ * failure and dispatch falls through; the result is never fabricated.
+ */
+async function relayWebSearch(aiio, query, { signal, deadline }) {
+  const token = aiio?.settings?.auth?.token;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener?.("abort", onAbort, { once: true });
+  let timer;
+  if (Number.isFinite(deadline)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
+    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
+    timer?.unref?.();
+  }
+  try {
+    const response = await fetch(`${KIMI_CODING_URL}/search`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      signal: controller.signal,
+      body: JSON.stringify({ text_query: query }),
+    });
+    if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
+    const body = await response.json();
+    const results = Array.isArray(body?.search_results) ? body.search_results : null;
+    if (results === null) throw new ProviderError("malformed", "Kimi relay search returned no search_results array");
+    return results
+      .map((item) => {
+        const raw = typeof item?.url === "string" ? item.url.trim() : "";
+        let url;
+        try { url = new URL(raw); } catch { return null; }
+        if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+        const title = typeof item?.title === "string" && item.title.trim() !== "" ? item.title.trim() : url.href;
+        const snippet = typeof item?.snippet === "string" ? item.snippet.trim() : "";
+        return snippet === "" ? `- [${title}](${url.href})` : `- [${title}](${url.href}) — ${snippet}`;
+      })
+      .filter(Boolean)
+      .join("\n");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+  }
+}
+
+/**
+ * One `$web_search` builtin-tool request against POST
+ * {baseUrl}/chat/completions, non-streaming (docs verified
+ * 2026-06: `tools: [{type:"builtin_function",
+ * function:{name:"$web_search"}}]`; the server executes the search
+ * and the assistant message content answers). A rejected request
+ * (4xx/5xx) THROWS with the status — the Agent wraps it as a failure
+ * and dispatch falls through; the result is never fabricated.
+ */
+async function builtinWebSearch(aiio, prompt, { signal, deadline }) {
+  const token = aiio?.settings?.auth?.token;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener?.("abort", onAbort, { once: true });
+  let timer;
+  if (Number.isFinite(deadline)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
+    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
+    timer?.unref?.();
+  }
+  try {
+    const response = await fetch(`${String(aiio.url).replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: aiio.currentModel,
+        messages: [{
+          role: "user",
+          content: prompt,
+        }],
+        tools: [{ type: "builtin_function", function: { name: "$web_search" } }],
+        stream: false,
+      }),
+    });
+    if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
+    const body = await response.json();
+    const content = body?.choices?.[0]?.message?.content;
+    return typeof content === "string" ? content : "";
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+  }
+}
+
 /** Kimi (Moonshot AI) chat-completions protocol. */
 export default class KimiProvider {
   static provider = {
     label: "Kimi (Moonshot AI)",
-    capabilities: { tools: true, thinking: true, streaming: true },
+    capabilities: {
+      tools: true,
+      thinking: true,
+      streaming: true,
+      "web-search": async function ({ aiio, args, signal, deadline }) {
+        if (providerWebDisabled(aiio)) return undefined;
+        const query = String(args?.query ?? "").trim();
+        if (query === "") return undefined;
+        // Two proven provider paths: the platform endpoints' `$web_search`
+        // builtin, and the coding relay's dedicated /search API.
+        if (webSearchHosted(aiio)) {
+          return builtinWebSearch(aiio,
+            `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet.`,
+            { signal, deadline });
+        }
+        if (webSearchRelay(aiio)) return relayWebSearch(aiio, query, { signal, deadline });
+        return undefined;
+      },
+    },
   };
 
   /** Endpoints speaking this dialect (login wizard presets). The

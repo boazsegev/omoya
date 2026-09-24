@@ -11,6 +11,8 @@
   --code-inline: #e4ded0;
   --shadow: 5px 5px 0 var(--ink);
   --focus: #b53a0e;
+  --motion: 180ms;
+  --ease: cubic-bezier(.2, .6, .2, 1);
   color-scheme: light;
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
@@ -30,7 +32,7 @@ html[data-theme="dark"] {
 
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--ink); background: var(--paper); line-height: 1.6; transition: background-color .15s ease, color .15s ease; }
-a { color: var(--blue); text-decoration-thickness: 2px; text-underline-offset: .18em; }
+a { color: var(--blue); text-decoration-thickness: 2px; text-underline-offset: .18em; transition: color var(--motion) var(--ease); }
 a:hover { color: var(--orange); }
 a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible {
   outline: 3px solid var(--focus); outline-offset: 2px;
@@ -51,13 +53,24 @@ html[data-theme="dark"] .skip-link { color: #131a20; }
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
   gap: .75rem 1.5rem; max-width: 78rem; margin: auto; padding: 1.25rem 1.5rem;
   border-bottom: 3px solid var(--ink);
+  font-size: 1.12rem;
 }
 .brand {
-  display: inline-flex; align-items: center; gap: .65rem; color: var(--ink);
+  display: inline-flex; align-items: center; color: var(--ink);
   font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 1.45rem; font-weight: 700; letter-spacing: .035em; text-decoration: none;
+  font-size: 1.65rem; font-weight: 700; letter-spacing: .035em; text-decoration: none;
 }
-.brand img { width: 2.25rem; height: 2.25rem; flex: none; border-radius: .5rem; }
+/* Wordmark: the O is rendered as the logo mark, but remains real text for
+   copy/paste and find-in-page. The glyph box spans the transparent O. */
+.wordmark-o { position: relative; display: inline-block; }
+.wordmark-o-text { color: transparent; }
+.wordmark-mark {
+  position: absolute; top: -0.36em; right: -0.21em; bottom: -0.36em; left: -0.51em;
+  width: calc(100% + 0.72em); height: calc(100% + 0.72em);
+  overflow: visible; pointer-events: none;
+}
+.wordmark-mark circle { fill: none; stroke: currentColor; stroke-width: 58; }
+.wordmark-mark path { fill: none; stroke: currentColor; stroke-width: 34; }
 .site-nav { display: flex; align-items: center; gap: 1.1rem; }
 .site-nav a[aria-current="page"] { color: var(--orange); font-weight: 800; }
 .nav-note { color: var(--ink); opacity: .55; font-size: .85rem; cursor: help; }
@@ -101,23 +114,59 @@ html[data-theme="dark"] .theme-control button[aria-pressed="true"] { color: #131
 
 /* ------------------------------------------------------------ layout */
 main { max-width: 78rem; margin: auto; padding: 3rem 1.5rem 5rem; }
+/* The API layout splits the viewport between the sidebar and the content:
+   the grid is exactly one viewport tall, the sidebar scrolls internally
+   when a long module sub-list overflows, and the main column scrolls the
+   documentation. Neither column can overlap or lift the other. */
 .with-sidebar {
   display: grid; grid-template-columns: 14rem minmax(0, 1fr); gap: 2.5rem;
-  max-width: 78rem; margin: auto; padding: 2.5rem 1.5rem 5rem;
+  max-width: 78rem; height: calc(100vh - 1px); margin: auto; padding: 0 1.5rem;
 }
-.with-sidebar main { max-width: none; margin: 0; padding: 0; min-width: 0; }
-.api-nav { position: sticky; top: 1.25rem; align-self: start; }
+.with-sidebar main {
+  max-width: none; margin: 0; min-width: 0;
+  height: 100%; overflow-y: auto; padding: 2.5rem 0 5rem;
+}
+/* The sidebar scrolls inside its own grid column, bounded to the viewport
+   (leaving roughly a header-height margin below), so long module sub-lists
+   stay reachable and the documentation never overlaps or lifts it. */
+.with-sidebar > .api-nav {
+  align-self: start;
+  margin-top: 2.5rem;
+  max-height: calc(100vh - 8rem); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.api-nav::-webkit-scrollbar { width: .45rem; }
+.api-nav::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.api-nav::-webkit-scrollbar-track { background: transparent; }
 .api-nav-title { margin: 0 0 .6rem; font-size: .8rem; letter-spacing: .12em; text-transform: uppercase; color: var(--orange); }
 .api-nav ul { margin: 0; padding: 0; list-style: none; }
 .api-nav li { margin: 0; }
 .api-nav a {
   display: block; padding: .3rem .6rem; color: var(--ink); text-decoration: none;
   border-left: 3px solid transparent; font-size: .9rem;
+  transition: color var(--motion) var(--ease), border-left-color var(--motion) var(--ease),
+    background-color var(--motion) var(--ease), transform var(--motion) var(--ease);
 }
-.api-nav a:hover { color: var(--orange); border-left-color: var(--line); }
+.api-nav a:hover {
+  color: var(--orange); border-left-color: var(--line);
+  background: color-mix(in srgb, var(--code-inline) 45%, transparent);
+  transform: translateX(2px);
+}
 .api-nav a[aria-current="page"] { color: var(--orange); font-weight: 800; border-left-color: var(--orange); }
 
+/* Sub-navigation: the current module's exports and members, expanding softly. */
+.api-nav .current > a { border-left-color: var(--orange); }
+.api-sections { margin: .15rem 0 .5rem; }
+.api-sections a { font-size: .82rem; padding: .16rem .6rem .16rem 1.15rem; }
+.api-sections ul a { font-size: .76rem; padding-left: 1.85rem; opacity: .82; }
+.api-sections a.current { color: var(--orange); font-weight: 700; border-left-color: var(--line); }
+.api-sections,
+.api-sections ul { animation: nav-grow var(--motion) var(--ease); transform-origin: top left; }
+@keyframes nav-grow { from { opacity: 0; transform: scaleY(.94); } }
+
 /* ------------------------------------------------------------ content */
+/* Sidebar hash links and URL fragments land below the header edge. */
+.symbol, .arch-layer, .documentation [id], section[id] { scroll-margin-top: 1.25rem; }
 .hero { max-width: 68rem; padding: clamp(2rem, 6vw, 5rem) 0 clamp(4rem, 8vw, 7rem); }
 .hero-brand { display: flex; align-items: center; gap: clamp(1.5rem, 4vw, 3rem); }
 .hero-brand img {
@@ -141,6 +190,7 @@ h3 { margin-top: 2rem; }
 .button {
   display: inline-block; padding: .65rem 1rem; color: #fff; background: var(--orange);
   border: 2px solid var(--ink); box-shadow: var(--shadow); font-weight: 800; text-decoration: none;
+  transition: transform var(--motion) var(--ease), box-shadow var(--motion) var(--ease), background-color var(--motion) var(--ease);
 }
 html[data-theme="dark"] .button { color: #131a20; }
 .button:hover { color: #fff; background: var(--blue); box-shadow: 2px 2px 0 var(--ink); transform: translate(3px, 3px); }
@@ -152,17 +202,43 @@ p code, li code, dd code, td code { padding: .08rem .25rem; background: var(--co
 pre code { padding: 0; background: none; border: 0; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); gap: 1.25rem; }
 .features { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.grid article { min-width: 0; padding: 1.25rem; background: var(--panel); border: 2px solid var(--ink); box-shadow: 4px 4px 0 var(--line); }
+.grid article, .card {
+  min-width: 0; padding: 1.25rem; background: var(--panel); border: 2px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--line);
+  transition: transform var(--motion) var(--ease), box-shadow var(--motion) var(--ease),
+    border-color var(--motion) var(--ease);
+}
+.grid article:hover, .card:hover {
+  transform: translate(-2px, -2px) scale(1.012);
+  box-shadow: 6px 6px 0 var(--line); border-color: var(--ink);
+}
+/* Whole-card links: the card IS the anchor; the title carries the link color. */
+a.card { display: block; color: var(--ink); text-decoration: none; }
+a.card:hover { color: var(--ink); }
+a.card h3 { color: var(--blue); text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .18em; }
+a.card:hover h3 { color: var(--orange); }
 .grid h3 { margin-top: 0; }
 .features article pre { max-width: 100%; box-shadow: none; font-size: .78rem; }
 .features article pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------ docs */
 .documentation { max-width: 62rem; }
+.symbol { scroll-margin-top: 1.25rem; }
+/* Linked symbols flash softly so hash navigation (and sidebar scroll-spy)
+   shows exactly where it landed. */
+.symbol:target { animation: target-flash 1.1s var(--ease); }
+@keyframes target-flash {
+  0% { background: color-mix(in srgb, var(--orange) 22%, var(--panel)); border-color: var(--orange); }
+  100% { background: var(--panel); }
+}
 .documentation h1 { max-width: none; font-size: clamp(2.5rem, 6vw, 4.5rem); }
 .documentation h2 { padding-top: 1rem; border-top: 2px solid var(--line); }
 .documentation pre { box-shadow: none; }
-.symbol { margin: 1.5rem 0; padding: 1rem 1.25rem; background: var(--panel); border: 2px solid var(--ink); }
+.symbol {
+  margin: 1.5rem 0; padding: 1rem 1.25rem; background: var(--panel); border: 2px solid var(--ink);
+  transition: transform var(--motion) var(--ease), box-shadow var(--motion) var(--ease);
+}
+.symbol:hover { transform: translateY(-1px); box-shadow: 4px 4px 0 var(--line); }
 .symbol.member { margin-left: 1.5rem; border-style: dashed; }
 .symbol h3, .symbol h4 { margin-top: 0; overflow-wrap: anywhere; }
 .kind, .flag {
@@ -188,19 +264,38 @@ blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--or
 /* ------------------------------------------------------------ footer */
 .site-footer { max-width: 78rem; margin: auto; padding: 1.5rem; border-top: 3px solid var(--ink); font-size: .85rem; }
 
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
 @media (max-width: 64rem) {
   .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 56rem) {
-  .with-sidebar { display: block; }
-  .api-nav { position: static; margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 2px solid var(--line); }
+  .with-sidebar { display: block; height: auto; padding: 2.5rem 1.5rem 5rem; }
+  .with-sidebar main { height: auto; overflow-y: visible; padding: 0; }
+  /* In the stacked layout the sidebar rejoins the flow: the page scrolls it. */
+  .with-sidebar > .api-nav {
+    margin-top: 0; max-height: none; overflow-y: visible;
+    margin-bottom: 2rem; padding-bottom: 1rem; border-bottom: 2px solid var(--line);
+  }
   .api-nav ul { display: flex; flex-wrap: wrap; gap: .25rem .5rem; }
   .api-nav a { border-left: 0; border-bottom: 3px solid transparent; }
+  .api-nav a:hover { transform: none; }
   .api-nav a[aria-current="page"] { border-bottom-color: var(--orange); }
+  /* In the horizontal layout the sub-list becomes a second row of chips. */
+  .api-nav li.current { flex-basis: 100%; }
+  .api-sections { display: flex; flex-wrap: wrap; gap: .15rem .25rem; }
+  .api-sections ul { display: contents; }
+  .api-sections a { border-left: 0; border-bottom: 0; padding: .1rem .4rem; }
 }
 @media (max-width: 38rem) {
   .site-header { padding: 1rem; }
   main, .with-sidebar { padding: 2rem 1rem 3rem; }
+  .with-sidebar { height: auto; }
   .features { grid-template-columns: 1fr; }
   .hero-brand { align-items: flex-start; gap: 1rem; }
   .hero-brand img { width: 5rem; border-radius: 1.1rem; box-shadow: .35rem .35rem 0 var(--line); }

@@ -84,6 +84,20 @@ describe("worker tool", () => {
     expect(first.spawnPermission).toBe(false);
   });
 
+  test("creates a safe read-only worker only when requested", async () => {
+    const { manager } = setup();
+    await worker({ name: "reader", prompt: "inspect only", safe: true }, { agent: manager });
+    const child = manager.children.find(({ name }) => name === "reader");
+    expect(child.safe).toBe(true);
+
+    const schema = toolDescription(manager.env).worker.inputSchema.properties.safe;
+    expect(schema).toMatchObject({ type: "boolean" });
+    expect(schema.description).toContain("read-only tools");
+
+    await worker({ name: "reader", reset: true }, { agent: manager });
+    expect(manager.children.find(({ name }) => name === "reader").safe).toBe(true);
+  });
+
   test("routes immutable mixed assistant content with provenance", async () => {
     const { manager } = setup();
     await worker({ name: "r", prompt: "work" }, { agent: manager });

@@ -45,7 +45,12 @@ describe("generated API documentation", () => {
   test("API cross-references link method-call notation across modules", async () => {
     const data = await collect();
     const html = linkApiReferences("<p><code>Agent.close()</code></p>", buildApiLinks(data), "Env");
-    expect(html).toBe('<p><a href="./agent/#Agent-close"><code>Agent.close()</code></a></p>');
+    // Root-relative: deployed pages are extensionless clean URLs (/api/env),
+    // where a relative "./agent/" would resolve to /agent — outside the API tree.
+    expect(html).toBe('<p><a href="/api/agent/#Agent-close"><code>Agent.close()</code></a></p>');
+    // Same-module mentions stay fragment-only.
+    const local = linkApiReferences("<p><code>Env.safe</code></p>", buildApiLinks(data), "Env");
+    expect(local).toBe('<p><a href="#Env-safe"><code>Env.safe</code></a></p>');
   }, 20_000);
 
   test("API.md regenerates from the live tree on every run", async () => {

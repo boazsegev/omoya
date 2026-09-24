@@ -112,7 +112,7 @@ describe("test provider: script sources", () => {
     const turns = [];
     for (let index = 0; index < 10; index++) turns.push(await aiio.write(context));
     expect(turns[0].type).toBe("done");
-    expect(turns[0].message.content.some((block) => block.name === "note-set")).toBe(true);
+    expect(turns[0].message.content.some((block) => block.name === "note")).toBe(true);
     const workerCall = turns.flatMap((turn) => turn.message?.content ?? []).find((block) => block.name === "worker");
     expect(workerCall?.arguments).toMatchObject({ name: "ui-response-demo", model: "test/ui-response" });
     expect(turns.flatMap((turn) => turn.message?.content ?? []).some((block) => block.name?.startsWith("chat"))).toBe(false);

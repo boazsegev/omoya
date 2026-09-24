@@ -88,7 +88,7 @@ describe("module layout: public façades own private folders", () => {
       NAMESPACE: upper,
       namespace: lower,
       settingsEnv: `${upper}_SETTINGS_DIR`, skillsEnv: `${upper}_SKILLS_DIR`,
-      promptsEnv: `${upper}_PROMPTS_DIR`, systemEnv: `${upper}_SYSTEM`,
+      promptsEnv: `${upper}_PROMPTS_DIR`,
       osSandboxEnv: `${upper}_OS_SANDBOX`, toolWorkerEnv: `${upper}_TOOL_WORKER`,
       testScriptEnv: `${upper}_TEST_SCRIPT`, settingsHome: `.${lower}-settings`,
       realAgentSymbol: `${lower}.realAgent`, agentName: `${lower}-agent`,

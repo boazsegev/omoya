@@ -249,6 +249,37 @@ async function listTools(name, config, settings) {
  *   servers
  * @returns {Promise<string>}
  */
+export async function callMcp({ server, tool, arguments: toolArgs, timeout, signal } = {}, context) {
+  const settings = context?.env?.settings;
+  const safeMode = context?.env != null && context.env === context.env.safe;
+  const all = configuredServers(context);
+  const servers = safeMode
+    ? Object.fromEntries(Object.entries(all).filter(([, c]) => c.safe === true))
+    : all;
+  const config = servers[server];
+  if (!config) throw new Error("Choose a server listed by servers, then try again.");
+  if (typeof tool !== "string" || tool === "") throw new TypeError("Choose a tool name: call tools for the selected server, then try again.");
+  if (signal?.aborted) throw signal.reason ?? new Error("MCP call cancelled");
+  const conn = await connect(server, config, settings);
+  const configured = Number.isFinite(config.timeout) && config.timeout > 0 ? config.timeout : DEFAULT_TIMEOUT;
+  const duration = Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, configured) : configured;
+  const pending = request(conn, "tools/call", { name: tool, arguments: toolArgs ?? {} }, duration);
+  const result = signal ? await Promise.race([
+    pending,
+    new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason ?? new Error("MCP call cancelled")), { once: true })),
+  ]) : await pending;
+  const text = (Array.isArray(result?.content) ? result.content : [])
+    .filter((block) => block?.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n");
+  if (result?.isError === true) {
+    const error = new Error("Fix the remote tool arguments, then try again. If it still fails, ask the user to check that server's access and configuration.");
+    error.mcpDetail = text !== "" ? text : JSON.stringify(result?.structuredContent ?? result ?? null);
+    throw error;
+  }
+  return text !== "" ? text : JSON.stringify(result?.structuredContent ?? result ?? null);
+}
+
 export async function mcp({ action, server, tool, arguments: toolArgs } = {}, context) {
   const settings = context?.env?.settings;
   const safeMode = context?.env != null && context.env === context.env.safe; // the safe view's own fingerprint
@@ -297,18 +328,8 @@ export async function mcp({ action, server, tool, arguments: toolArgs } = {}, co
   if (action === "call") {
     if (typeof server !== "string" || server === "") throw new TypeError("Choose a server name: call servers first, then try again.");
     if (typeof tool !== "string" || tool === "") throw new TypeError("Choose a tool name: call tools for the selected server, then try again.");
-    const config = named(server);
-    const conn = await connect(server, config, settings);
-    const timeout = Number.isFinite(config.timeout) && config.timeout > 0 ? config.timeout : DEFAULT_TIMEOUT;
-    const result = await request(conn, "tools/call", { name: tool, arguments: toolArgs ?? {} }, timeout);
-    const text = (Array.isArray(result?.content) ? result.content : [])
-      .filter((block) => block?.type === "text")
-      .map((block) => block.text ?? "")
-      .join("\n");
-    if (result?.isError === true) {
-      throw new Error("Fix the remote tool arguments, then try again. If it still fails, ask the user to check that server's access and configuration.");
-    }
-    return text !== "" ? text : JSON.stringify(result?.structuredContent ?? result ?? null);
+    named(server);
+    return callMcp({ server, tool, arguments: toolArgs }, context);
   }
   throw new Error("Choose action servers, tools, or call, then try again.");
 }

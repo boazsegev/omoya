@@ -3,7 +3,7 @@
  * README: terminal interface, headless/streaming use, embeddable library,
  * browser serving, sessions, providers, tools, jobs, security boundaries.
  */
-import { page } from "./html.js";
+import { page, wordmark } from "./html.js";
 import { site } from "../site.js";
 
 const FEATURES = [
@@ -43,6 +43,8 @@ const PRINCIPLES = [
   ["Transparent by default", "See what the model sees. Inspect the context, interrupt work, change course, and keep filesystem operations rooted in the current project. No hidden third-party CLI between your instructions and the provider."],
   ["Tools with boundaries", "Scoped file tools, bounded shell commands, MCP servers, skills, notes, and child workers — all composable, with read-only safe mode and an OS write sandbox for mutating tools. Security metadata never reaches the model."],
   ["Providers are plugins", "OpenAI Responses-compatible endpoints (including ChatGPT/Codex OAuth), Anthropic Messages, GitHub Copilot, Kimi/Moonshot, and Ollama — normalized into one context and event model. Switch models without leaving the TUI."],
+  ["Zero-config local discovery", "Endpoint auto-detection finds what's already running: an Ollama server on localhost:11434 (and LM Studio on 1234) becomes a ready endpoint with no setup, and a local SearXNG instance (SEARXNG_URL/SEARXNG_BASE) becomes the web-search backend. Discoveries are dynamic — never persisted, re-detected every startup."],
+  ["The web, without an account", "Every web-search and web-fetch call routes the provider's web backend, then a mapped MCP server, then a package backend that needs no account: SearXNG instances are tried first (SEARXNG_URL/SEARXNG_BASE or web.search.backends), then DuckDuckGo and Mojeek are aggregated with rank fusion — Brave joins when BRAVE_API_KEY is set, Swisscows is opt-in, and web-fetch converts pages to Markdown. All of it is bounded, cached, and rate-limited."],
   ["The project is the unit of memory", "What an agent learns belongs to the project folder it learned it in: ai-settings.json, ai-skills/, ai-prompts/, ai-jobs/, AGENTS.md. Open a different folder and the agent starts from package defaults."],
 ];
 
@@ -56,7 +58,7 @@ export function homePage() {
     <img src="./assets/logo.svg" width="160" height="160" alt="">
     <div>
       <p class="eyebrow">TRANSPARENT BUN AGENT HARNESS</p>
-      <h1><span class="product-name">Omoya</span><span class="hero-claim">See what your agent sees.</span></h1>
+      <h1><span class="product-name">${wordmark("Omoya")}</span><span class="hero-claim">See what your agent sees.</span></h1>
     </div>
   </div>
   <p class="lede">Omoya puts the whole agent loop in your hands — model selection, system instructions, context, tools, sessions, and security policy. Work in the terminal, stream structured events through a headless process, or embed the Bun library in your own project.</p>
@@ -68,13 +70,13 @@ om</code></pre>
 <section aria-labelledby="surfaces-heading">
   <h2 id="surfaces-heading">One core, every surface</h2>
   <div class="grid features">
-${FEATURES.map((f) => `    <article><h3>${f.title}</h3><p>${f.body}</p><pre><code>${f.code}</code></pre></article>`).join("\n")}
+${FEATURES.map((f) => `    <article class="card"><h3>${f.title}</h3><p>${f.body}</p><pre><code>${f.code}</code></pre></article>`).join("\n")}
   </div>
 </section>
 <section aria-labelledby="principles-heading">
   <h2 id="principles-heading">What makes it useful</h2>
   <div class="grid">
-${PRINCIPLES.map(([title, body]) => `    <article><h3>${title}</h3><p>${body}</p></article>`).join("\n")}
+${PRINCIPLES.map(([title, body]) => `    <article class="card"><h3>${title}</h3><p>${body}</p></article>`).join("\n")}
   </div>
 </section>
 <section aria-labelledby="security-heading">
@@ -88,6 +90,24 @@ ${PRINCIPLES.map(([title, body]) => `    <article><h3>${title}</h3><p>${body}</p
     <li>Session logs live outside the project tree, so cwd-scoped tools can never rewrite their own history.</li>
   </ul>
   <p>Reads are not fully sandboxed by design: do not run the agent in a tree containing untrusted symlinks, and do not rely on <code>bash</code> to protect secrets outside that tree.</p>
+</section>
+<section aria-labelledby="environment-heading">
+  <h2 id="environment-heading">Environment auto-detection</h2>
+  <p>Endpoint auto-detection reads the process environment and probes local servers at startup. Discoveries are <strong>dynamic</strong> — in memory only, never persisted, re-detected every startup; a key or server removed from the environment leaves nothing behind.</p>
+  <table>
+    <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
+    <tbody>
+      <tr><td><code>OPENAI_API_KEY</code> (+ optional <code>OPENAI_BASE_URL</code>)</td><td><code>openai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>AZURE_OPENAI_API_KEY</code> (+ required <code>AZURE_OPENAI_BASE_URL</code>)</td><td><code>azure-openai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>XAI_API_KEY</code></td><td><code>xai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>MOONSHOT_API_KEY</code> (+ optional <code>MOONSHOT_BASE_URL</code>)</td><td><code>kimi</code> (Moonshot platform)</td></tr>
+      <tr><td><code>KIMI_API_KEY</code></td><td><code>kimi-coding</code> (Kimi for Coding relay)</td></tr>
+      <tr><td><code>ANTHROPIC_API_KEY</code> or <code>ANTHROPIC_AUTH_TOKEN</code> (+ optional <code>ANTHROPIC_BASE_URL</code>)</td><td><code>anthropic</code> (Anthropic Messages)</td></tr>
+      <tr><td><code>http://localhost:11434</code> — Ollama server probe (<code>/api/tags</code>)</td><td><code>ollama</code></td></tr>
+      <tr><td><code>http://localhost:1234/v1</code> — LM Studio server probe (<code>/models</code>)</td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>
+    </tbody>
+  </table>
+  <p>The harness itself reads a small namespace-derived set: <code>OMOYA_SETTINGS_DIR</code> (settings folder override, with the legacy <code>AI_SETTINGS_DIR</code>/<code>OMOYA_SETTINGS</code>/<code>AI_SETTINGS</code> spellings), <code>OMOYA_SKILLS_DIR</code> and <code>OMOYA_PROMPTS_DIR</code> (extra catalog roots), and <code>OMOYA_OS_SANDBOX=none</code> (disable the write-sandbox probe — the Agent then forces safe mode). The <code>web-search</code> tool reads <code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code> (auto-detected as its SearXNG backend — a local instance needs no API key) and <code>BRAVE_API_KEY</code> (enables the Brave search engine — without it Brave stays off); see the <a href="/api/tools/#web-search">tool catalog</a> for the provider → MCP → package routing.</p>
 </section>
 <section aria-labelledby="start-heading">
   <h2 id="start-heading">Start in one minute</h2>

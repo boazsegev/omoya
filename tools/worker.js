@@ -108,6 +108,7 @@ function createWorker(manager, args, preserved) {
     ...(typeof args.name === "string" && args.name.length > 0 ? { name: args.name } : {}),
     description: preserved?.description ?? args.description ?? "",
     model: selected.selector,
+    safe: preserved?.safe ?? args.safe === true,
   });
   routeResponses(worker, manager);
   worker._append({ type: 1, content: [{ type: "text", text: NOTICE }] }, { merge: false });
@@ -137,7 +138,7 @@ export async function worker(args = {}, context = {}) {
   }
   if (args.reset === true) {
     if (workers.some((child) => child.busy)) throw new Error("Wait for every matched worker to become idle, or close it instead of resetting it.");
-    const records = workers.map((child) => ({ name: child.name, description: child.description, selector: `${child.endpoint}/${child.model}` }));
+    const records = workers.map((child) => ({ name: child.name, description: child.description, selector: `${child.endpoint}/${child.model}`, safe: child.safe }));
     for (const child of workers) child.close();
     workers = records.map((record) => createWorker(manager, { ...args, name: record.name }, record));
   }
@@ -164,18 +165,19 @@ export function toolDescription(env) {
   return {
     worker: {
       trusted: true,
-      description: "Create or control direct child agents by name. For a new worker, make the first prompt self-contained: state its role, concrete task, relevant context, constraints, deliverable, and acceptance checks. Omit model to inherit your own model, or choose a provider/model value from the model field. Prompts fan out to every same-name child; responses return as attributed user messages.",
+      description: "Create or control worker agents. Use workers to divide substantial work, not to outsource your judgment or reasoning. For a new worker, make the first prompt self-contained: state its role, concrete task, relevant context, constraints, deliverable, and acceptance checks. Omit model by default, or choose a provider/model value from the model field. Responses return as attributed user messages.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
-          name: { type: "string", description: "Child Agent(s) name. Omit to create an automatically named worker." },
-          prompt: { type: "string", description: "Message queued to named agent(s); required for new workers. First prompt: role, task, context, constraints, deliverable, and acceptance checks. Delegate tasks, not reasoning." },
+          name: { type: "string", description: "Target worker name. Omit to create an automatically named worker." },
+          prompt: { type: "string", description: "Message queued to worker(s); required for new workers. First prompt: role, task, context, constraints, deliverable, and acceptance checks. Delegate tasks, not reasoning." },
           description: { type: "string", description: "Description used only when creating a worker." },
           model: { type: "string", description: modelDescription, ...(candidates.length > 0 ? { enum: candidates } : {}) },
+          safe: { type: "boolean", description: "Create the worker in safe mode: it can publish and execute only read-only tools. Existing workers keep their current mode." },
           reset: { type: "boolean", description: "Replace every idle match while preserving identity and endpoint settings." },
           close: { type: "boolean", description: "Request handoff from busy matches, then close every match." },
           info: { type: "boolean", description: "Include name, model, context usage, state, and description." },
-          list: { type: "boolean", description: "Include every direct child individually, including duplicate names." },
+          list: { type: "boolean", description: "Include every child worker individually, including duplicate names." },
         },
       },
     },

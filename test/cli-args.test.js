@@ -1,6 +1,6 @@
 // Endpoint/endpoint-model grammar and last-used endpoint selection.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { Env } from "../lib/env.js";
 import { listModelCandidates, readLastCombo, resolveModelCombo, selectEndpointModel, writeLastCombo } from "../lib/cli.js";
 
@@ -90,20 +90,28 @@ describe("last-used endpoint/model persistence", () => {
   test("round-trips an endpoint/model pair and skips identical writes", async () => {
     const { env } = await comboEnv();
     expect(readLastCombo(env)).toBeNull();
-    writeLastCombo(env, { endpoint: "fake2", model: "m2" });
-    expect(readLastCombo(env)).toEqual({ endpoint: "fake2", model: "m2" });
-    expect(JSON.parse(readFileSync(`${env.dir}/last-model.json`, "utf8"))).toEqual({ endpoint: "fake2", model: "m2" });
+    writeLastCombo(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
+    expect(readLastCombo(env)).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
+    expect(JSON.parse(readFileSync(`${env.dir}/last-model.json`, "utf8"))).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
     const { statSync } = await import("node:fs");
     const before = statSync(`${env.dir}/last-model.json`).mtimeMs;
-    writeLastCombo(env, { endpoint: "fake2", model: "m2" });
+    writeLastCombo(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
     expect(statSync(`${env.dir}/last-model.json`).mtimeMs).toBe(before);
+  });
+
+  test("Env treats an unavailable last model exactly like a missing file", async () => {
+    const { env } = await comboEnv();
+    expect(env.lastModel()).toBeNull();
+    writeFileSync(`${env.dir}/last-model.json`, JSON.stringify({ endpoint: "fake", model: "removed" }));
+    expect(env.lastModel()).toBeNull();
+    expect(readLastCombo(env)).toBeNull();
+    await expect(selectEndpointModel(env, {}, { lastUsed: true })).resolves.toEqual({ endpoint: undefined, model: undefined });
   });
 
   test("does not persist model-only records and ignores a record without an endpoint", async () => {
     const { env } = await comboEnv();
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(`${env.dir}/last-model.json`, JSON.stringify({ model: "m1" }));
-    expect(readLastCombo(env)).toEqual({ model: "m1" }); // endpoint stays absent, never invented
+    expect(readLastCombo(env)).toBeNull(); // invalid state behaves exactly like no saved selection
     writeFileSync(`${env.dir}/last-model.json`, "");
     writeLastCombo(env, { model: "m1" });
     expect(existsSync(`${env.dir}/last-model.json`)).toBe(true); // existing file is never deleted

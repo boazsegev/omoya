@@ -34,9 +34,20 @@ button:not(:disabled) { cursor: pointer; }
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 92%, transparent);
   backdrop-filter: blur(12px);
+  font-size: 1.12rem;
 }
-.app-brand { display: inline-flex; align-items: center; gap: .5rem; white-space: nowrap; }
-.app-brand img { width: 2rem; height: 2rem; flex: none; border-radius: .45rem; }
+.app-brand { display: inline-flex; align-items: center; white-space: nowrap; }
+/* Wordmark: the O is rendered as the logo mark, but remains real text for
+   copy/paste and find-in-page. The glyph box spans the transparent O. */
+.wordmark-o { position: relative; display: inline-block; }
+.wordmark-o-text { color: transparent; }
+.wordmark-mark {
+  position: absolute; top: -0.36em; right: -0.21em; bottom: -0.36em; left: -0.51em;
+  width: calc(100% + 0.72em); height: calc(100% + 0.72em);
+  overflow: visible; pointer-events: none;
+}
+.wordmark-mark circle { fill: none; stroke: currentColor; stroke-width: 58; }
+.wordmark-mark path { fill: none; stroke: currentColor; stroke-width: 34; }
 .icon-button {
   width: 2.4rem; height: 2.4rem;
   border: 1px solid var(--border); border-radius: 0.55rem; background: var(--surface);

@@ -131,6 +131,46 @@ function scrollToHash(behavior = "smooth") {
 addEventListener("hashchange", () => scrollToHash());
 scrollToHash("auto"); // initial load with a hash (search follow / deep link)
 
+/* ------------------------------------------------ sidebar scroll-spy */
+
+/**
+ * Highlight the sidebar sub-navigation entry for the symbol currently in
+ * view. Each `.api-sections` hash link is paired with its section; an
+ * IntersectionObserver tracks visibility and the bottom-most visible entry
+ * wins (sections are in document order). Pure enhancement: without JS the
+ * sub-navigation is simply a static list of working hash links.
+ */
+const spyLinks = [...document.querySelectorAll('.api-sections a[href^="#"]')];
+if (spyLinks.length && "IntersectionObserver" in window) {
+  const pairs = spyLinks
+    .map((link) => [link, document.getElementById(decodeURIComponent(link.hash.slice(1)))])
+    .filter(([, section]) => section);
+  const visible = new Set();
+  const highlight = () => {
+    let current = null;
+    for (const [link, section] of pairs) {
+      link.classList.remove("current");
+      if (visible.has(section)) current = link;
+    }
+    // Nothing in view (between sections): keep the last entry above the fold.
+    if (!current) {
+      for (const [link, section] of pairs) {
+        if (section.getBoundingClientRect().top < innerHeight * 0.4) current = link;
+      }
+    }
+    current?.classList.add("current");
+  };
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) visible.add(entry.target);
+      else visible.delete(entry.target);
+    }
+    highlight();
+  }, { rootMargin: "-5% 0px -70% 0px" });
+  for (const [, section] of pairs) observer.observe(section);
+  highlight();
+}
+
 input.setAttribute("role", "combobox");
 input.setAttribute("aria-controls", "search-results");
 input.setAttribute("aria-expanded", "false");

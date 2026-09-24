@@ -2,6 +2,7 @@
 // over the real public Agent/Env surfaces (never GTUI). The SPA is a client
 // of these packets; every check here drives the wire, not the DOM.
 import { expect, test } from "bun:test";
+import { readdirSync, writeFileSync } from "node:fs";
 import { serve, MAX_WS_PAYLOAD_LENGTH } from "../lib/web-app/server.js";
 import { parseClientMessage } from "../lib/web-app/protocol.js";
 import { AgentSession } from "../lib/web-app/session.js";
@@ -29,6 +30,7 @@ test("protocol validates client packets and rejects malformed input", () => {
   expect(() => parseClientMessage(JSON.stringify({ type: "chat.submit", text: "hi", attachments: ["a", "a"] }))).toThrow();
   expect(parseClientMessage(JSON.stringify({ type: "chat.unqueue" }))).toEqual({ type: "chat.unqueue" });
   expect(parseClientMessage(JSON.stringify({ type: "settings.safe", on: true })).on).toBe(true);
+  expect(parseClientMessage(JSON.stringify({ type: "settings.session-save", on: true }))).toEqual({ type: "settings.session-save", on: true });
   expect(parseClientMessage(JSON.stringify({ type: "question.answer", requestId: "q1", answers: null })).answers).toBeNull();
   expect(parseClientMessage(JSON.stringify({ type: "session.fork", id: "branch" }))).toEqual({ type: "session.fork", id: "branch" });
   expect(parseClientMessage(JSON.stringify({ type: "session.close", agentId: "agent-1" }))).toEqual({ type: "session.close", agentId: "agent-1" });
@@ -84,6 +86,63 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
   } finally { web.stop(); }
 });
 
+test("a running turn reports live activity (Stop/composer state) without an agent switch", async () => {
+  const env = await testEnv();
+  let release;
+  const io = {
+    state: "idle",
+    async write(_context, callbacks) {
+      callbacks.onStart?.({ type: "start" });
+      callbacks.onTextDelta?.({ type: "text", text: "working reply" });
+      return await new Promise((resolve) => { release = () => { callbacks.onDone?.({ type: "done" }); resolve({ type: "done" }); }; });
+    },
+    async kill() { this.state = "closed"; },
+  };
+  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    expect(received.find((m) => m.type === "hello")?.agent?.busy).toBe(false);
+    socket.send(JSON.stringify({ type: "chat.submit", text: "go" }));
+    const deadline = Date.now() + 4000;
+    // turn.start carries busy:true immediately (the composer animation and
+    // Stop button read it), and the pushed agent snapshot says busy too.
+    while (Date.now() < deadline && !received.some((m) => m.type === "turn.start")) await tick();
+    expect(received.findLast((m) => m.type === "turn.start")?.busy).toBe(true);
+    while (Date.now() < deadline && !(received.findLast((m) => m.type === "agent")?.agent?.busy)) await tick();
+    expect(received.findLast((m) => m.type === "agent")?.agent?.state).toBe("working");
+    expect(received.findLast((m) => m.type === "sessions")?.agents?.[0]?.busy).toBe(true);
+    release();
+    // When the run settles, the SAME stream reports idle again. Wait for
+    // the run to actually settle first: earlier turn.end packets (tool
+    // rounds, queued-message continuations) legitimately carry busy:true.
+    while (Date.now() < deadline && received.findLast((m) => m.type === "turn.end")?.busy !== false) await tick();
+    while (Date.now() < deadline && received.findLast((m) => m.type === "agent")?.agent?.busy !== false) await tick();
+    expect(received.findLast((m) => m.type === "agent")?.agent?.state).toBe("idle");
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("reconnecting selects the first running agent before creating a session", async () => {
+  const env = await testEnv();
+  const first = scripted(env, 0, "first");
+  const second = scripted(env, 0, "second");
+  let created = 0;
+  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: scripted(env, 0, "new") }; } });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((message) => message.type === "hello")) await tick();
+    expect(received.find((message) => message.type === "hello")?.agent?.id).toBe(first.name);
+    expect(created).toBe(0);
+    expect(env.agents()).toEqual([first, second]);
+    socket.close();
+  } finally { web.stop(); }
+});
+
 test("an agent is ready at connection time so settings work before chat, and chat streams turn deltas", async () => {
   const env = await testEnv();
   let created = 0;
@@ -107,6 +166,83 @@ test("an agent is ready at connection time so settings work before chat, and cha
     expect(text).toContain("web scripted reply");
     socket.close();
   } finally { web.stop(); }
+});
+
+test("session logging settings update persisted agents; an anonymous agent opts in by starting a saved session", async () => {
+  const env = await testEnv();
+  const saved = new Agent({ env, model: "p/m", context: [], session: "web-session", createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: saved }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    expect(received.find((m) => m.type === "settings")?.sessionSave).toBe(true);
+    socket.send(JSON.stringify({ type: "settings.session-save", on: false }));
+    await tick();
+    expect(saved.sessionSave).toBe(false);
+    expect(received.findLast((m) => m.type === "settings")?.sessionSave).toBe(false);
+    socket.close();
+  } finally { web.stop(); }
+
+  const anonymousEnv = await testEnv();
+  const anonymous = scripted(anonymousEnv);
+  const anonymousWeb = await serve({ port: 0, env: anonymousEnv, createSession: async () => ({ agent: anonymous }) });
+  const anonymousReceived = [];
+  try {
+    const socket = await connect(anonymousWeb, anonymousReceived);
+    await tick();
+    expect(anonymousReceived.find((m) => m.type === "settings")?.sessionSave).toBeUndefined();
+    socket.send(JSON.stringify({ type: "settings.session-save", on: true }));
+    // The toggle is always accessible: opting in on an anonymous (Ghost)
+    // agent starts a SAVED session — the transcript continues persisted.
+    // Wait for the server's response instead of a bare tick: session
+    // creation can take longer than one tick.
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && anonymousReceived.findLast((m) => m.type === "settings")?.sessionSave !== true) await tick();
+    expect(anonymous.session?.save).toBe(true);
+    expect(anonymousReceived.findLast((m) => m.type === "settings")?.sessionSave).toBe(true);
+    const listed = anonymousReceived.findLast((m) => m.type === "sessions")?.agents?.find((a) => a.id === anonymous.name);
+    expect(listed?.session).toBe(anonymous.session.id);
+    socket.close();
+  } finally { anonymousWeb.stop(); }
+});
+
+test("web sessions are saved by default; --session anon stays a Ghost", async () => {
+  const savedEnv = await testEnv();
+  const savedWeb = await serve({ port: 0, env: savedEnv, createSession: async () => ({
+    agent: new Agent({ env: savedEnv, model: "p/m", context: [], session: crypto.randomUUID(), createIO: () => scriptedIO([[{ type: "done" }]]) }),
+  }) });
+  const received = [];
+  try {
+    const socket = await connect(savedWeb, received);
+    await tick(60);
+    const hello = received.find((m) => m.type === "hello");
+    expect(typeof hello.agent.session).toBe("string");
+    expect(received.find((m) => m.type === "settings")?.sessionSave).toBe(true);
+    // The session file flushes under the agent's session directory — the
+    // settings folder's sessions/ by default (asserted above).
+    socket.send(JSON.stringify({ type: "chat.submit", text: "persist me" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "turn.end")) await tick();
+    const agent = savedWeb.env.agents()[0];
+    expect(agent.session.dir.replace(/^\.\//, "")).toBe(`${savedEnv.settingsDir}/sessions`.replace(/^\.\//, ""));
+    // The live-turn flush is yielded to the event loop (Agent._flushLive):
+    // poll until the JSONL lands instead of assuming a synchronous write.
+    const readFiles = () => readdirSync(agent.session.dir).filter((name) => name.endsWith(".jsonl"));
+    while (Date.now() < deadline && readFiles().length === 0) await tick();
+    expect(readFiles().length).toBe(1);
+    socket.close();
+  } finally { savedWeb.stop(); }
+
+  const ghostEnv = await testEnv();
+  const ghostWeb = await serve({ port: 0, env: ghostEnv, session: { kind: "anonymous" } });
+  const ghostReceived = [];
+  try {
+    const socket = await connect(ghostWeb, ghostReceived);
+    await tick(60);
+    expect(ghostReceived.find((m) => m.type === "hello")?.agent?.session).toBeNull();
+    socket.close();
+  } finally { ghostWeb.stop(); }
 });
 
 test("tool-call response events stream as distinct wire packets", async () => {
@@ -208,6 +344,40 @@ test("the settings packet carries settings.web display prefs (defaults + overrid
     expect(packet.prefs.autocomplete).toBe(true);   // untouched default
     expect(packet.prefs.thinkingLevels).toContain("xhigh");
     socket.close();
+  } finally { web.stop(); }
+});
+
+test("closing the browser leaves its server-owned agent running", async () => {
+  const env = await testEnv();
+  let release;
+  const io = {
+    state: "idle",
+    async write(_context, callbacks) {
+      callbacks.onStart?.({ type: "start" });
+      return await new Promise((resolve) => { release = () => {
+        callbacks.onDone?.({ type: "done" });
+        resolve({ type: "done" });
+      }; });
+    },
+    async kill() { this.state = "closed"; },
+  };
+  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "chat.submit", text: "continue without me" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !agent.busy) await tick();
+    expect(agent.busy).toBe(true);
+    const closed = new Promise((resolve) => { socket.onclose = resolve; });
+    socket.close();
+    await closed;
+    expect(agent.busy).toBe(true);
+    release();
+    while (Date.now() < deadline && agent.busy) await tick();
+    expect(agent.busy).toBe(false);
   } finally { web.stop(); }
 });
 
@@ -348,6 +518,23 @@ test("the web protocol exposes context inspection/editing and direct tool calls"
   } finally { web.stop(); }
 });
 
+test("web startup replaces an invalid last model with the first available combo alphabetically", async () => {
+  const env = await testEnv();
+  env.endpoints.p.models = { m: {} };
+  env.endpoints.zed = { provider: "test", url: "test://zed", models: { omega: {} } };
+  env.endpoints.alpha = { provider: "test", url: "test://alpha", models: { beta: {}, alpha: {} } };
+  writeFileSync(`${env.settingsDir}/last-model.json`, JSON.stringify({ endpoint: "p", model: "removed" }));
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" } });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick(60);
+    const hello = received.find((message) => message.type === "hello");
+    expect(`${hello.agent.endpoint}/${hello.agent.model}`).toBe("alpha/alpha");
+    socket.close();
+  } finally { web.stop(); }
+});
+
 test("the model menu lists clean endpoint/model combos, never completion noise", async () => {
   const env = await testEnv();
   env.endpoints.acme = { provider: "test", url: "test://script" };
@@ -476,10 +663,10 @@ test("session.close closes an open agent and replaces its attached view", async 
   } finally { web.stop(); }
 });
 
-test("attaching to an agent replays its stored context as history blocks", async () => {
+test("attaching to an agent replays context user messages as history blocks", async () => {
   const env = await testEnv();
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "seeded reply"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = new Agent({ env, model: "p/m", context: [userMessage("context-only question")], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -499,6 +686,7 @@ test("attaching to an agent replays its stored context as history blocks", async
     while (Date.now() < sw && !(hello = bMsgs.find((m) => m.type === "hello"))) await tick();
     expect(hello).toBeDefined();
     const history = JSON.stringify(hello.history ?? []);
+    expect(history).toContain("context-only question");
     expect(history).toContain("seeded question");
     expect(history).toContain("seeded reply");
     socket.close(); b.close();
@@ -543,10 +731,10 @@ test("re-entering an agent replays a response streamed while it was in the backg
   } finally { web.stop(); }
 });
 
-test("connections are isolated: one connection's turn never leaks to another", async () => {
+test("reconnected views share the selected running agent's stream", async () => {
   const env = await testEnv();
-  let created = 0;
-  const web = await serve({ port: 0, env, createSession: async () => { const n = ++created; return { agent: scripted(env, 0, `reply-${n}`) }; } });
+  const agent = scripted(env, 0, "shared reply");
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const aMsgs = []; const bMsgs = [];
   try {
     const a = await connect(web, aMsgs);
@@ -554,10 +742,9 @@ test("connections are isolated: one connection's turn never leaks to another", a
     await tick();
     a.send(JSON.stringify({ type: "chat.submit", text: "A" }));
     const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && !aMsgs.some((m) => m.type === "turn.end")) await tick();
-    await tick(60);
-    expect(JSON.stringify(aMsgs)).toContain("reply-1");
-    expect(JSON.stringify(bMsgs)).not.toContain("reply-1");
+    while (Date.now() < deadline && !bMsgs.some((m) => m.type === "turn.end")) await tick();
+    expect(JSON.stringify(aMsgs)).toContain("shared reply");
+    expect(JSON.stringify(bMsgs)).toContain("shared reply");
     a.close(); b.close();
   } finally { web.stop(); }
 });
