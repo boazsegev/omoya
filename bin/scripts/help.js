@@ -83,12 +83,7 @@ stdin:   interactive lines, one user message per line (piped) or one
          natively); Ctrl-C cancels a running response; with no agent
          running it clears the input, and on an empty input shows
          "Press ^C again to exit" (a second ^C exits; any other key
-         dismisses the notice — the agent never sees any of this); a
-         line starting with "! " is a bash command, replaced by its
-         output before sending — if that's the WHOLE message, its
-         output is queued onto the next one instead (e.g.
-         "/context-system\\" then "! skill core" sends that skill's
-         output as the system message)
+         dismisses the notice — the agent never sees any of this)
 stdout:  the rendered response stream — text/thinking deltas as they
          arrive; a tool call's line mutates into its collapsed final
          state when the answer lands (details + first answer line;

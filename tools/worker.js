@@ -165,7 +165,7 @@ export function toolDescription(env) {
   return {
     worker: {
       trusted: true,
-      description: "Create or control worker agents. Use workers to divide substantial work, not to outsource your judgment or reasoning. For a new worker, make the first prompt self-contained: state its role, concrete task, relevant context, constraints, deliverable, and acceptance checks. Omit model by default, or choose a provider/model value from the model field. Responses return as attributed user messages.",
+      description: "Create or control worker agents. Use workers to divide substantial work, not to outsource your judgment or reasoning. For a new worker, make the first prompt self-contained: state its role, concrete task, relevant context, constraints, deliverable, and acceptance checks. Omit model by default, or choose a provider/model value from the model field. Responses are pushed as attributed user messages (never call `sleep` or they will be blocked).",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {

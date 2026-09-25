@@ -1,51 +1,51 @@
 /**
- * website/lib/home.js — the landing page. Product copy reflects the root
- * README: terminal interface, headless/streaming use, embeddable library,
- * browser serving, sessions, providers, tools, jobs, security boundaries.
+ * website/lib/home.js — the landing page. Product copy mirrors the root
+ * README: transparent TUI first, providers, security boundaries, then the
+ * scriptable, embeddable, and browser surfaces, then jobs and sessions.
  */
 import { page, wordmark } from "./html.js";
 import { site } from "../site.js";
 
 const FEATURES = [
   {
-    title: "The terminal interface",
-    body: "A long-running TUI that streams responses and thinking, shows tool activity as it happens, and keeps the current context inspectable and editable — menus, questionnaires, multi-line input, completion, themes, and queued follow-ups included.",
-    code: "om\nom --resume latest\nom --safe",
+    title: "Providers are plugins",
+    body: "Four provider protocols ship in the box — OpenAI Responses, Anthropic Messages, Kimi/Moonshot, and Ollama — with ready-made endpoints for OpenAI, the ChatGPT/Codex OAuth backend, GitHub Copilot, Azure OpenAI, xAI, and LM Studio. Everything normalizes into one context and event model, so switching models mid-session changes nothing else. Auto-detection reads your environment keys and probes local servers; discoveries are never persisted.",
+    code: "om --login\nom --list\nom --model ollama/gpt-oss:20b",
+  },
+  {
+    title: "Tools with enforced boundaries",
+    body: "File tools refuse absolute paths and parent traversal; shell commands refuse cd/ln/ls and visible outside paths; mutating tools fork under an OS write sandbox (macOS Seatbelt, Linux Bubblewrap). No sandbox? Safe mode is forced — only read-only tools exist.",
+    code: "om --safe\nom-tool --list\nom-tool read '{\"path\":\"README.md\"}'",
   },
   {
     title: "Drive it from a script",
-    body: "om-agent runs the complete tool loop without the TUI: one context in on stdin, normalized JSONL events out on stdout, diagnostics on stderr. om-io performs exactly one provider request — stable streams, distinct exit codes, real cancellation.",
+    body: "om-agent runs the complete tool loop: one context in on stdin, normalized JSONL events out on stdout, diagnostics on stderr. om-io performs exactly one provider request. Stable JSONL streams, distinct exit codes per failure class, SIGINT cancellation with the partial persisted.",
     code: 'echo "Summarize this" \\\n  | om-agent \\\n    --model ollama/gpt-oss:20b',
   },
   {
     title: "Embed the library",
-    body: "lib/agent.js is the headless core entry point, publishing Agent.Context, Agent.Env, and Agent.IO. Import omoya/app when CLI, Markdown, and UI concerns are needed — headless applications stay free of the interface graph.",
-    code: 'import Agent from "omoya/agent";\n\nconst env = await Agent.Env.create();\nconst agent = new Agent({\n  env, model: "ollama/gpt-oss:20b"\n});',
+    body: "Zero dependencies. omoya/agent is the headless core — Agent.Context, Agent.Env, Agent.IO — with no CLI, Markdown, or UI code loaded. Import omoya/app when you want those layers.",
+    code: 'import Agent from "omoya/agent";\n\nconst env = await Agent.Env.create();\nconst agent = new Agent({\n  env,\n  model: "ollama/gpt-oss:20b",\n  safe: true\n});',
   },
   {
     title: "Serve it to a browser",
-    body: "om --serve starts a standalone chat SPA over HTTP with a WebSocket carrying the same Agent/Env events used everywhere else. The server owns the agent; the browser only renders it. Loopback-bound by default.",
+    body: "om --serve starts a standalone chat SPA over HTTP and WebSocket, carrying the same Agent/Env events. The server owns the agent; the browser only renders it — close the tab and the agent keeps running. Loopback-bound, Origin-checked, no auth token: reaching the port means owning the agent.",
     code: "om --serve \\\n  --port 9900",
   },
   {
-    title: "Sessions that outlive the UI",
-    body: "Named sessions persist as JSONL under the user settings directory, outside the working project. Resume, rename, edit, roll back, fork, or delete them — anonymous sessions write nothing.",
-    code: "om --resume latest",
-  },
-  {
-    title: "Project jobs, under your control",
-    body: "om-jobs runs project-local Markdown tasks by explicit init/run/disable. Manual run is primary; an optional daemon scans immediately and then five minutes after each child completes. Cron and restart policy stay yours: use an explicit runtime, wrapper, and project cwd.",
-    code: "om-jobs init\nom-jobs run\nom-jobs daemon \\\n  foreground",
+    title: "Sessions and jobs",
+    body: "Named sessions persist as JSONL outside the project tree — resume, fork, roll back, or delete them. om-jobs runs scheduled, headless agent tasks written as plain Markdown files; the optional daemon is foreground-only, and cron stays yours.",
+    code: "om --resume latest\nom-jobs init\nom-jobs run",
   },
 ];
 
 const PRINCIPLES = [
-  ["Transparent by default", "See what the model sees. Inspect the context, interrupt work, change course, and keep filesystem operations rooted in the current project. No hidden third-party CLI between your instructions and the provider."],
-  ["Tools with boundaries", "Scoped file tools, bounded shell commands, MCP servers, skills, notes, and child workers — all composable, with read-only safe mode and an OS write sandbox for mutating tools. Security metadata never reaches the model."],
-  ["Providers are plugins", "OpenAI Responses-compatible endpoints (including ChatGPT/Codex OAuth), Anthropic Messages, GitHub Copilot, Kimi/Moonshot, and Ollama — normalized into one context and event model. Switch models without leaving the TUI."],
-  ["Zero-config local discovery", "Endpoint auto-detection finds what's already running: an Ollama server on localhost:11434 (and LM Studio on 1234) becomes a ready endpoint with no setup, and a local SearXNG instance (SEARXNG_URL/SEARXNG_BASE) becomes the web-search backend. Discoveries are dynamic — never persisted, re-detected every startup."],
-  ["The web, without an account", "Every web-search and web-fetch call routes the provider's web backend, then a mapped MCP server, then a package backend that needs no account: SearXNG instances are tried first (SEARXNG_URL/SEARXNG_BASE or web.search.backends), then DuckDuckGo and Mojeek are aggregated with rank fusion — Brave joins when BRAVE_API_KEY is set, Swisscows is opt-in, and web-fetch converts pages to Markdown. All of it is bounded, cached, and rate-limited."],
-  ["The project is the unit of memory", "What an agent learns belongs to the project folder it learned it in: ai-settings.json, ai-skills/, ai-prompts/, ai-jobs/, AGENTS.md. Open a different folder and the agent starts from package defaults."],
+  ["The system message is yours", "Instructions layer from three AGENTS.md files — the harness's, your settings folder's, the project's — plus anything you append live. No hidden third-party agent CLI between your instructions and the provider."],
+  ["See and fix the context", "Ctrl-O opens every message, thinking block, and tool exchange in full. /context-edit corrects a message, /context-rollback rewinds, /context-system extends. The TUI always reflects the exact context the model receives."],
+  ["The web, without an account", "web-search and web-fetch route the provider's own backend, then a mapped MCP server, then a package backend aggregating SearXNG, DuckDuckGo, Mojeek, and Brave — bounded, cached, rate-limited."],
+  ["The project is the unit of memory", "ai-settings.json, ai-auth-*.json, ai-skills/, ai-prompts/, ai-jobs/, AGENTS.md — what an agent learns stays in the folder it learned it in, invisible from any other project."],
+  ["Direct tool access", "om-tool lists and calls any tool without an agent; om-skills prints the skill catalog; om-tools2bash generates direct shell wrappers. Direct calls are the manual door: interactive tools need an agent's question bridge, and mutating calls here run without the OS sandbox."],
+  ["Rename the whole harness", "lib/namespace.js is the single switch for runtime identity; bin/scripts/rename rewrites env vars, the settings folder, and every executable in one step. The project-local ai- prefix is the deliberate constant."],
 ];
 
 export function homePage() {
@@ -61,11 +61,23 @@ export function homePage() {
       <h1><span class="product-name">${wordmark("Omoya")}</span><span class="hero-claim">See what your agent sees.</span></h1>
     </div>
   </div>
-  <p class="lede">Omoya puts the whole agent loop in your hands — model selection, system instructions, context, tools, sessions, and security policy. Work in the terminal, stream structured events through a headless process, or embed the Bun library in your own project.</p>
+  <p class="lede">Most agent tools hide the context, rewrite your files, and lock you to one vendor. Omoya shows you exactly what the model sees. Filesystem boundaries are enforced by the OS, not by prompt instructions. Every shipped provider — and OpenAI-/Anthropic-compatible third-party endpoints — normalizes into one event model. Zero dependencies; requires only <a href="https://bun.sh/">Bun</a>.</p>
   <div class="actions"><a class="button" href="https://www.npmjs.com/package/omoya">Install from npm</a><a class="text-link" href="${site.repository}">View the source on GitHub →</a></div>
-  <pre><code>bun add -g omoya
-omoya --login
-om</code></pre>
+  <pre><code>bunx omoya --login     # no install needed
+bunx omoya             # start the terminal interface
+
+om --model ollama/gpt-oss:20b   # or a local model — no account at all</code></pre>
+</section>
+<section aria-labelledby="why-heading">
+  <h2 id="why-heading">Why Omoya</h2>
+  <p><strong>Stop context leaks</strong> — where other agent tools stop at a project instructions file, Omoya makes the project the unit of everything: skills, prompts, settings, and scheduled jobs live in <code>ai-</code> files inside the folder they belong to, minimizing cross-project context leaks.</p>
+  <p><strong>Project memory and workflow</strong> — Omoya's <code>core</code> skill encodes working conventions (memory files, task ledgers, delegation rules), leading to context-aware agents using practical conventions.</p>
+  <p><strong>Transparency</strong> — inspect and edit the exact context the model receives, watch every tool call, read the unified diff of every edit.</p>
+  <p><strong>Convention over configuration</strong> — auto-detection for local Ollama / LM Studio models, SearXNG (<code>SEARXNG_URL</code>), and known endpoints (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, etc.) — zero-configuration functionality.</p>
+</section>
+<section aria-labelledby="tui-heading">
+  <h2 id="tui-heading">A terminal interface that hides nothing</h2>
+  <p><code>om</code> streams responses and thinking as they arrive, shows every tool call as it happens, and keeps the whole conversation open for inspection and correction. <strong>Ctrl-O</strong> opens any block in full; <strong>Ctrl-C</strong> cancels a runaway response and keeps the partial output; <code>/context-edit</code> and <code>/context-rollback</code> rewrite the exact context the model receives. Multi-line input, paste handling, completion, themes, and queued follow-ups are built in.</p>
 </section>
 <section aria-labelledby="surfaces-heading">
   <h2 id="surfaces-heading">One core, every surface</h2>
@@ -74,47 +86,47 @@ ${FEATURES.map((f) => `    <article class="card"><h3>${f.title}</h3><p>${f.body}
   </div>
 </section>
 <section aria-labelledby="principles-heading">
-  <h2 id="principles-heading">What makes it useful</h2>
+  <h2 id="principles-heading">Owned by you, visible to you</h2>
   <div class="grid">
 ${PRINCIPLES.map(([title, body]) => `    <article class="card"><h3>${title}</h3><p>${body}</p></article>`).join("\n")}
   </div>
 </section>
 <section aria-labelledby="security-heading">
-  <h2 id="security-heading">Filesystem security, enforced</h2>
-  <p>The current working folder <strong>is</strong> the agent's root — enforced in layers, not by prompt instructions alone:</p>
+  <h2 id="security-heading">Security, with the honest limits stated</h2>
+  <p>The current working folder <strong>is</strong> the agent's root, enforced in layers — not by prompt instructions alone:</p>
   <ul>
-    <li>File tools accept only relative paths inside the working folder; absolute paths and parent traversal are refused, and <code>read</code> rejects symbolic links.</li>
-    <li>Shell commands refuse <code>cd</code>, <code>ln</code>, <code>ls</code>, and visible arguments pointing outside the working folder.</li>
-    <li>Mutating tools fork under an OS write sandbox — macOS Seatbelt or Linux Bubblewrap — mounting only the working folder as writable.</li>
-    <li>With no supported sandbox, the agent <strong>forces safe mode</strong>: only read-only tools exist. <code>--safe</code> selects the same posture at any time.</li>
-    <li>Session logs live outside the project tree, so cwd-scoped tools can never rewrite their own history.</li>
+    <li>File tools accept only relative paths inside the working folder; <code>read</code> rejects symbolic links.</li>
+    <li>Mutating tools fork under an OS write sandbox — macOS Seatbelt or Linux Bubblewrap — mounting only the working folder as writable. With no sandbox, the agent <strong>forces safe mode</strong>.</li>
+    <li>Session logs live outside the project tree, so cwd-scoped tools can never rewrite their own history; tool schemas never carry security metadata.</li>
+    <li><strong>Honest limit:</strong> the sandbox confines writes, not reads. A shell command can follow a pre-existing symlink — do not run the agent in a tree containing untrusted symlinks. See <a href="${site.repository}/blob/main/SECURITY.md">SECURITY.md</a>.</li>
   </ul>
-  <p>Reads are not fully sandboxed by design: do not run the agent in a tree containing untrusted symlinks, and do not rely on <code>bash</code> to protect secrets outside that tree.</p>
 </section>
 <section aria-labelledby="environment-heading">
-  <h2 id="environment-heading">Environment auto-detection</h2>
-  <p>Endpoint auto-detection reads the process environment and probes local servers at startup. Discoveries are <strong>dynamic</strong> — in memory only, never persisted, re-detected every startup; a key or server removed from the environment leaves nothing behind.</p>
+  <h2 id="environment-heading">Zero-config provider detection</h2>
+  <p>At startup Omoya reads the process environment and probes local servers. Discoveries are <strong>dynamic</strong> — in memory only, re-detected every startup; remove a key or stop a server and nothing is left behind.</p>
   <table>
     <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
     <tbody>
       <tr><td><code>OPENAI_API_KEY</code> (+ optional <code>OPENAI_BASE_URL</code>)</td><td><code>openai</code> (OpenAI Responses)</td></tr>
-      <tr><td><code>AZURE_OPENAI_API_KEY</code> (+ required <code>AZURE_OPENAI_BASE_URL</code>)</td><td><code>azure-openai</code> (OpenAI Responses)</td></tr>
-      <tr><td><code>XAI_API_KEY</code></td><td><code>xai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>ANTHROPIC_API_KEY</code> or <code>ANTHROPIC_AUTH_TOKEN</code></td><td><code>anthropic</code> (Anthropic Messages)</td></tr>
       <tr><td><code>MOONSHOT_API_KEY</code> (+ optional <code>MOONSHOT_BASE_URL</code>)</td><td><code>kimi</code> (Moonshot platform)</td></tr>
       <tr><td><code>KIMI_API_KEY</code></td><td><code>kimi-coding</code> (Kimi for Coding relay)</td></tr>
-      <tr><td><code>ANTHROPIC_API_KEY</code> or <code>ANTHROPIC_AUTH_TOKEN</code> (+ optional <code>ANTHROPIC_BASE_URL</code>)</td><td><code>anthropic</code> (Anthropic Messages)</td></tr>
-      <tr><td><code>http://localhost:11434</code> — Ollama server probe (<code>/api/tags</code>)</td><td><code>ollama</code></td></tr>
-      <tr><td><code>http://localhost:1234/v1</code> — LM Studio server probe (<code>/models</code>)</td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>
+      <tr><td><code>XAI_API_KEY</code></td><td><code>xai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>AZURE_OPENAI_API_KEY</code> (+ required <code>AZURE_OPENAI_BASE_URL</code>)</td><td><code>azure-openai</code> (OpenAI Responses)</td></tr>
+      <tr><td><code>localhost:11434</code> probe (Ollama <code>/api/tags</code>)</td><td><code>ollama</code></td></tr>
+      <tr><td><code>localhost:1234</code> probe (LM Studio <code>/v1/models</code>)</td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>
     </tbody>
   </table>
-  <p>The harness itself reads a small namespace-derived set: <code>OMOYA_SETTINGS_DIR</code> (settings folder override, with the legacy <code>AI_SETTINGS_DIR</code>/<code>OMOYA_SETTINGS</code>/<code>AI_SETTINGS</code> spellings), <code>OMOYA_SKILLS_DIR</code> and <code>OMOYA_PROMPTS_DIR</code> (extra catalog roots), and <code>OMOYA_OS_SANDBOX=none</code> (disable the write-sandbox probe — the Agent then forces safe mode). The <code>web-search</code> tool reads <code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code> (auto-detected as its SearXNG backend — a local instance needs no API key) and <code>BRAVE_API_KEY</code> (enables the Brave search engine — without it Brave stays off); see the <a href="/api/tools/#web-search">tool catalog</a> for the provider → MCP → package routing.</p>
+  <p>The <code>web-search</code> tool likewise auto-detects a local SearXNG instance (<code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code>) and enables Brave when <code>BRAVE_API_KEY</code> is set; see the <a href="/api/tools/#web-search">tool catalog</a> for the provider → MCP → package routing.</p>
 </section>
 <section aria-labelledby="start-heading">
   <h2 id="start-heading">Start in one minute</h2>
-  <pre><code>bunx omoya --help          # run without installing
-om --model ollama/gpt-oss:20b   # or point at a local model
-om-tool --list             # run tools directly, no agent</code></pre>
-  <p>Requires <a href="https://bun.sh/">Bun</a>. Every shipped command — <code>omoya</code>, <code>om</code>, <code>om-agent</code>, <code>om-io</code>, <code>om-tool</code>, <code>om-skills</code>, <code>om-jobs</code> — has built-in <code>--help</code>.</p>
+  <pre><code>bunx omoya --login      # configure an endpoint, no install needed
+bunx omoya              # start the terminal interface
+
+om --list               # then explore: the available models
+om-tool --list          # every tool, no agent needed</code></pre>
+  <p>Every shipped command — <code>omoya</code>, <code>om</code>, <code>om-agent</code>, <code>om-io</code>, <code>om-tool</code>, <code>om-skills</code>, <code>om-jobs</code>, <code>om-tools2bash</code> (plus the <code>om-app</code>, <code>skills</code>, and <code>tools2bash</code> aliases) — has built-in <code>--help</code>. The full API is documented in the <a href="./api">generated reference</a>.</p>
 </section>`,
   });
 }
