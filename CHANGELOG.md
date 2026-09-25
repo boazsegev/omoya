@@ -2,6 +2,10 @@
 
 All notable changes to Omoya are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## 0.1.2 — Unreleased
+
+- New changes go here as they land, and this heading gets a release date when 0.1.2 ships.
+
 ## 0.1.1 — 2026-09-25
 
 - Rewrote the README and website homepage for clarity and adoption: bunx-first quickstart, runnable snippets per surface (TUI, `om-agent`/`om-io` JSONL, `omoya/agent` embed, `om --serve`, `om-jobs`, direct tool CLIs), and a four-point "Why Omoya" pitch verified against the codebase.

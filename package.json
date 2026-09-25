@@ -1,6 +1,6 @@
 {
   "name": "omoya",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A transparent, composable Bun AI agent harness library for people and things.",
   "keywords": [
     "ai-agent",
