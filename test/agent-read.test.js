@@ -420,3 +420,160 @@ describe("read ranges and grep-like search", () => {
     await expect(read({ path: rel, pattern: "([bad" })).rejects.toThrow("Invalid pattern. Use a valid regular expression.");
   });
 });
+describe("read grep: binary content is never searched", () => {
+  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0xff, 0x02]);
+  const setup = () => {
+    mkdirSync(`${ROOT}/sub`, { recursive: true });
+    writeFileSync(`${ROOT}/a.txt`, "apple top\nbanana");
+  };
+
+  test("a direct grep of a binary file is refused up front (content sniff, not name)", async () => {
+    setup();
+    writeFileSync(`${ROOT}/data.txt`, PNG); // a TEXT extension cannot launder binary bytes
+    await expect(read({ path: rel("data.txt"), pattern: "x" }))
+      .rejects.toThrow("grep applies only to text files; this file looks binary (use binary: true to read its bytes).");
+  });
+
+  test("UTF-8 and UTF-16 text with bytes above 127 is NOT binary", async () => {
+    setup();
+    writeFileSync(`${ROOT}/utf8.txt`, "café π — naïve");
+    expect(await read({ path: rel("utf8.txt"), pattern: "café" }))
+      .toBe(`grep ${rel("utf8.txt")} /café/ (1):\n1: café π — naïve`);
+    // UTF-16LE with BOM (bytes above 127, invalid UTF-8, valid UTF-16)
+    writeFileSync(`${ROOT}/u16.txt`, Buffer.from([0xff, 0xfe, 0x68, 0x00, 0x69, 0x00, 0xe9, 0x05]));
+    expect(await read({ path: rel("."), pattern: "a" })).toContain("a.txt"); // searched, not skipped
+    expect(await read({ path: rel("."), pattern: "i\x00", ignoreCase: true })).toContain("u16.txt:1:");
+    // UTF-16BE without BOM (NUL alternation detects the order)
+    writeFileSync(`${ROOT}/u16be.txt`, Buffer.from([0x00, 0x68, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6f, 0x05, 0xe9]));
+    expect(await read({ path: rel("."), pattern: "l\x00", ignoreCase: true })).toContain("u16be.txt:1:");
+  });
+
+  test("a folder grep skips binary files and REPORTS the skip count", async () => {
+    setup();
+    writeFileSync(`${ROOT}/pic.png`, PNG);
+    writeFileSync(`${ROOT}/sub/more.bin`, PNG);
+    const out = await read({ path: rel("."), pattern: "apple", recursive: true });
+    expect(out).toContain("(1, 2 binary skipped):");
+    expect(out).toContain("a.txt:1: apple top");
+    const none = await read({ path: rel("."), pattern: "zebra", recursive: true });
+    expect(none).toBe(`grep: no matches for /zebra/ in ${rel(".")} (2 binary skipped)`);
+    expect(await read({ path: rel("."), pattern: "apple", recursive: true, info: true }))
+      .toContain("grep would return 1 matches in 1 file(s), 2 binary skipped");
+  });
+
+  test("a binary file still LISTS (skipping is search-only)", async () => {
+    setup();
+    writeFileSync(`${ROOT}/pic.png`, PNG);
+    expect(await read({ path: rel("."), recursive: true })).toContain("pic.png (12 bytes)");
+  });
+});
+
+describe("read: system files and .ignore behave as if absent", () => {
+  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
+  const setup = () => {
+    mkdirSync(`${ROOT}/sub/deep`, { recursive: true });
+    writeFileSync(`${ROOT}/a.txt`, "apple top");
+    writeFileSync(`${ROOT}/sub/c.txt`, "apple sub");
+    writeFileSync(`${ROOT}/sub/deep/d.txt`, "apple deep");
+  };
+
+  test("known system files vanish from listings, searches, and direct reads", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.DS_Store`, "junk apple");
+    writeFileSync(`${ROOT}/sub/Thumbs.db`, "junk apple");
+    expect(await read({ path: rel("."), recursive: true })).not.toContain("DS_Store");
+    expect(await read({ path: rel("."), recursive: true })).not.toContain("Thumbs");
+    expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("DS_Store");
+    await expect(read({ path: rel(".DS_Store") })).rejects.toThrow(/ENOENT/);
+    await expect(read({ path: rel("sub/Thumbs.db") })).rejects.toThrow(/ENOENT/);
+  });
+
+  test(".git folders never exist: not listed, not searched, not readable", async () => {
+    setup();
+    mkdirSync(`${ROOT}/.git/objects`, { recursive: true });
+    writeFileSync(`${ROOT}/.git/config`, "apple git internals");
+    mkdirSync(`${ROOT}/sub/.git`, { recursive: true });
+    writeFileSync(`${ROOT}/sub/.git/config`, "apple nested git");
+    expect(await read({ path: rel("."), recursive: true })).not.toContain(".git");
+    expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("git");
+    await expect(read({ path: rel(".git") })).rejects.toThrow(/ENOENT/);
+    await expect(read({ path: rel(".git/config") })).rejects.toThrow(/ENOENT/);
+    await expect(read({ path: rel("sub/.git/config") })).rejects.toThrow(/ENOENT/);
+  });
+
+  test("a .ignore file hides matching files and folders (gitignore-like syntax)", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.ignore`, "# comment\nsecret.txt\n/deep-root.txt\n");
+    writeFileSync(`${ROOT}/secret.txt`, "apple secret");
+    writeFileSync(`${ROOT}/sub/secret.txt`, "apple nested secret"); // a bare name matches anywhere below
+    writeFileSync(`${ROOT}/deep-root.txt`, "apple anchored");
+    writeFileSync(`${ROOT}/sub/deep-root.txt`, "apple not anchored"); // /anchor is root-only
+    const listing = await read({ path: rel("."), recursive: true });
+    expect(listing).not.toContain("secret.txt");
+    expect(listing).not.toContain("\ndeep-root.txt");
+    expect(listing).toContain("sub/deep-root.txt (18 bytes)"); // only the anchored one is hidden
+    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
+    expect(found).not.toContain("secret.txt");
+    expect(found).toContain("sub/deep-root.txt:1: apple not anchored");
+    await expect(read({ path: rel("secret.txt") })).rejects.toThrow(/ENOENT/);
+    await expect(read({ path: rel("sub/secret.txt") })).rejects.toThrow(/ENOENT/);
+  });
+
+  test("a directory pattern hides the whole subtree; a nested .ignore refines", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.ignore`, "sub/deep/\n");
+    writeFileSync(`${ROOT}/sub/.ignore`, "c.txt\n!keep.txt\n");
+    writeFileSync(`${ROOT}/sub/keep.txt`, "apple kept");
+    const listing = await read({ path: rel("."), recursive: true });
+    expect(listing).not.toContain("deep"); // the hidden folder never appears
+    expect(listing).not.toContain("c.txt"); // nested rule
+    expect(listing).toContain("keep.txt"); // re-included (the negation never excluded it)
+    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
+    expect(found).toBe(`grep ${rel(".")} /apple/ (2):\na.txt:1: apple top\nsub/keep.txt:1: apple kept`);
+    await expect(read({ path: rel("sub/deep/d.txt") })).rejects.toThrow(/ENOENT/);
+  });
+
+  test(".gitignore is NOT consulted (only .ignore is)", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.gitignore`, "a.txt\n");
+    expect(await read({ path: rel(".") })).toContain("a.txt (9 bytes)");
+    expect(await read({ path: rel("."), pattern: "apple" })).toContain("a.txt:1: apple top");
+  });
+});
+
+describe("read grep: the global-regexp core", () => {
+  const setup = (name, content) => {
+    mkdirSync(ROOT, { recursive: true });
+    const rel = `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
+    writeFileSync(`${ROOT}/${name}`, content);
+    return rel;
+  };
+
+  test("a match spanning multiple lines prints EVERY line it touches", async () => {
+    const rel = setup("multi.txt", "one\ntwo\nthree\nfour");
+    const out = await read({ path: rel, pattern: "two\\nthree" });
+    expect(out).toBe(`grep ${rel} /two\\nthree/ (1):\n2: two\n3: three`);
+  });
+
+  test("overlapping ranges never print a line twice", async () => {
+    const rel = setup("over.txt", "aaa\nbbb\nccc");
+    const out = await read({ path: rel, pattern: "[a-z]", maxMatches: 10 });
+    expect(out.split("\n").slice(1)).toEqual(["1: aaa", "2: bbb", "3: ccc"]);
+  });
+
+  test("glob `*` never crosses a `/` (gitignore semantics) — only `**` does", async () => {
+    mkdirSync(`${ROOT}/sub`, { recursive: true });
+    writeFileSync(`${ROOT}/top.txt`, "apple top");
+    writeFileSync(`${ROOT}/sub/nested.txt`, "apple nested");
+    const folder = `./ai-tmp/read-${process.pid}`;
+    const star = await read({ path: folder, glob: "*.txt", recursive: true });
+    expect(star).toContain("top.txt");
+    expect(star).toContain("nested.txt"); // a slashless pattern matches basenames anywhere
+    const rooted = await read({ path: folder, glob: "/top.txt", recursive: true });
+    expect(rooted).not.toContain("nested");
+    const deep = await read({ path: folder, glob: "**/*.txt", recursive: true });
+    expect(deep).toContain("sub/nested.txt");
+  });
+});
+

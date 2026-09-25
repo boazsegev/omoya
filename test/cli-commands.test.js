@@ -586,6 +586,21 @@ describe("cli-commands: context mutations fire onChanged (the TUI re-renders)", 
   });
 });
 
+describe("cli-commands: /agent-name", () => {
+  test("shows and sets the human-friendly Agent name", async () => {
+    const { agent, commands, lines } = await setup([]);
+    await commands.handle("/agent-name");
+    expect(lines.at(-1)).toBe(`agent name: ${agent.name}`);
+    await commands.handle("/agent-name scribe");
+    expect(agent.name).toBe("scribe");
+    expect(lines.at(-1)).toBe("agent name: scribe");
+    await commands.handle("/agent-name two words");
+    expect(agent.name).toBe("two words");
+    await commands.handle("/agent-name ");
+    expect(lines.at(-1)).toContain("agent name: two words"); // no argument: show, don't clear
+  });
+});
+
 describe("cli-commands: /agent-safe", () => {
   const setup = async () => {
     const env = await testEnv();

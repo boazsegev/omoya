@@ -1,9 +1,10 @@
 /** File-name glob matching for read's folder listing and content search. */
 
 /**
- * Match a relative file path. A pattern without `/` matches its basename;
- * a pattern containing `/` matches the relative path. Supports `*`, `?`,
- * `**`, and simple `{a,b}` alternatives.
+ * Match a relative file path (gitignore/standard glob semantics):
+ * `*` and `?` never cross a `/` — only `**` does. A pattern without
+ * `/` matches the path's basename; a pattern containing `/` matches
+ * the whole relative path. Supports simple `{a,b}` alternatives.
  */
 export function matchesGlob(relativePath, pattern) {
   if (!pattern) return true;
@@ -22,8 +23,9 @@ function globSource(pattern) {
     const char = pattern[i];
     if (char === "*") {
       if (pattern[i + 1] === "*") {
-        i++;
-        if (pattern[i + 1] === "/") { i++; source += "(?:.*/)?"; }
+        i++; // "**" — the only segment that may cross a "/"
+        if (pattern[i + 1] === "/") { i++; source += "(?:.*\u002f)?"; }
+        else if (pattern[i + 1] === undefined) source += "(?:\u002f.*)?"; // trailing "**" = everything below
         else source += ".*";
       } else source += "[^/]*";
     } else if (char === "?") source += "[^/]";

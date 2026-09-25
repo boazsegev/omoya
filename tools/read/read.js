@@ -23,6 +23,15 @@
  * FOLDER, a line range is accepted as an entry/match cap (an initial
  * maxMatches: `startLine:1, endLine:20` lists/searches at most 20);
  * an explicit non-zero maxMatches always wins.
+ * Two REFUSAL layers keep searches meaningful. grep is a text-only
+ * operation: a file whose CONTENT sniffs as binary (bytes above 127
+ * that decode as neither valid UTF-8 nor valid UTF-16 — never a mime
+ * map or an extension) is refused on a direct grep and skipped (with
+ * a count) in a folder grep. And known system files (.DS_Store and
+ * friends) plus anything matched by a `.ignore` file (gitignore
+ * syntax, `.gitignore` itself NOT consulted) are treated as NOT
+ * EXISTING: absent from listings, skipped in searches, ENOENT on a
+ * direct read.
  * Output form is a separate concern from read mode:
  *   - default: UTF-8 text (or a folder listing);
  *   - binary: true: the byte range as BINARY content (a mime-detected
@@ -42,13 +51,15 @@
  * matches, entries) — the way to size a query before running it.
  */
 
-import { lstat, readFile, readdir, stat } from "node:fs/promises";
+import { lstat, open, readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { toolRevision } from "../../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp
 const guardTimestamp = toolRevision();
 const { rejectSymlinkPath, resolveCwdPath } = await import(`../guard/resolve.js?now=${guardTimestamp}`);
 import { grep, grepFolder, DEFAULT_MAX_MATCHES } from "./grep.js";
 import { matchesGlob } from "./glob.js";
+import { isBinary } from "./binary.js";
+import { ancestorIgnores, isIgnored, isSystemFile, loadIgnore } from "./ignore.js";
 import { detectMime } from "./mime-detection.js";
 import { intArg, encodeIf, infoBlock } from "./util.js";
 
@@ -141,12 +152,24 @@ export async function read({
   const cwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
   const boundary = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
   const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd, boundary }), { cwd: boundary });
-  let fileStat;
+  // Ignored entries behave as if they don't exist: known system files
+  // (.DS_Store and friends) and anything a `.ignore` file covers (the
+  // boundary-relative path keeps the verdict stable for a sub-folder
+  // agent reading through `../`).
+  const boundaryRel = relative(boundary, resolved).split(sep).join("/");
+  let directStat = null;
   try {
-    fileStat = await stat(resolved);
+    directStat = await stat(resolved);
   } catch (error) {
     throw missingPathHint(error, { cwd, boundary });
   }
+  const directRel = directStat.isDirectory() ? `${boundaryRel}/` : boundaryRel;
+  if (isSystemFile(directRel) || isIgnored(await ancestorIgnores(boundary, resolved), directRel)) {
+    const error = new Error(`ENOENT: no such file or directory, stat '${resolved}'`);
+    error.code = "ENOENT";
+    throw missingPathHint(error, { cwd, boundary });
+  }
+  let fileStat = directStat;
   if (info && base64) throw new Error("Use either info or base64, not both.");
   if (fileStat.isDirectory()) {
     return await folderRead(resolved, {
@@ -173,6 +196,11 @@ export async function read({
   }
   if (binary && pattern !== undefined) {
     throw new Error("Binary reads cannot use pattern. Remove pattern or binary.");
+  }
+  // grep is a TEXT operation: sniff the content (never the name or a
+  // mime map — bytes only) and refuse actual binary files up front
+  if (pattern !== undefined && await isBinaryFile(resolved)) {
+    throw new Error("grep applies only to text files; this file looks binary (use binary: true to read its bytes).");
   }
   if (glob !== undefined && !matchesGlob(relative(cwd, resolved), glob)) {
     throw new Error(`The file does not match glob "${glob}".`);
@@ -255,6 +283,18 @@ export async function read({
   return encodeIf(base64, result); // header === "": the unchanged fast path
 }
 
+/** Sniff up to 64 KiB and judge text vs. binary by CONTENT alone. */
+async function isBinaryFile(abs) {
+  const handle = await open(abs, "r");
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return isBinary(buffer.subarray(0, bytesRead));
+  } finally {
+    await handle.close();
+  }
+}
+
 /* -------------------------------------------------------- folders */
 
 /** ls/find listing or grep over a folder's entries. */
@@ -283,7 +323,7 @@ async function folderRead(resolved, options) {
     ? intArg(options.maxMatches, "maxMatches", 1) : undefined;
   const cap = explicit ?? lineCap; // the explicit maxMatches overrides the line range's cap
   const shown = path === "" || path === "." ? "." : path.replace(/\/+$/, "");
-  const entries = await walk(resolved, "", recursive);
+  const entries = await walk(resolved, "", recursive, []);
   const folderStat = await stat(resolved);
   const filtered = glob === undefined ? entries : entries.filter((e) => !e.dir && matchesGlob(e.rel, glob));
   if (pattern === undefined) {
@@ -314,15 +354,21 @@ async function folderRead(resolved, options) {
     return [...result].slice(0, end).join("");
   }
   const files = filtered.filter((e) => !e.dir);
-  return await grepFolder(files, { shown, ...options, maxMatches: cap, stat: folderStat, infoBlock });
+  return await grepFolder(files, { shown, ...options, maxMatches: cap, stat: folderStat, infoBlock, binary: (e) => e.binary });
 }
 
 /**
  * A folder's entries, sorted by name within each folder; sub-folders
  * are entered only when recursive. Directories carry a "/" suffix.
- * @returns {Array<{rel: string, abs: string, dir: boolean}>}
+ * System files and `.ignore`d entries are skipped as if absent (each
+ * visited folder's own `.ignore` joins the stack — nested rules
+ * refine deeper paths). File entries are pre-sniffed for a grep:
+ * `binary` marks content the folder search will skip.
+ * @returns {Array<{rel: string, abs: string, dir: boolean, binary?: boolean}>}
  */
-async function walk(abs, prefix, recursive) {
+async function walk(abs, prefix, recursive, ignores) {
+  const own = await loadIgnore(join(abs, prefix || "."), prefix);
+  const stack = own ? [...ignores, own] : ignores;
   const entries = (await readdir(join(abs, prefix || "."), { withFileTypes: true }))
     .sort((a, b) => a.name.localeCompare(b.name));
   const out = [];
@@ -335,10 +381,13 @@ async function walk(abs, prefix, recursive) {
       throw new Error("Choose a regular file or folder instead of a symbolic link.");
     }
     if (e.isDirectory()) {
-      out.push({ rel: `${rel}/`, abs: join(abs, rel), dir: true });
-      if (recursive) out.push(...(await walk(abs, rel, true)));
+      const shown = `${rel}/`;
+      if (isSystemFile(rel) || isIgnored(stack, shown)) continue;
+      out.push({ rel: shown, abs: join(abs, rel), dir: true });
+      if (recursive) out.push(...(await walk(abs, rel, true, stack)));
     } else {
-      out.push({ rel, abs: join(abs, rel), dir: false });
+      if (isSystemFile(rel) || isIgnored(stack, rel)) continue;
+      out.push({ rel, abs: join(abs, rel), dir: false, binary: await isBinaryFile(target) });
     }
   }
   return out;

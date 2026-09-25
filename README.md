@@ -1,6 +1,6 @@
 # Omoya
 
-<img src="https://omoya.ai/assets/logo.svg" alt="Omoya" style="height:2em; float:left">
+<a href='https://omoya.ai'><img src="https://omoya.ai/assets/logo.svg" alt="Omoya" style="height:8em; float:left"></a>
 
 **See what your agent sees.** A transparent agent harness for people, scripts, and the things you build next.
 

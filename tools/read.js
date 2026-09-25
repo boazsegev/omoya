@@ -2,9 +2,10 @@
  * tools/read.js — the `read` tool: an independent, read-only,
  * cwd-rooted file access tool. Thin WRAPPER publishing the callable
  * implemented under tools/read/. The tool scan is NOT recursive:
- * sub-folders are never scanned, so the modules in read/ (paths,
- * grep, mime-map, mime-detection, read, util) are this tool's PRIVATE
- * helpers — internal libraries it does not export as tools.
+ * sub-folders are never scanned, so the modules in read/ (binary,
+ * glob, grep, ignore, mime-map, mime-detection, read, util) are this
+ * tool's PRIVATE helpers — internal libraries it does not export as
+ * tools.
  *
  * One exception BY DESIGN: tools/guard/ is the shared guard layer
  * EVERY tool imports (read, write, edit, bash) — the deterministic

@@ -2,6 +2,23 @@
   "name": "omoya",
   "version": "0.1.1",
   "description": "A transparent, composable Bun AI agent harness library for people and things.",
+  "keywords": [
+    "ai-agent",
+    "agent-framework",
+    "bun",
+    "tui",
+    "terminal-ui",
+    "ai-cli",
+    "ollama",
+    "lm-studio",
+    "openai",
+    "anthropic",
+    "mcp",
+    "sandbox",
+    "zero-dependency",
+    "headless",
+    "jsonl"
+  ],
   "homepage": "https://omoya.ai",
   "repository": {
     "type": "git",
