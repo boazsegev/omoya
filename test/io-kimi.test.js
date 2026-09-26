@@ -308,7 +308,7 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
     return { conn: new Protocol(url, io), writes };
   };
 
-  test("live ids merge with registry metadata (existing + newly released models)", async () => {
+  test("live ids retain static metadata when present; unknown ids list without a registry fetch", async () => {
     stubFetch({
       "models.dev": [200, { moonshotai: { models: {
         "kimi-k2-0905-preview": { name: "Kimi K2 0905", reasoning: false, limit: { context: 262144, output: 262144 } },
@@ -319,14 +319,12 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
     const { conn, writes } = connection();
     const map = await conn.models();
     expect(map["kimi-k2-0905-preview"]).toEqual({
-      label: "Kimi K2 0905", reasoning: false, contextWindow: 262144, maxTokens: 262144,
+      label: "Kimi K2 (0905)", reasoning: false, contextWindow: 262144, maxTokens: 262144,
     });
-    // kimi-k3 was never in the static list — the registry auto-detected it
-    expect(map["kimi-k3"]).toEqual({
-      label: "Kimi K3", reasoning: true, contextWindow: 1048576, maxTokens: 131072,
-    });
+    // kimi-k3 was never in the static list: the live list itself publishes it.
+    expect(map["kimi-k3"]).toEqual({ label: "kimi-k3", reasoning: false });
     expect(writes.models["kimi-k3"]).toBeDefined(); // the cache refreshed
-    expect(writes.registry.models["kimi-k3"]).toBeDefined();
+    expect(writes.registry).toBeUndefined(); // a successful live list needs no registry fetch
   });
 
   test("the registry snapshot caches (TTL); a live id missing everywhere still lists", async () => {
@@ -337,9 +335,30 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
     const cachedRegistry = { fetchedAt: Date.now(), models: { "kimi-k2-thinking": { label: "K2T", reasoning: true, contextWindow: 262144 } } };
     const { conn } = connection({ token: "sk", registry: cachedRegistry });
     const map = await conn.models();
-    expect(calls.filter((u) => u.includes("models.dev"))).toHaveLength(0); // the TTL cache served it
-    expect(map["kimi-k2-thinking"]).toEqual({ label: "K2T", reasoning: true, contextWindow: 262144, maxTokens: 262144 });
+    expect(calls.filter((u) => u.includes("models.dev"))).toHaveLength(0); // live list needs no registry
+    expect(map["kimi-k2-thinking"]).toEqual({ label: "Kimi K2 Thinking", reasoning: true, contextWindow: 262144, maxTokens: 262144 });
     expect(map["brand-new-model"]).toEqual({ label: "brand-new-model", reasoning: false }); // bare but listed
+  });
+
+  test("a live list never fetches the registry, even when its cached snapshot contains obsolete ids", async () => {
+    const calls = stubFetch({
+      "models.dev": () => { throw new Error("registry must not be queried"); },
+      "/v1/models": [200, { data: [{ id: "brand-new-model" }] }],
+    });
+    const { conn } = connection({ registry: { fetchedAt: Date.now(), models: { "old-model": { label: "Old" } } } });
+    expect(Object.keys(await conn.models())).toEqual(["brand-new-model"]);
+    expect(calls.filter((url) => url.includes("models.dev"))).toHaveLength(0);
+  });
+
+  test("live metadata is not overridden by stale registry metadata", async () => {
+    stubFetch({
+      "models.dev": [200, { moonshotai: { models: { "brand-new-model": {
+        name: "Stale name", reasoning: false, limit: { context: 1200 },
+      } } } }],
+      "/v1/models": [200, { data: [{ id: "brand-new-model", name: "Current name", reasoning: true, context_window: 5000 }] }],
+    });
+    const { conn } = connection();
+    expect((await conn.models())["brand-new-model"]).toMatchObject({ label: "Current name", reasoning: true, contextWindow: 5000 });
   });
 
   test("fully offline: the static preset list is the fallback (coding endpoint)", async () => {

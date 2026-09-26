@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createTheme } from "../lib/gtui/theme.js";
-import { createInlineTerminalRenderer } from "../lib/gtui/terminal-inline-host.js";
-import { contextBlocks } from "../lib/tui-app/context-blocks.js";
-import { transcriptItems } from "../lib/tui-app/transcript.js";
-import { markdownRows } from "../lib/tui-app/markdown-view.js";
-import { createApp } from "../lib/tui-app/app.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
+import { createInlineTerminalRenderer } from "../lib/app/gtui/terminal-inline-host.js";
+import { contextBlocks } from "../lib/app/tui/context-blocks.js";
+import { transcriptItems } from "../lib/app/tui/transcript.js";
+import { markdownRows } from "../lib/app/tui/markdown-view.js";
+import { createApp } from "../lib/app/tui/app.js";
 import { USER } from "./fakes.js";
 
 function stubAgent(context = []) {
@@ -51,7 +51,7 @@ describe("supervisor reproductions for reported TUI failures", () => {
 
   test("fenced markdown renders code content rather than raw fence delimiters", () => {
     const rows = markdownRows("```js\nconst value = 1;\n```");
-    const visible = rows.flatMap((row) => row.content).map((span) => span.text).join("\n");
+    const visible = rows.map((row) => row.content.map((span) => span.text).join("")).join("\n");
     expect(visible).toContain("const value = 1;");
     expect(visible).not.toContain("```");
   });

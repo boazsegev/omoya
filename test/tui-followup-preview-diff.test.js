@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { transcriptItems } from "../lib/tui-app/transcript.js";
-import { contextBlocks } from "../lib/tui-app/context-blocks.js";
-import { markdownRows } from "../lib/tui-app/markdown-view.js";
-import { layoutView } from "../lib/gtui/layout.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { transcriptItems } from "../lib/app/tui/transcript.js";
+import { contextBlocks } from "../lib/app/tui/context-blocks.js";
+import { markdownRows } from "../lib/app/tui/markdown-view.js";
+import { layoutView } from "../lib/app/gtui/layout.js";
 
 for (const type of ["toolresult", "toolerror"]) {
   for (const label of ["write", undefined]) {

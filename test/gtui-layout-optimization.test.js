@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { layoutInternals, layoutView } from "../lib/gtui/layout.js";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { layoutInternals, layoutView } from "../lib/app/gtui/layout.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 
 const text = (content, priority = 0) => ({ type: "text", content, margin: 0, priority });
 

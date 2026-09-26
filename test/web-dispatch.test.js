@@ -4,6 +4,7 @@ import { Env } from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
 import { webSearch } from "../tools/web.js";
 import AnthropicProvider from "../providers/anthropic.js";
+import ClaudeProvider from "../providers/claude.js";
 import KimiProvider from "../providers/kimi.js";
 import OpenAIProvider from "../providers/openai.js";
 
@@ -30,8 +31,8 @@ describe("conventional web dispatch", () => {
     // Kimi: the documented $web_search builtin on the platform endpoints
     expect(typeof KimiProvider.provider.capabilities["web-search"]).toBe("function");
     expect(KimiProvider.provider.capabilities["web-fetch"]).toBeUndefined();
-    // OpenAI: the documented Responses API web_search tool on
-    // api.openai.com only (no documented fetch tool)
+    // OpenAI Responses: the hosted web_search tool, probed per
+    // endpoint+model; no fetch (web-fetch always uses the package backend)
     expect(typeof OpenAIProvider.provider.capabilities["web-search"]).toBe("function");
     expect(OpenAIProvider.provider.capabilities["web-fetch"]).toBeUndefined();
   });
@@ -187,14 +188,9 @@ describe("provider web backends", () => {
     }
   });
 
-  test("Anthropic subscription (OAuth) auth falls through as unsupported", async () => {
-    const aiio = fakeAiio({
-      url: "https://api.anthropic.com/v1",
-      auth: { type: "oauth", token: "sk-ant-oat-test" },
-    });
+  test("Claude subscription exposes provider web capabilities (wire details: io-claude.test.js)", () => {
     for (const name of ["web-search", "web-fetch"]) {
-      const handler = AnthropicProvider.provider.capabilities[name];
-      expect(await handler.call(AnthropicProvider, { aiio, args: { query: "x", url: "https://x.test/" } })).toBeUndefined();
+      expect(ClaudeProvider.provider.capabilities[name]).toBeInstanceOf(Function);
     }
   });
 
@@ -268,14 +264,21 @@ describe("provider web backends", () => {
     }
   });
 
-  test("OpenAI web-search sends the documented Responses web_search tool", async () => {
+  /** A Responses SSE body from finished output items. */
+  function responsesStream(items) {
+    const events = items.map((item) => ({ type: "response.output_item.done", item }));
+    events.push({ type: "response.completed", response: { status: "completed" } });
+    const text = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
+    return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+  const answer = (text) => ({ type: "message", role: "assistant", content: [{ type: "output_text", text }] });
+
+  test("OpenAI web-search forces the hosted Responses web_search tool and needs its call as proof", async () => {
     const calls = [];
-    const restore = stubFetch(calls, async () => new Response(JSON.stringify({
-      output: [
-        { type: "web_search_call", action: { type: "search", query: "x" } },
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "OpenAI result" }] },
-      ],
-    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const restore = stubFetch(calls, async () => responsesStream([
+      { type: "web_search_call", action: { type: "search", query: "x" } },
+      answer("OpenAI result"),
+    ]));
     try {
       const aiio = fakeAiio({
         url: "https://api.openai.com/v1",
@@ -289,19 +292,61 @@ describe("provider web backends", () => {
       expect(options.headers.authorization).toBe("Bearer oai-test");
       const body = JSON.parse(options.body);
       expect(body.model).toBe("test-model");
-      expect(body.stream).toBe(false);
+      expect(body.stream).toBe(true);
       expect(body.tools).toEqual([{ type: "web_search" }]);
-      expect(body.input).toContain("omoya");
+      expect(body.tool_choice).toBe("required");
+      expect(JSON.stringify(body.input)).toContain("omoya");
     } finally {
       restore();
     }
   });
 
-  test("OpenAI capability is unsupported on the Codex backend and local endpoints", async () => {
+  test("OpenAI web-search reaches the Codex backend with its subscription framing", async () => {
+    const calls = [];
+    const restore = stubFetch(calls, async () => responsesStream([
+      { type: "web_search_call", action: { type: "search", query: "omoya" } },
+      answer("- Codex result"),
+    ]));
+    try {
+      const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } })).toString("base64url");
+      const aiio = fakeAiio({
+        url: "https://chatgpt.com/backend-api/codex",
+        auth: { type: "oauth", token: `h.${claims}.s` },
+        settings: { verify: "jwt" },
+      });
+      const handler = OpenAIProvider.provider.capabilities["web-search"];
+      expect(await handler.call(OpenAIProvider, { aiio, args: { query: "omoya" } })).toBe("- Codex result");
+      const [url, options] = calls[0];
+      expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+      expect(options.headers["chatgpt-account-id"]).toBe("acct-1");
+      expect(options.headers["OpenAI-Beta"]).toBe("responses=experimental");
+      const body = JSON.parse(options.body);
+      expect(body.store).toBe(false);
+      expect(body.instructions).toBe("");
+      expect(JSON.stringify(body.input)).toContain("omoya");
+    } finally {
+      restore();
+    }
+  });
+
+  test("OpenAI probe remembers endpoints that reject or ignore the hosted tool", async () => {
     const handler = OpenAIProvider.provider.capabilities["web-search"];
-    for (const url of ["https://chatgpt.com/backend-api/codex", "http://localhost:1234/v1"]) {
-      const aiio = fakeAiio({ url, auth: { type: "api_key", token: "k" } });
-      expect(await handler.call(OpenAIProvider, { aiio, args: { query: "x" } })).toBeUndefined();
+    const calls = [];
+    const restore = stubFetch(calls, async (url) => url.startsWith("http://localhost:1234")
+      ? new Response(JSON.stringify({ error: { message: "Unsupported tool type: web_search" } }), { status: 400, statusText: "Bad Request" })
+      : responsesStream([answer("answered from memory")]));
+    try {
+      const local = fakeAiio({ url: "http://localhost:1234/v1", auth: { type: "api_key", token: "k" } });
+      expect(await handler.call(OpenAIProvider, { aiio: local, args: { query: "x" } })).toBeUndefined();
+      expect(await handler.call(OpenAIProvider, { aiio: local, args: { query: "x" } })).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      // an answer without a web_search_call item is not proof: the tool was ignored
+      const ignoring = fakeAiio({ url: "https://ignores.test/v1", auth: { type: "api_key", token: "k" } });
+      expect(await handler.call(OpenAIProvider, { aiio: ignoring, args: { query: "x" } })).toBeUndefined();
+      expect(await handler.call(OpenAIProvider, { aiio: ignoring, args: { query: "x" } })).toBeUndefined();
+      expect(calls).toHaveLength(2);
+    } finally {
+      restore();
     }
   });
 

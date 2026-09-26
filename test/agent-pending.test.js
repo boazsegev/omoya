@@ -56,7 +56,7 @@ describe("Agent pending queue", () => {
 
     const users = agent.context.filter((m) => m.type === 2);
     expect(users).toHaveLength(2); // "go" + one merged queued message
-    expect(users[1].content[0].text).toBe("queued one\nqueued two"); // folded with "\n"
+    expect(users[1].content[0].text).toBe("queued one\n\nqueued two"); // folded with "\n\n"
     expect(io.writes).toHaveLength(2);
   });
 
@@ -96,7 +96,7 @@ describe("Agent pending queue", () => {
     const second = await agent.run();
     expect(second.type).toBe("done");
     expect(agent.context.map((m) => m.type)).toEqual([2, 3]);
-    expect(agent.context[0].content[0].text).toBe("go\nstill waiting");
+    expect(agent.context[0].content[0].text).toBe("go\n\nstill waiting");
   });
 
   test("drainPending recalls every message queued while busy (the TUI's Alt+↑ edit recall)", async () => {

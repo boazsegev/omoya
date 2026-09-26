@@ -1,10 +1,10 @@
-// test/gtui-widget-list.test.js — proof for lib/gtui/widgets/list.js:
+// test/gtui-widget-list.test.js — proof for lib/app/gtui/widgets/list.js:
 // DEAD CODE (see AI-GTUI.md) — measure/draw, the selected-row reverse
 // video, the scroll window (listWindow), and activate()'s Msg.
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { list, listWindow } from "../lib/gtui/widgets/list.js";
-import { REVERSE } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { list, listWindow } from "../lib/app/gtui/widgets/list.js";
+import { REVERSE } from "../lib/app/gtui/cell.js";
 
 const rowText = (buf, y) => buf.row(y).map((c) => c.text ?? "").join("").trimEnd();
 

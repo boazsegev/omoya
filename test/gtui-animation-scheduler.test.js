@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { createTheme } from "../lib/gtui/theme.js";
-import { layoutView } from "../lib/gtui/layout.js";
-import { compileAnimations, scheduleCompiledAnimations, animationTimerWake, animationSchedulerInternals } from "../lib/gtui/animation-scheduler.js";
-import { cometFrame, flashFrame, waveFrame } from "../lib/gtui/theme.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
+import { layoutView } from "../lib/app/gtui/layout.js";
+import { compileAnimations, scheduleCompiledAnimations, animationTimerWake, animationSchedulerInternals } from "../lib/app/gtui/animation-scheduler.js";
+import { cometFrame, flashFrame, waveFrame } from "../lib/app/gtui/theme.js";
 
 function scene(text, theme) { return layoutView({ type: "text", margin: 0, role: "busy", content: text }, { width: 12, height: 1, theme }); }
 function fakeClock(time = 0) {

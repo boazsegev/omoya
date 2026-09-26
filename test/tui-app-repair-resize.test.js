@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { createInteractiveRepl } from "../lib/tui-app/run.js";
+import { createInteractiveRepl } from "../lib/app/tui/run.js";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv } from "./fakes.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";

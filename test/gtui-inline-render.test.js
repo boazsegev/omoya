@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createInlineRenderer } from "../lib/gtui/inline-render.js";
+import { createInlineRenderer } from "../lib/app/gtui/inline-render.js";
 
 describe("gtui inline renderer", () => {
   test("commits finalized rows once and repaints only the transient region", () => {

@@ -1,9 +1,9 @@
-// test/gtui-clip.test.js — proof for lib/gtui/clip.js (ported from
+// test/gtui-clip.test.js — proof for lib/app/gtui/clip.js (ported from
 // lib/tui-helpers/layout.js's clip(), AI-TUI MIGRATION.md Phase 01
 // step 2): fits a plain line into a width, ending a cut with an
 // ellipsis, never splitting a grapheme cluster.
 import { describe, expect, test } from "bun:test";
-import { clip } from "../lib/gtui/clip.js";
+import { clip } from "../lib/app/gtui/clip.js";
 
 describe("clip", () => {
   test("text that already fits passes through unchanged", () => {

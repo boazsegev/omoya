@@ -1,8 +1,8 @@
-// test/gtui-mouse.test.js — proof for lib/gtui/mouse.js (ported from
+// test/gtui-mouse.test.js — proof for lib/app/gtui/mouse.js (ported from
 // lib/tui-helpers/mouse.js, AI-TUI MIGRATION.md Phase 01 step 2): SGR
 // mouse report decode (buttons, release, wheel, modifiers, drag).
 import { describe, expect, test } from "bun:test";
-import { decodeMouse, isMouseEvent } from "../lib/gtui/mouse.js";
+import { decodeMouse, isMouseEvent } from "../lib/app/gtui/mouse.js";
 
 describe("decodeMouse", () => {
   test("buttons, release, wheel and modifiers", () => {

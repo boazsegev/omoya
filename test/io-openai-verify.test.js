@@ -334,7 +334,7 @@ describe("the codex backend request shape", () => {
   });
 });
 
-describe("codexModels: only account-usable models are listed", () => {
+describe("codexModels: fallback candidates are probed when the catalog fails", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => { globalThis.fetch = realFetch; });
   const CANDIDATES = {
@@ -345,6 +345,7 @@ describe("codexModels: only account-usable models are listed", () => {
   /** Mock the codex backend: gpt-yes streams, gpt-no is unsupported, gpt-flaky 401s. */
   function mockBackend() {
     globalThis.fetch = async (url, init) => {
+      if (String(url).includes("/models?client_version=")) return new Response("offline", { status: 503 });
       const model = JSON.parse(init.body).model;
       if (model === "gpt-yes") return new Response("data: [DONE]\n");
       if (model === "gpt-no") {
@@ -416,6 +417,7 @@ describe("codexModels: registry-driven candidates (new models need no code updat
           "gpt-old": { name: "GPT Old", reasoning: false },
         } } }));
       }
+      if (String(url).includes("/models?client_version=")) return new Response("offline", { status: 503 });
       const model = JSON.parse(init.body).model;
       calls.probes.push(model);
       if (model === "gpt-new") return new Response("data: [DONE]\n");
@@ -464,7 +466,236 @@ describe("codexModels: registry-driven candidates (new models need no code updat
     expect(calls.probes).toEqual(["gpt-static"]);
   });
 
-  test("registry effort options and the backend catalog annotate reasoning levels and defaults", async () => {
+  test("Codex catalog models absent from the registry are listed without a probe", async () => {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      if (url === REGISTRY_URL) return new Response(JSON.stringify({ openai: { models: {
+        "gpt-old": { name: "GPT Old", reasoning: true },
+      } } }));
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [{
+        slug: "gpt-6-luna", display_name: "GPT-6 Luna", context_window: 272000,
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+        default_reasoning_level: "high",
+      }] }));
+      const id = JSON.parse(init.body).model;
+      calls.push(id);
+      return id === "gpt-6-luna" ? new Response("data: [DONE]\n") :
+        new Response(JSON.stringify({ detail: "model not supported" }), { status: 400 });
+    };
+    const map = await openaiModels.call(codexConn({ token: freshJwt() }));
+    expect(calls).toEqual([]);
+    expect(map["gpt-6-luna"]).toMatchObject({ label: "GPT-6 Luna", contextWindow: 272000,
+      reasoning: true, reasoningLevels: ["low", "high"], defaultReasoning: "high" });
+  });
+
+  test("catalog success persists the listing and refreshed registry snapshot together, then survives a timeout", async () => {
+    const dir = mkdtempSync("./ai-tmp/verify-codex-cache-");
+    DIRS.push(dir);
+    const env = new Env({ dir, settingsDir: dir, cwd: dir, settings: { providers: {
+      "openai-codex": { provider: "openai", url: "https://chatgpt.com/backend-api/codex", verify: "jwt" },
+    } } });
+    env.registerProvider("openai", OpenAIProvider);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [
+        { slug: "gpt-6-luna", display_name: "GPT-6 Luna" },
+      ] }));
+      if (url === REGISTRY_URL) return new Response(JSON.stringify({ openai: { models: {
+        "gpt-old": { name: "Old" },
+      } } }));
+      throw new Error(`unexpected probe ${url}`);
+    };
+    try {
+      const map = await env.endpointModels("openai-codex", { refresh: true });
+      env.flushSettings();
+      const auth = JSON.parse(await Bun.file(`${dir}/auth-openai-codex.json`).text())["openai-codex"];
+      expect(Object.keys(auth.models)).toEqual(["gpt-6-luna"]);
+      expect(Object.keys(auth.registry.models)).toEqual(["gpt-6-luna"]);
+      expect(auth.registry.source).toBe("catalog");
+      globalThis.fetch = async () => { throw new Error("timeout"); };
+      expect(Object.keys(await env.endpointModels("openai-codex", { refresh: true }))).toEqual(["gpt-6-luna"]);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  test("a refreshed registry snapshot replaces stale auth-file candidates", async () => {
+    const dir = mkdtempSync("./ai-tmp/verify-codex-stale-");
+    DIRS.push(dir);
+    const env = new Env({ dir, settingsDir: dir, cwd: dir, settings: { providers: {
+      "openai-codex": { provider: "openai", url: "https://chatgpt.com/backend-api/codex", verify: "jwt" },
+    } } });
+    env.registerProvider("openai", OpenAIProvider);
+    env.authSet("openai-codex", { registry: { fetchedAt: 1, models: { "gpt-retired": { label: "Retired" } } },
+      models: { "gpt-retired": { label: "Retired" } } });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => String(url).includes("/models?client_version=")
+      ? new Response(JSON.stringify({ models: [{ slug: "gpt-6-luna" }] })) : new Response("unexpected", { status: 500 });
+    try {
+      await env.endpointModels("openai-codex", { refresh: true });
+      env.flushSettings();
+      const auth = JSON.parse(await Bun.file(`${dir}/auth-openai-codex.json`).text())["openai-codex"];
+      expect(Object.keys(auth.models)).toEqual(["gpt-6-luna"]);
+      expect(Object.keys(auth.registry.models)).toEqual(["gpt-6-luna"]);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  test("successful fallback probes cache candidates and available models together", async () => {
+    const dir = mkdtempSync("./ai-tmp/verify-codex-fallback-");
+    DIRS.push(dir);
+    const env = new Env({ dir, settingsDir: dir, cwd: dir, settings: { providers: {
+      "openai-codex": { provider: "openai", url: "https://chatgpt.com/backend-api/codex", verify: "jwt" },
+    } } });
+    env.registerProvider("openai", OpenAIProvider);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes("/models?client_version=") || url === REGISTRY_URL) throw new Error("offline");
+      const model = JSON.parse(init.body).model;
+      return model === "gpt-6-sol" ? new Response("data: [DONE]\n") :
+        new Response(JSON.stringify({ detail: "not supported" }), { status: 400 });
+    };
+    try {
+      const map = await env.endpointModels("openai-codex", { refresh: true });
+      env.flushSettings();
+      const auth = JSON.parse(await Bun.file(`${dir}/auth-openai-codex.json`).text())["openai-codex"];
+      expect(Object.keys(map)).toEqual(["gpt-6-sol"]);
+      expect(Object.keys(auth.models)).toEqual(["gpt-6-sol"]);
+      expect(Object.keys(auth.registry.models).sort()).toEqual(["gpt-6-astra", "gpt-6-luna", "gpt-6-sol"]);
+      expect(auth.registry.fetchedAt).toBeUndefined(); // static fallback is not a successful models.dev fetch
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  test("a cached catalog remains listed if catalog and registry time out before probes can answer", async () => {
+    const dir = mkdtempSync("./ai-tmp/verify-codex-timeout-");
+    DIRS.push(dir);
+    const env = new Env({ dir, settingsDir: dir, cwd: dir, settings: { providers: {
+      "openai-codex": { provider: "openai", url: "https://chatgpt.com/backend-api/codex", verify: "jwt" },
+    } } });
+    env.registerProvider("openai", OpenAIProvider);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => String(url).includes("/models?client_version=")
+      ? new Response(JSON.stringify({ models: [{ slug: "gpt-6-luna" }] })) : new Response("unexpected", { status: 500 });
+    try {
+      await env.endpointModels("openai-codex", { refresh: true });
+      env.flushSettings();
+      globalThis.fetch = async () => { throw new Error("timeout"); };
+      expect(Object.keys(await env.endpointModels("openai-codex", { refresh: true }))).toEqual(["gpt-6-luna"]);
+      const auth = JSON.parse(await Bun.file(`${dir}/auth-openai-codex.json`).text())["openai-codex"];
+      expect(Object.keys(auth.models)).toEqual(["gpt-6-luna"]);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  test("registry candidates fetched on a failed probe are cached for the next attempt", async () => {
+    const calls = mockRegistryAndBackend();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes("/models?client_version=")) return new Response("offline", { status: 503 });
+      if (url === REGISTRY_URL) return real(url, init);
+      return new Response("timeout", { status: 503 });
+    };
+    let saved;
+    const connection = codexConn({ token: freshJwt() }, (data) => { saved = { ...saved, ...data }; });
+    await expect(openaiModels.call(connection)).rejects.toThrow(/no model answered/);
+    expect(calls.registry).toBe(1);
+    expect(saved.registry.models["gpt-new"]).toBeDefined();
+    expect(saved.models).toBeUndefined();
+  });
+
+  test("a stale registry fetchedAt remains stale after probing its cached candidates", async () => {
+    const calls = mockRegistryAndBackend();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => url === REGISTRY_URL ? new Response("offline", { status: 503 }) : real(url, init);
+    const saved = [];
+    const map = await openaiModels.call(codexConn({ token: freshJwt(), registry: {
+      fetchedAt: 1, models: { "gpt-new": { label: "Cached candidate" } },
+    } }, (data) => saved.push(data)));
+    expect(Object.keys(map)).toEqual(["gpt-new"]);
+    expect(saved.at(-1).registry.fetchedAt).toBe(1);
+    expect(calls.probes).toEqual(["gpt-new"]);
+  });
+
+  test("catalog success evicts stale cache entries and clears the fallback probe TTL", async () => {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [{ slug: "gpt-6-luna" }] }));
+      throw new Error("registry and probes are not needed");
+    };
+    let saved;
+    const map = await openaiModels.call(codexConn({ token: freshJwt(), models: { "gpt-old": { label: "Old" } },
+      modelsProbedAt: Date.now() }, (data) => { saved = data; }));
+    expect(Object.keys(map)).toEqual(["gpt-6-luna"]);
+    expect(saved.models).toEqual(map);
+    expect(saved.modelsProbedAt).toBe(0);
+  });
+
+  test("a newly advertised Codex model is discovered despite a fresh 24-hour probe cache", async () => {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [
+        { slug: "gpt-old" }, { slug: "gpt-6-luna", display_name: "GPT-6 Luna" },
+      ] }));
+      if (url === REGISTRY_URL) throw new Error("fresh registry cache should not fetch");
+      calls.push(JSON.parse(init.body).model);
+      return new Response("data: [DONE]\n");
+    };
+    const map = await openaiModels.call(codexConn({
+      token: freshJwt(), models: { "gpt-old": { label: "GPT Old" } }, modelsProbedAt: Date.now(),
+      registry: { fetchedAt: Date.now(), models: { "gpt-old": { label: "GPT Old" } } },
+    }));
+    expect(calls).toEqual([]);
+    expect(Object.keys(map).sort()).toEqual(["gpt-6-luna", "gpt-old"]);
+  });
+
+  test("an advertised model stays listed even if the endpoint rejects its probe", async () => {
+    globalThis.fetch = async (url, init) => {
+      if (url === REGISTRY_URL) return new Response(JSON.stringify({ openai: { models: {
+        "gpt-old": { name: "GPT Old" },
+      } } }));
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [
+        { slug: "gpt-6-luna" },
+      ] }));
+      const id = JSON.parse(init.body).model;
+      return id === "gpt-old" ? new Response("data: [DONE]\n") :
+        new Response(JSON.stringify({ detail: "model not supported for this account" }), { status: 400 });
+    };
+    const map = await openaiModels.call(codexConn({ token: freshJwt() }));
+    expect(Object.keys(map)).toEqual(["gpt-6-luna"]);
+  });
+
+  test("the account catalog excludes obsolete registry-only candidates when available", async () => {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      if (url === REGISTRY_URL) throw new Error("registry must not be queried on catalog success");
+      if (String(url).includes("/models?client_version=")) return new Response(JSON.stringify({ models: [
+        { slug: "gpt-6-luna", display_name: "GPT-6 Luna" },
+      ] }));
+      calls.push(JSON.parse(init.body).model);
+      return new Response(JSON.stringify({ detail: "not supported" }), { status: 400 });
+    };
+    const map = await openaiModels.call(codexConn({ token: freshJwt(), registry: {
+      fetchedAt: Date.now(), models: { "gpt-old": { label: "Old" } },
+    } }));
+    expect(Object.keys(map)).toEqual(["gpt-6-luna"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("a catalog response with no models falls back to the registry", async () => {
+    const calls = mockRegistryAndBackend();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => String(url).includes("/models?client_version=")
+      ? new Response(JSON.stringify({ models: [] })) : real(url, init);
+    expect(Object.keys(await openaiModels.call(codexConn({ token: freshJwt() })))).toEqual(["gpt-new"]);
+    expect(calls.probes.sort()).toEqual(["gpt-new", "gpt-old"]);
+  });
+
+  test("a malformed catalog falls back to registry probes", async () => {
+    const calls = mockRegistryAndBackend();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => String(url).includes("/models?client_version=")
+      ? new Response(JSON.stringify({ invalid: true })) : real(url, init);
+    const map = await openaiModels.call(codexConn({ token: freshJwt() }));
+    expect(Object.keys(map)).toEqual(["gpt-new"]);
+    expect(calls.probes.sort()).toEqual(["gpt-new", "gpt-old"]);
+  });
+
+  test("catalog reasoning levels and defaults are authoritative without registry metadata", async () => {
     globalThis.fetch = async (url) => {
       if (url === REGISTRY_URL) {
         return new Response(JSON.stringify({ openai: { models: {
@@ -482,8 +713,8 @@ describe("codexModels: registry-driven candidates (new models need no code updat
     };
     const map = await openaiModels.call(codexConn({ token: freshJwt() }));
     expect(map).toEqual({ "gpt-new": {
-      label: "GPT New", reasoning: true, defaultReasoning: "low",
-      reasoningLevels: ["none", "low", "medium", "high", "xhigh"],
+      label: "gpt-new", reasoning: true, defaultReasoning: "low",
+      reasoningLevels: ["low", "xhigh"],
     } });
   });
 });

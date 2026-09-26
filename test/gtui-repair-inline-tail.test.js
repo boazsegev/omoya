@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createInlineRenderer } from "../lib/gtui/inline-render.js";
+import { createInlineRenderer } from "../lib/app/gtui/inline-render.js";
 import { TerminalScreen } from "./terminal-screen.js";
 
 test("ordinary inline update leaves the unchanged transcript prefix untouched", () => {

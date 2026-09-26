@@ -4,7 +4,7 @@
 
 import { NAMES } from "../lib/namespace.js";
 import Env from "../lib/env.js";
-const { singleShot, openaiWebSearch } = Env;
+const { singleShot, openaiWebCapabilities } = Env;
 
 const LM_STUDIO_URL = "http://localhost:1234/v1";
 
@@ -31,11 +31,11 @@ export default class OpenAIProvider {
       tools: true,
       thinking: true,
       streaming: true,
-      // the Responses API `web_search` server tool (implementation in
+      // web-search over the Responses hosted `web_search` tool, probed
+      // per endpoint+model; web-fetch stays on the package backend (implementation in
       // lib/env/openai.js — this module is metadata only, but the
-      // Agent's capability lookup reads THIS static object, so the
-      // handler is referenced here)
-      "web-search": openaiWebSearch,
+      // Agent's capability lookup reads THIS static object)
+      ...openaiWebCapabilities,
     },
   };
 
@@ -46,25 +46,16 @@ export default class OpenAIProvider {
       name: "openai-codex",
       label: "OpenAI Codex (ChatGPT)",
       url: "https://chatgpt.com/backend-api/codex",
-      // the codex backend has no OpenAI-shaped GET /models (its
-      // /models?client_version= catalog only annotates reasoning
-      // levels/defaults): verification is the freshly issued OAuth
-      // JWT itself. models() builds the CANDIDATE superset from the
-      // public models.dev registry (the same catalog pi bundles —
-      // newly released models appear without a code update), probes
-      // each candidate, and caches only account-usable models; the
-      // static list below is the offline fallback.
+      // The Codex account catalog (/models?client_version=) is
+      // authoritative when available; an unsuccessful catalog read
+      // falls back to probing public models.dev candidates, then this
+      // small bundled list. OAuth verification uses the issued JWT.
       verify: "jwt",
       registry: { url: "https://models.dev/api.json", provider: "openai" },
       models: {
-        "gpt-5.3-codex-spark": { label: "GPT-5.3 Codex Spark", reasoning: true, contextWindow: 128000, maxTokens: 128000 },
-        "gpt-5.4": { label: "GPT-5.4", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-5.4-mini": { label: "GPT-5.4 mini", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-5.5": { label: "GPT-5.5", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-5.6-luna": { label: "GPT-5.6 Luna", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-5.6-sol": { label: "GPT-5.6 Sol", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-5.6-terra": { label: "GPT-5.6 Terra", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
-        "gpt-6-astra": { label: "GPT-6 Astra", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+        "gpt-6-luna": { label: "GPT-6 Luna", reasoning: true, contextWindow: 1050000, maxTokens: 128000 },
+        "gpt-6-sol": { label: "GPT-6 Sol", reasoning: true, contextWindow: 1050000, maxTokens: 128000 },
+        "gpt-6-astra": { label: "GPT-6 Astra", reasoning: true, contextWindow: 1050000, maxTokens: 128000 },
       },
       // browser sign-in (pi template): ChatGPT subscription OAuth,
       // PKCE + loopback callback, paste fallback for headless use

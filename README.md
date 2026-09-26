@@ -65,7 +65,7 @@ What an agent learns belongs to the project folder it learned it in: `ai-setting
 
 ## Providers are plugins
 
-Four provider protocols ship out of the box — OpenAI Responses, Anthropic Messages, Kimi/Moonshot, and Ollama — with ready-made endpoints for OpenAI, the ChatGPT/Codex OAuth backend, GitHub Copilot, Azure OpenAI, xAI, and LM Studio. `om --login` walks through hosted, OAuth, token-based, and local endpoints; `om --list` prints the available models.
+Five provider protocols ship out of the box — OpenAI Responses, Anthropic Messages (API keys), Claude subscription (OAuth), Kimi/Moonshot, and Ollama — with ready-made endpoints for OpenAI, the ChatGPT/Codex OAuth backend, GitHub Copilot, Azure OpenAI, xAI, and LM Studio. `om --login` walks through hosted, OAuth, token-based, and local endpoints; `om --list` prints the available models.
 
 Auto-detection reads the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MOONSHOT_API_KEY` → `kimi`, `KIMI_API_KEY` → `kimi-coding`, `XAI_API_KEY`, Azure OpenAI with its required `AZURE_OPENAI_BASE_URL`) and probes local servers — a running Ollama (`localhost:11434`) or LM Studio (`localhost:1234`) server becomes a ready endpoint with no configuration. Discoveries are dynamic: held in memory only, never persisted, re-detected at every startup. Every provider normalizes streaming text, thinking, tool calls, usage, and completion into one context and event model, so switching models — even mid-session — changes nothing else.
 
@@ -155,7 +155,7 @@ Configuration is layered — package, then the user settings directory, then env
 
 | key | meaning |
 |---|---|
-| `providers` | Endpoint URLs, protocol names, model metadata, endpoint limits |
+| `providers` | Endpoint URLs, protocol names, model metadata, endpoint limits, per-endpoint model `filter` regex |
 | `tools` | Additional trusted tool roots (package or user settings only) |
 | `skills` / `prompts` | Additional instruction and prompt roots |
 | `mcp` | MCP servers and launch settings |

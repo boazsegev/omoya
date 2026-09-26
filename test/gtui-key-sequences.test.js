@@ -1,4 +1,4 @@
-// test/gtui-key-sequences.test.js — proof for lib/gtui/key-sequences.js:
+// test/gtui-key-sequences.test.js — proof for lib/app/gtui/key-sequences.js:
 // the DECLARATIVE escape-sequence maps stay internally consistent (one
 // semantic key ↔ every protocol's spelling), so byte-filter decode and
 // term-host enable bytes can never drift apart into per-key brittleness.
@@ -6,8 +6,8 @@ import { describe, expect, test } from "bun:test";
 import {
   CSI_FINAL_KEYS, CSI_TILDE_KEYS, CSI_U_KEYS, FUNCTIONAL_KEYS,
   keySequenceInternals, modifierBits, modifierValue,
-} from "../lib/gtui/key-sequences.js";
-import { ALT, CTRL, META, SHIFT } from "../lib/gtui/keymap.js";
+} from "../lib/app/gtui/key-sequences.js";
+import { ALT, CTRL, META, SHIFT } from "../lib/app/gtui/keymap.js";
 
 describe("modifier value ↔ bits round-trip", () => {
   test("kitty modifier values map to GTUI modifier bits and back", () => {

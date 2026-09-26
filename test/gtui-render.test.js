@@ -1,12 +1,12 @@
-// test/gtui-render.test.js — proof for lib/gtui/render.js: DEAD CODE
+// test/gtui-render.test.js — proof for lib/app/gtui/render.js: DEAD CODE
 // (see AI-GTUI.md) — a Buffer's diff turned into ANSI bytes: one CUP
 // per changed run, coalesced SGR, wide-grapheme continuation cells
 // skipped, and the real terminal cursor placed/hidden per
 // buffer.cursor.
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { renderDiff } from "../lib/gtui/render.js";
-import { BOLD } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { renderDiff } from "../lib/app/gtui/render.js";
+import { BOLD } from "../lib/app/gtui/cell.js";
 
 const CURSOR_HIDE = "\x1b[?25l"; // every content-changing paint re-asserts cursor state — hidden by default
 

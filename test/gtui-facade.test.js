@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { GTUI, effect, event, host, view } from "../lib/gtui/gtui.js";
+import { GTUI, effect, event, host, view } from "../lib/app/gtui/gtui.js";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

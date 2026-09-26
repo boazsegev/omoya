@@ -168,7 +168,7 @@ describe("runLoginWizard", () => {
       static provider = { label: "A" };
       static knownEndpoints = [
         { name: "cloud-a", label: "Cloud A", url: "https://cloud-a/v1" },
-        { name: "cloud-b", label: "Cloud B", url: "https://cloud-b/v1" },
+        { name: "cloud-b", label: "Cloud B", url: "https://cloud-b/v1", note: "bills extra credits, not the plan" },
       ];
     }
     env.registerProvider("wire-a", WireA);
@@ -197,6 +197,13 @@ describe("runLoginWizard", () => {
     expect(login.name).toBe("my-endpoint");
     expect(login.endpoint).toEqual({ provider: "wire-b", url: "https://new.example/v1" });
     expect(login.scope).toBe("local");
+  });
+
+  test("a preset's note prints with its entry — the caveat is part of the choice", async () => {
+    const env = wizardEnv();
+    const { result, output } = wizard(env, ["2", "", "", "", "tok-1"]);
+    await result;
+    expect(output()).toContain("note: bills extra credits, not the plan");
   });
 
   test("an unknown numbered choice fails", async () => {

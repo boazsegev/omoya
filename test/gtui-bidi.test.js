@@ -1,7 +1,7 @@
 // Pragmatic Hebrew/Arabic visual ordering at the rendering boundary.
 import { describe, expect, test } from "bun:test";
-import { detectBidi, renderBidi } from "../lib/gtui/bidi.js";
-import { createBuffer } from "../lib/gtui/buffer.js";
+import { detectBidi, renderBidi } from "../lib/app/gtui/bidi.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
 
 describe("detectBidi: plain LTR text", () => {
   test("no RTL code points: hasRTL false, no runs", () => {

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";
-import { createApp } from "../lib/tui-app/app.js";
+import { createApp } from "../lib/app/tui/app.js";
 import { USER } from "./fakes.js";
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 

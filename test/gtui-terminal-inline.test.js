@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
-import { createTheme } from "../lib/gtui/theme.js";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createInlineTerminalRenderer, inlineHostInternals } from "../lib/gtui/terminal-inline-host.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createInlineTerminalRenderer, inlineHostInternals } from "../lib/app/gtui/terminal-inline-host.js";
 import { TerminalScreen } from "./terminal-screen.js";
 
 const plain = (bytes) => bytes.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");

@@ -1,9 +1,9 @@
-// test/web-app-commands.test.js — proof for lib/web-app/commands.js:
+// test/web-app-commands.test.js — proof for lib/app/web/commands.js:
 // the web app's slash-command layer (built only on public Agent/Env
 // façades). /agent-name is the headline case: it must be routed (the
 // autocomplete lists it) and must rename the agent.
 import { describe, expect, test } from "bun:test";
-import { runCommand, catalog } from "../lib/web-app/commands.js";
+import { runCommand, catalog } from "../lib/app/web/commands.js";
 import Agent from "../lib/agent.js";
 import { testEnv } from "./fakes.js";
 
@@ -27,7 +27,7 @@ describe("web-app commands: /agent-name", () => {
 
 describe("web-app commands: TUI parity", () => {
   test("a unique prefix resolves; an ambiguous one does not", async () => {
-    const { resolveCommand } = await import("../lib/web-app/commands.js");
+    const { resolveCommand } = await import("../lib/app/web/commands.js");
     expect(resolveCommand("/agent-st")).toBe("/agent-status");
     expect(resolveCommand("/context-c")).toBe("/context-c");
   });
@@ -39,6 +39,15 @@ describe("web-app commands: TUI parity", () => {
       { type: 3, content: [{ type: "text", text: "the answer" }] },
     ] });
     expect(await runCommand(agent, "/context-copy")).toEqual({ copy: "the answer" });
+  });
+
+  test("/<prompt> fills the composer for editing instead of submitting", async () => {
+    const env = await testEnv();
+    env.promptBody = (name) => (name === "greet" ? "Say hello." : null);
+    const agent = new Agent({ env, model: "p/m", context: [] });
+    expect(await runCommand(agent, "/greet")).toEqual({ fill: "Say hello." });
+    expect(await runCommand(agent, "//greet to Bo\nthanks")).toEqual({ fill: "Say hello.\nto Bo\nthanks" });
+    expect(agent.context).toEqual([]);
   });
 
   test("dialog-backed commands open client views", async () => {

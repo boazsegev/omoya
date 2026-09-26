@@ -1,11 +1,11 @@
-// test/gtui-width.test.js — proof for lib/gtui/width.js (ported from
+// test/gtui-width.test.js — proof for lib/app/gtui/width.js (ported from
 // lib/tui-helpers/width.js, AI-TUI MIGRATION.md Phase 01 step 2):
 // display width counts GRAPHEME CLUSTERS (a ZWJ emoji family, a
 // skin-tone emoji, a flag pair are ONE 2-column cell), tabs expand,
 // controls/zero-width count nothing; wrapWords/wrapByWidth never
 // split a cluster.
 import { describe, expect, test } from "bun:test";
-import { displayWidth, graphemes, graphemeWidth, wrapRowsGraphemes, wrapWords, wrapWordsOffsets, wrapByWidth } from "../lib/gtui/width.js";
+import { displayWidth, graphemes, graphemeWidth, wrapRowsGraphemes, wrapWords, wrapWordsOffsets, wrapByWidth } from "../lib/app/gtui/width.js";
 
 describe("displayWidth: grapheme clusters", () => {
   test("ascii, wide CJK, tabs, controls", () => {

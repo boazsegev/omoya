@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { questionView, QUESTION_INPUT_ID, QUESTION_MENU_ID } from "../lib/tui-app/questionnaire-view.js";
+import { questionView, QUESTION_INPUT_ID, QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
 
 const question = {
   header: "Choice", question: "Pick", options: [

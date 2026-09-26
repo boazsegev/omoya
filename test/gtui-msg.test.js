@@ -1,7 +1,7 @@
-// test/gtui-msg.test.js — proof for lib/gtui/msg.js: DEAD CODE (see
+// test/gtui-msg.test.js — proof for lib/app/gtui/msg.js: DEAD CODE (see
 // AI-GTUI.md) — the Msg/Cmd/Sub plain-object contracts.
 import { describe, expect, test } from "bun:test";
-import { msg, cmd, NONE, batchCmds, sub } from "../lib/gtui/msg.js";
+import { msg, cmd, NONE, batchCmds, sub } from "../lib/app/gtui/msg.js";
 
 describe("msg/cmd/sub: plain tagged objects", () => {
   test("msg() tags a payload with its type", () => {

@@ -10,13 +10,13 @@
 // what it already means elsewhere in this suite (test/cli-question.js
 // et al.): real Node streams carrying real bytes through the real
 // decode path, not a spawned pty. A full compiled-binary PTY run
-// needs the Phase 04 cutover (lib/tui.js doesn't dispatch here yet).
+// needs the Phase 04 cutover (lib/app/tui/index.js doesn't dispatch here yet).
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
-import { terminalTitle } from "../lib/tui-app/run.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
+import { terminalTitle } from "../lib/app/tui/run.js";
 import { fakeIO, scriptedIO, testEnv, TEXT } from "./fakes.js";
 
 class FakeInput extends EventEmitter {
@@ -251,7 +251,7 @@ for (const mode of ["inline", "alt"]) {
       const before = output.chunks.length;
       await Bun.sleep(70);
       expect(output.chunks.length).toBeGreaterThan(before);
-      expect(output.bytes()).toContain("🟠");
+      expect(output.bytes()).toContain("●"); // the busy state dot (the wave colors each cell separately)
       input.emit("data", Buffer.from([0x03]));
       await until(() => !agent.busy);
       ui.stop();
@@ -292,7 +292,7 @@ for (const mode of ["inline", "alt"]) {
 
 for (const mode of ["inline", "alt"]) {
   test(`a rendered diff uses GTUI theme colors on the real terminal host (${mode})`, async () => {
-    const { transcriptItems } = await import("../lib/tui-app/transcript.js");
+    const { transcriptItems } = await import("../lib/app/tui/transcript.js");
     const fence = String.fromCharCode(96).repeat(3);
     const raw = `${fence}diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n${fence}`;
     const node = transcriptItems([{ type: "text", text: raw, group: "d", ordinal: 0 }])[0].node;

@@ -1,11 +1,11 @@
-// test/gtui-clipboard.test.js — proof for lib/gtui/clipboard.js
+// test/gtui-clipboard.test.js — proof for lib/app/gtui/clipboard.js
 // (ported from lib/tui-helpers/clipboard.js, AI-TUI MIGRATION.md
 // Phase 01 step 2): OSC 52 is the PRIMARY clipboard mechanism
 // (assumed supported), the pbcopy/wl-copy/xclip tools are the
 // fallback, and the tmux passthrough framing applies inside tmux.
 // Never throws.
 import { describe, expect, test, afterEach } from "bun:test";
-import { copyToClipboard, osc52Copy } from "../lib/gtui/clipboard.js";
+import { copyToClipboard, osc52Copy } from "../lib/app/gtui/clipboard.js";
 
 const TMUX = process.env.TMUX;
 afterEach(() => {

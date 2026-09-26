@@ -1,10 +1,10 @@
-// test/gtui-byte-filter.test.js — proof for lib/gtui/byte-filter.js
+// test/gtui-byte-filter.test.js — proof for lib/app/gtui/byte-filter.js
 // (ported from lib/tui-helpers/byte-filter.js, AI-TUI MIGRATION.md
 // Phase 01 step 2): bracketed-paste and Shift+Enter recognition,
 // kitty CSI-u / modifyOtherKeys translation, SGR mouse extraction —
 // all before the raw bytes would otherwise reach a keypress decoder.
 import { describe, expect, test } from "bun:test";
-import { createByteFilter } from "../lib/gtui/byte-filter.js";
+import { createByteFilter } from "../lib/app/gtui/byte-filter.js";
 
 describe("createByteFilter (paste / Shift-Enter recognition)", () => {
   const harness = () => {

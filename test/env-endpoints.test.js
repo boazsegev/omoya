@@ -321,6 +321,209 @@ describe("secret endpoints and models", () => {
   });
 });
 
+describe("endpoint model filter (providers.<name>.filter)", () => {
+  const MODELS = {
+    "gpt-6-sol": { label: "Sol" },
+    "gpt-6-astra": { label: "Astra" },
+    "gpt-5.6-luna": null,
+    "gpt-5-pro": { label: "Pro" },
+  };
+
+  test("endpointSettings marks non-matching models secret; matching metadata survives", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { codex: { provider: "openai", url: "http://x", filter: "(luna|sol|astra)", models: MODELS } },
+    } });
+    const { models } = env.endpointSettings("codex");
+    expect(models["gpt-6-sol"]).toEqual({ label: "Sol" });
+    expect(models["gpt-6-astra"]).toEqual({ label: "Astra" });
+    expect(models["gpt-5.6-luna"]).toBeNull();
+    expect(models["gpt-5-pro"]).toEqual({ label: "Pro", secret: true });
+    // the raw stored config is untouched — the filter is a view
+    expect(env.endpoint("codex").models["gpt-5-pro"]).toEqual({ label: "Pro" });
+  });
+
+  test("menus/completions/combo-resolution hide filtered-out models through the secret path", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { codex: { provider: "openai", url: "http://x", filter: "(luna|sol|astra)", models: MODELS } },
+    } });
+    env.registerProvider("openai", class OpenAIProtocol {});
+    expect(listEndpointModels(env)).toEqual([{ name: "codex", models: ["gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna"] }]);
+    const candidates = listModelCandidates(env);
+    expect(candidates).toContain("codex/gpt-6-sol");
+    expect(candidates).not.toContain("gpt-5-pro");
+    expect(candidates).not.toContain("codex/gpt-5-pro");
+    // a filtered-out model is unknown as a bare id, but an explicit
+    // endpoint/model combo still resolves (same rule as secret models)
+    expect(await resolveModelCombo("gpt-5-pro", env)).toEqual({ model: "gpt-5-pro" });
+    expect(await resolveModelCombo("codex/gpt-5-pro", env)).toEqual({ endpoint: "codex", model: "gpt-5-pro" });
+  });
+
+  test("a live models() refresh is filtered the same way", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { live: { provider: "wire", url: "http://live", filter: "^keep" } },
+    } });
+    class Wire {
+      static provider = {};
+      constructor(url, aiio) { this.aiio = aiio; }
+      async models() {
+        const models = { "keep-me": null, drop: { label: "Drop" } };
+        this.aiio.authSet({ models });
+        return models;
+      }
+      async close() {}
+    }
+    env.registerProvider("wire", Wire);
+    const models = await env.endpointModels("live", { refresh: true });
+    expect(models).toEqual({ "keep-me": null, drop: { label: "Drop", secret: true } });
+    // the persisted cache stores the FULL list; only the view is filtered
+    expect(JSON.parse(readFileSync(join(dir, "auth-live.json"), "utf8")).live.models).toEqual({ "keep-me": null, drop: { label: "Drop" } });
+    expect(env.endpointSettings("live").models.drop).toEqual({ label: "Drop", secret: true });
+  });
+
+  test("an invalid filter regex is a no-op, never a broken endpoint", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { codex: { provider: "openai", url: "http://x", filter: "([", models: MODELS } },
+    } });
+    expect(env.endpointSettings("codex").models).toEqual(MODELS);
+  });
+
+  test("the last-model memory rejects a now-filtered-out selection", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { codex: { provider: "openai", url: "http://x", filter: "astra$", models: MODELS } },
+    } });
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-5-pro" }));
+    expect(env.lastModel()).toBeNull();
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-6-astra" }));
+    expect(env.lastModel()).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
+  });
+});
+
+describe("partial providers entries (endpoint preferences placeholders)", () => {
+  test("a bare preferences entry is not a registered endpoint — and never shadows detection", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { ollama: { maxActive: 2 }, future: { filter: "x" } },
+    } });
+    env.registerProvider("ollama", OllamaPlugin);
+    // no URL anywhere: nothing registers, menus stay empty
+    expect(env.endpointNames()).toEqual([]);
+    expect(listEndpointModels(env)).toEqual([]);
+    expect(await resolveModelCombo("future/some-model", env)).toEqual({ model: "future/some-model" });
+    // detection ADOPTS the preferences instead of being shadowed
+    const added = await env.detectEndpoints();
+    if (added.includes("ollama")) { // a local server is running
+      expect(env.isDynamic("ollama")).toBe(true);
+      expect(env.endpointSettings("ollama")).toMatchObject({
+        provider: "ollama", url: "http://localhost:11434", maxActive: 2,
+      });
+      expect(env.endpointNames()).toContain("ollama");
+      // the preferences entry itself never mutated
+      expect(env.endpoint("ollama")).toEqual({ maxActive: 2 });
+    }
+    expect(env.endpointNames()).not.toContain("future"); // still a placeholder
+  });
+
+  test("an ambient-key endpoint adopts the same-named preferences entry", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { xai: { filter: "^grok-4" } },
+    } });
+    env.registerProvider("openai", OpenAIPlugin);
+    const saved = process.env.XAI_API_KEY;
+    process.env.XAI_API_KEY = "xai-ambient";
+    try {
+      const added = await env.detectEndpoints();
+      expect(added).not.toContain("xai"); // adopted, not added
+    } finally {
+      if (saved === undefined) delete process.env.XAI_API_KEY;
+      else process.env.XAI_API_KEY = saved;
+    }
+    expect(env.isDynamic("xai")).toBe(true);
+    expect(env.endpointNames()).toContain("xai");
+    expect(env.endpointSettings("xai")).toMatchObject({
+      provider: "openai", url: "https://api.x.ai/v1", filter: "^grok-4",
+    });
+    expect(env.endpointSettings("xai").auth.token).toBe("xai-ambient");
+    // nothing persisted: neither the connection nor the key
+    expect(existsSync(join(dir, "auth-xai.json"))).toBe(false);
+    // the key gone: the environment connection drops, the preferences stay
+    await env.detectEndpoints();
+    expect(env.endpointNames()).not.toContain("xai");
+    expect(env.endpoint("xai")).toEqual({ filter: "^grok-4" });
+  });
+
+  test("a full configured entry adopts its environment twin, own connection fields winning", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { ollama: { provider: "ollama", url: "https://remote.example", maxActive: 2 } },
+    } });
+    env.registerProvider("ollama", OllamaPlugin);
+    await env.detectEndpoints();
+    // unchanged by detection when the local server is absent; when it
+    // answers, the entry's own URL keeps winning over the environment's
+    expect(env.endpointSettings("ollama").url).toBe("https://remote.example");
+    expect(env.endpointSettings("ollama").maxActive).toBe(2);
+  });
+
+  test("a preferences entry merges over the auth-file record of a logged-in endpoint", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { codex: { filter: "(luna|sol|astra)" } },
+    } });
+    env.authSet("codex", {
+      provider: "openai", url: "https://chatgpt.com/backend-api/codex",
+      auth: { token: "tok" }, models: { "gpt-6-sol": null, "gpt-5-pro": null },
+    });
+    const settings = env.endpointSettings("codex");
+    expect(settings).toMatchObject({
+      provider: "openai", url: "https://chatgpt.com/backend-api/codex", filter: "(luna|sol|astra)",
+    });
+    expect(settings.auth.token).toBe("tok");
+    expect(settings.models["gpt-6-sol"]).toBeNull();
+    expect(settings.models["gpt-5-pro"]).toEqual({ secret: true });
+    expect(env.endpointNames()).toContain("codex"); // the auth record completes it
+  });
+
+  test("connection data is not web-only: a provider-only or cmd entry registers too", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: {
+        claude: { provider: "claude" }, // a pipe/CLI protocol needs no URL
+        localcmd: { provider: "acme", cmd: "acme --serve" },
+        prefs: { maxActive: 1 }, // preferences only: not registered
+      },
+    } });
+    expect(env.endpointNames()).toEqual(["claude", "localcmd"]);
+    expect(env.endpointRegistered("prefs")).toBe(false);
+    expect(env.endpointRegistered("claude")).toBe(true);
+  });
+
+  test("a url-only entry resolves the built-in OpenAI protocol fallback", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { pipe: { url: "http://localhost:9999/v1" } },
+    } });
+    expect(env.endpointNames()).toContain("pipe");
+    expect(env.endpointSettings("pipe").provider).toBeUndefined(); // fallback applies at use
+    env.registerProvider("openai", OpenAIPlugin);
+    const models = await env.endpointModels("pipe"); // no crash without a protocol fetch
+    expect(models).toEqual({});
+  });
+
+  test("last-model memory follows the environment connection of a preferences entry", async () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { xai: { filter: "^grok" } },
+    } });
+    env.registerProvider("openai", OpenAIPlugin);
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "xai", model: "grok-4" }));
+    expect(env.lastModel()).toBeNull(); // placeholder: no connection, no memory
+    const saved = process.env.XAI_API_KEY;
+    process.env.XAI_API_KEY = "xai-ambient";
+    try {
+      env.authSet("xai", { models: { "grok-4": null } }); // in-memory cache, dynamic-style
+      await env.detectEndpoints();
+      expect(env.lastModel()).toEqual({ endpoint: "xai", model: "grok-4" });
+    } finally {
+      if (saved === undefined) delete process.env.XAI_API_KEY;
+      else process.env.XAI_API_KEY = saved;
+    }
+  });
+});
+
 describe("Env.refreshEndpointSettings (multi-process auth rotation)", () => {
   test("a changed auth file merges over the stale in-memory record", () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir });

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { layoutView, measureView } from "../lib/gtui/layout.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { layoutView, measureView } from "../lib/app/gtui/layout.js";
 
 test("generic tail preview retains last eight wrapped rows with logical source offsets", () => {
   const source = Array.from({ length: 12 }, (_, index) => `row ${index}`).join("\n");

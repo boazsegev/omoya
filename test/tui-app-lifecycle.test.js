@@ -7,11 +7,11 @@
 // of those commands silently no-op'd through the router's own graceful
 // fallback text).
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent, SessionStore } from "../lib/agent.js";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createApp, msg } from "../lib/tui-app/app.js";
-import { QUESTION_MENU_ID } from "../lib/tui-app/questionnaire-view.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
+import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
 import { scriptedIO, testEnv, TEXT } from "./fakes.js";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -458,7 +458,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
     await until(() => io.turns() === 1); // the turn actually ran — exactly like /continue
     await until(() => memory.snapshot().lines.some((l) => l.includes("ok")));
     expect(agent.context.some((m) => m.type === 2)).toBe(false); // NO user message was appended
-    expect(memory.snapshot().lines.some((l) => l.trim() === "")).toBe(true); // nothing printed for the empty turn
+    expect(memory.snapshot().roles.some((span) => span.role.startsWith("message.user"))).toBe(false); // nothing printed for the empty turn
     ui.stop();
     await running;
   });

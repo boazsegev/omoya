@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { compileBindings, matchesBinding } from "../lib/gtui/keymap.js";
-import { appBindings, resolveKeymap } from "../lib/tui-app/bindings.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { compileBindings, matchesBinding } from "../lib/app/gtui/keymap.js";
+import { appBindings, resolveKeymap } from "../lib/app/tui/bindings.js";
 
 const model = (overlay = null, completions = [], question = null) => ({ overlay, input: { completions }, question });
 
@@ -44,6 +44,14 @@ test("unknown and inherited names do not route and Unicode text cannot collide",
   expect(matchesBinding(context, { code: "toString", modifiers: 2 })).toBe(false);
   expect(matchesBinding(context, { code: "é", modifiers: 2 })).toBe(false);
   expect(matchesBinding(context, { code: "x", modifiers: 2 })).toBe(true);
+});
+
+test("an open menu consumes Escape itself, busy or idle (Esc closes it before interrupting)", () => {
+  const extra = Object.values(resolveKeymap()).flat();
+  const busy = compileBindings(appBindings({ ...model({ type: "menu" }), turnRunning: true }, extra));
+  const idle = compileBindings(appBindings(model({ type: "menu" }), extra));
+  expect(matchesBinding(busy, { code: "escape", modifiers: 0 })).toBe(false);
+  expect(matchesBinding(idle, { code: "escape", modifiers: 0 })).toBe(false);
 });
 
 test("word-navigation keys stay out of app routing even when settings try to claim them", () => {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { canonicalKey, compileBindings, decodeKey, matchesBinding } from "../lib/gtui/keymap.js";
+import { canonicalKey, compileBindings, decodeKey, matchesBinding } from "../lib/app/gtui/keymap.js";
 
 for (let modifiers = 0; modifiers < 16; modifiers++) {
   test(`modifier bucket ${modifiers} matches only its own normalized key`, () => {

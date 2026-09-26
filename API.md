@@ -1,4 +1,4 @@
-# API (2026-09-26)
+# API (2026-09-27)
 
 ## Agent
 
@@ -326,9 +326,9 @@ Run every registered cleanup.
 
 Two folder paths are the same place (realpath when it exists).
 
-### `Agent.sessionDir()`
+### `Agent.sessionDir(env)`
 
-The default namespace session folder under settings (created when missing) — outside the project tree by design (see the header).
+The namespace session folder under settings — outside the project tree by design (see the header).
 
 ### `Agent.SessionStore.append(message, options)`
 
@@ -338,13 +338,17 @@ Append a message, MERGING with the last one when possible (consecutive same-type
 
 Flush and detach the finish hook.
 
-### `Agent.SessionStore.constructor({ id, dir, context = [], origin, process: proc, uuid, name, save = true } = {…})`
+### `Agent.SessionStore.constructor({ id, dir, context = [], origin, process: proc, uuid, name, settings, save = true } = {…})`
 
 Open a store for a session id (the file is created on the first flush of a non-empty context); registers the crash-safe finish hook.
 
 ### `Agent.SessionStore.deleteAll({ dir } = {…})`
 
 Delete EVERY session file in the folder (the /sessions-delete-all!
+
+### `Agent.SessionStore.deleteById({ id, dir } = {…})`
+
+Permanently delete a STORED session by id: every session file whose metadata carries that id (a leftover duplicate goes with it).
 
 ### `Agent.SessionStore.edit(i, message)`
 
@@ -364,7 +368,7 @@ The id of the most recently modified session in the folder (of the `cwd` origin 
 
 ### `Agent.SessionStore.list({ dir, cwd, limit = 50 } = {…})`
 
-Every session in the folder, LATEST FIRST, each with a small preview: a snippet of the first user message (whitespace-folded, capped).
+Every session in the folder, LATEST FIRST (one entry per id), each with a small preview: the first meaningful line of the first user message (see meaningfulLine; whitespace-folded, capped) and `agent`, the stored agent name when it is not a default `agent-N` one.
 
 ### `Agent.SessionStore.listAsync({ dir, cwd, limit = 50 } = {…})`
 
@@ -390,6 +394,10 @@ Remove selected messages.
 
 Rename the session: BOTH the stable `id` and the file's NAME segment become `newId` (the same session — the date/uuid8 prefix carries over unchanged) and the old file is gone.
 
+### `Agent.SessionStore.renameById({ id, name, dir } = {…})`
+
+Rename a STORED session by id (the sidebar/menu path for a session no store holds open — a live one renames through its store): loads it, renames it (see rename()) and closes it again.
+
 ### `Agent.SessionStore.resume({ id, dir, process: proc, save = true } = {…})`
 
 Load a session file into a fresh store holding its live context.
@@ -406,9 +414,19 @@ whether this store writes its context to disk
 
 Enable or disable persistence without replacing the live context.
 
+### `Agent.SessionStore.get settings()`
+
+the session-owned agent settings snapshot (undefined: the session has none recorded — resume keeps the caller's configuration)
+
+### `Agent.SessionStore.set settings(value)`
+
+Record the session-owned AGENT SETTINGS snapshot (safe, thinking, endpoint/model, name, … — Agent writes it; the store only persists it; a default `agent-N` name never rides the file).
+
 ### `Agent.thinkValue(level)`
 
-Map a thinking-level word to the request option value: off/false/0 → false, on/true/1 → true, level words (low/medium/high/xhigh) pass through, undefined/"default" → undefined (the model's default).
+Map a thinking-level word to the request option value: none/false/0 → false, on/true/1 → true, positive level words pass through, undefined/"default" → undefined (the model's default).
+
+## App
 
 ## CLI
 
@@ -904,6 +922,10 @@ One endpoint's model MAP.
 
 Endpoint names; secret entries are hidden unless explicitly requested.
 
+### `Env.endpointRegistered(name)`
+
+Is the endpoint REGISTERED — some layer completes it with connection data (provider/url/cmd/…)?
+
 ### `Env.endpointScope(name)`
 
 The scope an endpoint's settings/auth live in: "local" when its configuration came from the namespaced PROJECT settings file, "package" otherwise (user settings or package files).
@@ -1110,15 +1132,15 @@ Build the error from a non-2xx response (the body's first 200 characters ride in
 
 ### `Env.isToolModuleFile(name)`
 
-Tool-module filename filter: files named like benches, tests, or demos are NEVER imported by the tool scan.
+Tool-module filename filter: files named like benches, tests, or demos are NEVER imported by the tool scan — importing a module runs its top level, so a bench/test script would execute its suite and retain its datasets in the module cache for the process's lifetime.
 
 ### `Env.mergeAuthUpdate(existing, data)`
 
 Merge an auth UPDATE into an existing provider section: nested plain objects merge key-by-key; scalars AND ARRAYS replace outright — no concatenation.
 
-### `async Env.openaiWebSearch({ aiio, args, signal, deadline })`
+### `Env.openaiWebCapabilities = Object.freeze({…})`
 
-The documented Responses API `web_search` tool (verified against platform.openai.com/docs/guides/tools-web-search on 2026-09-22: `tools: [{"type":"web_search"}]`, result read from `response.output_text`).
+The `web-search` provider capability of the built-in Responses implementation (referenced by providers/openai.js; called by Agent.callProviderCapability).
 
 ### `Env.osSandboxAvailable()`
 
@@ -1172,9 +1194,9 @@ Order native effort symbols weakest → strongest, dropping duplicates (unranked
 
 The values an API error lists as supported ("...
 
-### `Env.THINKING_LEVELS = ["default", "off", "low", "medium", "high", "xhigh"]`
+### `Env.THINKING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"]`
 
-Selectable thinking levels, "default" first, then weakest → strongest.
+Selectable thinking levels, weakest → strongest.
 
 ### `Env.TOOL_ON_TIMEOUT_LIMIT = 60_000`
 
@@ -1381,6 +1403,10 @@ Create an immutable vertical container.
 ### `GTUI.view.feed(props = {…})`
 
 Create an immutable feed control.
+
+### `GTUI.view.footer(props = {…}, items = [])`
+
+A one-line footer of app-pushed notification items (`{text, role?, priority?, align?: "start"|"end", action?}`): `start` items on the left, `end` items on the right, " · " between; a tight row drops the lowest `priority` first.
 
 ### `GTUI.view.grid(...)`
 
@@ -1748,7 +1774,7 @@ Classify one complete line of markdown.
 
 ### `async Markdown.lexMarkdown(text)`
 
-Tokenize complete markdown text: `marked`'s lexer (gfm, breaks) when available, the builtin lexer otherwise — same token shapes either way, ready for walkTokens.
+Tokenize complete markdown text.
 
 ### `async Markdown.markdownEngine()`
 
@@ -1799,3 +1825,5 @@ Run the complete TUI application from normalized declarative state.
 ### `TUI.TUI_ENGINES = TUI_MODES`
 
 The rendering modes accepted by createRepl.
+
+## Web

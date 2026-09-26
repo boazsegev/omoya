@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { renderDiff } from "../lib/gtui/render.js";
-import { sgr } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { renderDiff } from "../lib/app/gtui/render.js";
+import { sgr } from "../lib/app/gtui/cell.js";
 
 const esc = String.fromCharCode(27);
 const reset = `${esc}[0m`;

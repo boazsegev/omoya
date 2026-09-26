@@ -6,14 +6,14 @@
 // exchange, a markdown link's source offset and href, a tool call's
 // header, and an error notice.
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { layoutView } from "../lib/gtui/layout.js";
-import { createControls } from "../lib/gtui/controls.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { layoutView } from "../lib/app/gtui/layout.js";
+import { createControls } from "../lib/app/gtui/controls.js";
 import { Agent } from "../lib/agent.js";
-import { markdownRows } from "../lib/tui-app/markdown-view.js";
-import { transcriptItems, noticeItems, createTranscriptProjector } from "../lib/tui-app/transcript.js";
-import { contextBlocks } from "../lib/tui-app/context-blocks.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
+import { markdownRows } from "../lib/app/tui/markdown-view.js";
+import { transcriptItems, noticeItems, createTranscriptProjector } from "../lib/app/tui/transcript.js";
+import { contextBlocks } from "../lib/app/tui/context-blocks.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
 import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
 
 const tick = () => new Promise((resolve) => queueMicrotask(resolve));
@@ -45,8 +45,20 @@ function assertOffsetsReconstruct(raw, rows) {
     expect(rows[0].role).toBe("md.code"); // the fence delimiter row
     expect(rows[1].content[0].text).toBe("..."); // the omission marker
     expect(rows[2].role).toBe("md.code"); // fence state threaded across the dropped middle
-    expect(rows[2].content[0].text).toBe(body.at(-1));
+    expect(rows[2].content.map((span) => span.text).join("")).toBe(`│ ${body.at(-1)}`); // gutter glyph, then the verbatim (highlighted) line
     assertOffsetsReconstruct(raw, rows.filter((row) => row.content.length > 0 && row.content[0].text !== "..."));
+  });
+
+  test("task lists render boxes and fenced code a light frame; frame glyphs never enter copied source", () => {
+    const raw = "- [x] done\n- [ ] todo\n\n```js\nconst a = 1;\n```";
+    const rows = markdownRows(raw);
+    const text = rows.map((row) => row.content.map((span) => span.text).join(""));
+    expect(text.slice(0, 2)).toEqual(["☑ done", "☐ todo"]);
+    expect(rows[0].content[0].source).toEqual({ start: 0, end: 5 }); // the box copies back as "- [x]"
+    expect(text.slice(3)).toEqual(["╭─ js", "│ const a = 1;", "╰─"]);
+    assertOffsetsReconstruct(raw, [rows[0], rows[1]].map((row) => ({ content: row.content.slice(1) })).concat(rows.slice(3)));
+    const framed = rows.slice(3).flatMap((row) => row.content).filter((span) => /[╭│╰]/.test(span.text));
+    expect(framed.every((span) => span.source === undefined)).toBe(true);
   });
 
   test("a small source renders complete even with a window configured", () => {
@@ -110,7 +122,7 @@ describe("markdown-view: raw markdown -> role/link/source spans", () => {
     const raw = "| Name | Description |\n| --- | --- |\n| A | a very long description |";
     const node = transcriptItems([{ type: "text", text: raw, group: "message", section: "Text", ordinal: 0 }])[0].node;
     const snapshot = layoutView(node, { width: 14, height: 10 }).snapshot;
-    expect(snapshot.lines).toEqual(["  Nam   Desc", "  e     ript", "        ion", "  A     a", "        very", "        long", "        desc", "        ript", "        ion"]);
+    expect(snapshot.lines).toEqual(["  Nam   Desc", "  e     ript", "        ion", "  ──────────", "  A     a", "        very", "        long", "        desc", "        ript", "        ion"]);
     expect(snapshot.roles.some((span) => span.role.includes("md.table.heading"))).toBe(true);
     expect(snapshot.sources.some(({ source }) => source.start === raw.indexOf("Description"))).toBe(true);
   });
@@ -146,32 +158,35 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     const memory = GTUI.host.memory({ width: 80 });
     const ui = new GTUI({ host: memory });
     ui.run({ init: () => ({ model: {}, effects: [] }), update: (m) => ({ model: m, effects: [] }), view: () => GTUI.view.feed({ items }) });
-    expect(memory.snapshot().lines.some((line) => line.includes("[system]"))).toBe(true);
+    expect(memory.snapshot().lines.some((line) => line.includes("⚙ system · rules · 1 line"))).toBe(true);
     expect(memory.snapshot().roles.some((span) => span.role === "message.user md.strong")).toBe(true);
     ui.stop();
   });
 
-  test("a tool call has clean semantic content and a themed physical border", () => {
+  test("a tool call is one card: state glyph, name, argument summary — and a themed physical border", () => {
     const blocks = contextBlocks([{ type: 3, content: [{ type: "toolCall", callId: "c1", name: "read", arguments: { path: "x" } }] }]);
     const items = transcriptItems(blocks);
-    expect(items[0].node.children[0].content.map((s) => s.text).join("")).toBe("[tool call] read");
+    // no result and no running turn: the call was never run
+    expect(items[0].node.children[0].content.map((s) => s.text).join("")).toBe("– read  x");
     const memory = GTUI.host.memory({ width: 80 });
     const ui = new GTUI({ host: memory, theme: createApp({ context: [], pending: [], endpoint: "", model: "", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
     ui.run({ init: () => ({ model: {}, effects: [] }), update: (m) => ({ model: m, effects: [] }), view: () => GTUI.view.feed({ items }) });
-    expect(memory.snapshot().lines[0]).toContain("▌   [tool call] read");
+    expect(memory.snapshot().lines[0]).toContain("▌   – read  x");
     ui.stop();
   });
 
-  test("tool-call body and thinking previews tail-cap at eight rows while displays remain full", () => {
+  test("tool-card output and thinking previews tail-cap at eight rows while displays remain full", () => {
     const long = Array.from({ length: 10 }, (_, index) => `row ${index}`).join("\n");
     const items = transcriptItems([
-      { type: "toolcall", label: "read", text: long, group: "call", section: "Call", ordinal: 0 },
+      { type: "toolcall", label: "read", text: '{"path":"a.txt"}', group: "call", section: "Call", ordinal: 0, category: "tool" },
+      { type: "toolresult", label: "read", text: long, group: "call", section: "Result", ordinal: 0, category: "tool" },
       { type: "thinking", text: long, group: "message", section: "Thinking", ordinal: 0 },
       { type: "display", label: "display", text: long, group: "display", section: "Display", ordinal: 0 },
     ]);
     const ui = (node) => layoutView(node, { width: 30, height: 30 }).snapshot.lines.map((line) => line.trim());
-    expect(ui(items[0].node)).toEqual(["[tool call] read", "row 0", "...", "row 9"]);
-    expect(ui(items[1].node)).toEqual(["row 0", "...", ...Array.from({ length: 6 }, (_, index) => `row ${index + 4}`)]);
+    expect(items).toHaveLength(3); // the result folds into its call's card
+    expect(ui(items[0].node)).toEqual(["✓ read  a.txt", "row 0", "...", "row 9"]);
+    expect(ui(items[1].node)).toEqual(["Thought", "row 0", "...", ...Array.from({ length: 6 }, (_, index) => `row ${index + 4}`)]);
     expect(ui(items[2].node)).toEqual(Array.from({ length: 10 }, (_, index) => `row ${index}`));
   });
 
@@ -183,7 +198,7 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     ], 0, { previewRows: { toolresult: 2, thinking: 3 } });
     const lines = (node) => layoutView(node, { width: 30, height: 30 }).snapshot.lines.map((line) => line.trim());
     expect(lines(items[0].node)).toEqual(["[tool ok] read", "row 0", "..."]);
-    expect(lines(items[1].node)).toEqual(["row 0", "...", "row 5"]);
+    expect(lines(items[1].node)).toEqual(["Thought", "row 0", "...", "row 5"]);
   });
 
   test("the block viewer opts out of transcript preview caps", () => {
@@ -200,10 +215,59 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     ]);
     const lines = (node) => layoutView(node, { width: 30, height: 30 }).snapshot.lines.map((line) => line.trim());
     // streamed args/stdout are tail-interest: capped exactly like a settled preview
-    expect(lines(items[0].node)).toEqual(["[tool call] edit", "row 0", "...", "row 9"]);
+    expect(lines(items[0].node)[0]).toBe("… edit  row 0 row 1 row 2…"); // composing: header clipped to width
+    expect(lines(items[0].node).slice(1)).toEqual(["row 0", "...", "row 9"]);
     // reasoning stays complete while open for read-along + queued hints
-    expect(lines(items[1].node)).toEqual(Array.from({ length: 10 }, (_, index) => `row ${index}`));
+    expect(lines(items[1].node)).toEqual(["Thinking…", ...Array.from({ length: 10 }, (_, index) => `row ${index}`)]);
     expect(items[0].done).toBe(false); // still the live tail, committed only when settled
+  });
+
+  test("tool cards: errors, durations, pending calls in a running turn, and interrupted calls", () => {
+    const call = (id, extra = {}) => ({ type: "toolcall", label: "bash", text: `{"command":"run ${id}"}`, group: `call:${id}`, section: "Call", ordinal: 0, category: "tool", callId: id, ...extra });
+    const header = (item) => layoutView(item.node, { width: 60, height: 10 }).snapshot.lines[0].trim();
+    const failed = transcriptItems([call("a", { duration: 4200 }), { type: "toolerror", label: "bash", text: "boom", group: "call:a", section: "Result", ordinal: 0, category: "tool" }]);
+    expect(header(failed[0])).toBe("✕ bash  run a · 4.2s");
+    const projector = createTranscriptProjector();
+    const blocks = [call("old"), { type: "text", text: "later", group: "message:1", section: "Message", ordinal: 0 }, call("new")];
+    const [old, , fresh] = projector.project(blocks, 0, { running: true });
+    expect(header(old)).toBe("– bash  run old"); // interrupted earlier: never holds back scrollback
+    expect(old.done).toBe(true);
+    expect(header(fresh)).toBe("◌ bash  run new"); // the running batch stays live until its result lands
+    expect(fresh.done).toBe(false);
+    expect(projector.project(blocks, 0, { running: false })[2].done).toBe(true);
+  });
+
+  test("thinking carries a label: Thinking… while open, then how long it took", () => {
+    const thinking = (extra) => ({ type: "thinking", text: "hmm", group: "message:0", section: "Thinking", ordinal: 0, ...extra });
+    const first = (block) => layoutView(transcriptItems([block])[0].node, { width: 30, height: 5 }).snapshot.lines[0].trim();
+    expect(first(thinking({ open: true }))).toBe("Thinking…");
+    expect(first(thinking({ duration: 4200 }))).toBe("Thought for 4.2s");
+    expect(first(thinking({}))).toBe("Thought");
+    // the block viewer shows the raw reasoning only
+    expect(layoutView(transcriptItems([thinking({})], 0, { previews: false })[0].node, { width: 30, height: 5 }).snapshot.lines[0].trim()).toBe("hmm");
+  });
+
+  test("a system message is one transcript line; the block viewer keeps its full text", () => {
+    const block = { type: "system", text: "\n# Rules\nline two\nline three", group: "message:0", section: "System", ordinal: 0 };
+    const lines = (options) => layoutView(transcriptItems([block], 0, options)[0].node, { width: 60, height: 10 }).snapshot.lines.map((line) => line.trim()).filter(Boolean);
+    expect(lines()).toEqual(["⚙ system · # Rules · 4 lines"]);
+    expect(lines({ previews: false })).toContain("line three");
+  });
+
+  test("each user message opens an exchange with one unstyled blank row", () => {
+    const user = { type: "user", text: "hi", group: "message:1", section: "User", ordinal: 0 };
+    const snapshot = (options) => layoutView(transcriptItems([user], 0, options)[0].node, { width: 20, height: 4 }).snapshot;
+    const spaced = snapshot();
+    expect(spaced.lines.slice(0, 2).map((line) => line.trim())).toEqual(["", "hi"]);
+    expect(snapshot({ previews: false }).lines[0].trim()).toBe("hi"); // the block viewer shows the block alone
+  });
+
+  test("the block viewer keeps raw blocks: no card folding", () => {
+    const items = transcriptItems([
+      { type: "toolcall", label: "read", text: "{}", group: "g", section: "Call", ordinal: 0, category: "tool" },
+      { type: "toolresult", label: "read", text: "out", group: "g", section: "Result", ordinal: 0, category: "tool" },
+    ], 0, { previews: false });
+    expect(items.map((item) => layoutView(item.node, { width: 30, height: 5 }).snapshot.lines[0].trim())).toEqual(["[tool call] read", "[tool ok] read"]);
   });
 
   test("a tool-result splice keeps every unaffected block's node identical (documented cache contract)", () => {

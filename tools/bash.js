@@ -1,7 +1,7 @@
 /**
  * tools/bash.js — run a bash command from the working folder.
  *
- * The command scanner refuses visible outside paths, `cd`, `ln`, and `ls`; the Agent's
+ * The command scanner refuses visible outside paths, `cd`, and `ln`; the Agent's
  * OS sandbox denies writes outside the working folder. This cannot prevent a
  * command from reading through a symlink created or supplied inside the tree:
  * see SECURITY.md. The `read` tool does reject symlinks directly.
@@ -22,7 +22,6 @@ const MAX_OUTPUT = 50_000;
 const ACTIVE_CHILDREN = new Set();
 const CD_WORDS = new Set(["cd"]);
 const LINK_WORDS = new Set(["ln"]);
-const LIST_WORDS = new Set(["ls"]);
 const PREFIX_WORDS = new Set(["command", "builtin", "exec", "env", "time", "nice", "sudo", "xargs"]);
 
 function refusal(message) {
@@ -51,11 +50,6 @@ export function hasLinkCommand(command) {
   return String(command).split(/[;&|()\n`]+/).some((segment) => LINK_WORDS.has(commandWord(segment)));
 }
 
-/** True when a command segment invokes ls, which inspects folder contents. */
-export function hasListCommand(command) {
-  return String(command).split(/[;&|()\n`]+/).some((segment) => LIST_WORDS.has(commandWord(segment)));
-}
-
 function capOutput(text) {
   if (text.length <= MAX_OUTPUT) return text;
   const half = Math.floor(MAX_OUTPUT / 2);
@@ -71,9 +65,6 @@ export async function bash({ command, env } = {}, context) {
   }
   if (hasLinkCommand(command)) {
     throw refusal("Remove ln and use a regular file or folder instead.");
-  }
-  if (hasListCommand(command)) {
-    throw refusal("Use the read tool to inspect folders instead of ls.");
   }
   const cwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
   const boundary = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
@@ -143,9 +134,9 @@ export function toolDescription() {
     // The worker relays complete output records through its one-way stderr
     // protocol, so bash remains forked and OS-sandboxed while streaming.
     sandbox: true, onTimeout,
-    description: "Run a Bash command in the working folder; return output and any exit code. Use read to inspect folders.",
+    description: "Run a Bash command in the working folder; return output and any exit code. Prefer read to inspect folders.",
     inputSchema: { type: "object", properties: {
-      command: { type: "string", description: "The bash command line to run (no cd, ln, or ls; use read for folder listing; every visible path argument must stay inside the working folder)" },
+      command: { type: "string", description: "The bash command line to run (no cd or ln; every visible path argument must stay inside the working folder)" },
       timeout: { type: "integer", description: "Requested milliseconds timeout (default: 120000; capped at 1200000)" },
       env: { type: "object", description: "Extra environment variables for the command." },
     }, required: ["command"] },

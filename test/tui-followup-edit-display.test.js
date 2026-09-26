@@ -3,8 +3,8 @@ import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import "../lib/env.js";
 import { edit } from "../tools/edit.js";
 import Agent from "../lib/agent.js";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
 import { testEnv, fakeIO, emitScript, TOOLCALL } from "./fakes.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";
 

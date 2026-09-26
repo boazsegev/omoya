@@ -1,9 +1,9 @@
-// test/gtui-buffer.test.js — proof for lib/gtui/buffer.js: DEAD CODE
+// test/gtui-buffer.test.js — proof for lib/app/gtui/buffer.js: DEAD CODE
 // (see AI-GTUI.md) — set/text/fill/blit, wide-grapheme continuation
 // cells, and diff()'s per-row changed runs.
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { blank, cell } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { blank, cell } from "../lib/app/gtui/cell.js";
 
 describe("createBuffer: set/text", () => {
   test("set() writes one grapheme; text() advances left to right by width", () => {

@@ -279,6 +279,21 @@ describe("IO provider surface", () => {
     expect(aiio.protocol).toBe("fake");
   });
 
+  test("a preferences placeholder rides on the auth file's connection (protocol + url)", () => {
+    // The providers entry carries ONLY preferences (filter/maxActive) — no
+    // provider/url. The completing connection lives in the auth file (the
+    // shape a login writes). IO must resolve protocol + URL from that merged
+    // view, not fall back to the OpenAI defaults and POST an Anthropic-shaped
+    // endpoint an OpenAI /responses request (the claude 404 regression).
+    const Protocol = fakeProvider();
+    if (!env.provider("fake")) env.registerProvider("fake", Protocol);
+    env.endpoints.fake = { filter: "[a-z]-[567]", maxActive: false }; // placeholder only
+    env.authSet("fake", { provider: "fake", url: "http://auth-file", auth: { token: "t" } });
+    const aiio = new IO({ env, model: "fake/m" });
+    expect(aiio.protocol).toBe("fake");
+    expect(aiio.url).toBe("http://auth-file");
+  });
+
   test("unknown endpoint name is a classified error", () => {
     expect(() => new IO({ env, model: "nope/m" })).toThrow(TypeError);
   });

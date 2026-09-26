@@ -3,9 +3,9 @@
 // of these packets; every check here drives the wire, not the DOM.
 import { expect, test } from "bun:test";
 import { readdirSync, writeFileSync } from "node:fs";
-import { serve, MAX_WS_PAYLOAD_LENGTH } from "../lib/web-app/server.js";
-import { parseClientMessage } from "../lib/web-app/protocol.js";
-import { AgentSession } from "../lib/web-app/session.js";
+import { serve, MAX_WS_PAYLOAD_LENGTH } from "../lib/app/web/server.js";
+import { parseClientMessage } from "../lib/app/web/protocol.js";
+import { AgentSession } from "../lib/app/web/session.js";
 import Agent from "../lib/agent.js";
 import Context from "../lib/context.js";
 import { TEXT, TOOLCALL, scriptedIO, testEnv } from "./fakes.js";
@@ -466,6 +466,10 @@ test("context inspection separates viewer block types and tool display", async (
     while (Date.now() < deadline && !received.some((m) => m.type === "context")) await tick();
     const types = received.findLast((m) => m.type === "context").blocks.flatMap((message) => message.content.map((block) => block.viewerType));
     expect(types).toEqual(expect.arrayContaining(["system", "user", "thinking", "assistant", "tool call", "tool answer", "tool display"]));
+    // tool blocks name their tool for the block viewer's title; others carry no name
+    const blocks = received.findLast((m) => m.type === "context").blocks.flatMap((message) => message.content);
+    expect(blocks.filter((block) => block.viewerType.startsWith("tool")).map((block) => block.name)).toEqual(["read", "read", "read"]);
+    expect(blocks.filter((block) => !block.viewerType.startsWith("tool")).every((block) => block.name === undefined)).toBe(true);
     socket.close();
   } finally { web.stop(); }
 });
@@ -615,6 +619,54 @@ test("resuming a saved session replaces the viewed agent", async () => {
       expect(agents[0].closed).toBe(true);
       expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
     } finally { Agent.SessionStore.listAsync = originalList; }
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("saved sessions rename and delete by id from the sidebar", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env, 0, "idle") }) });
+  const received = [];
+  const Store = Agent.SessionStore;
+  const original = { listAsync: Store.listAsync, renameById: Store.renameById, deleteById: Store.deleteById };
+  const calls = [];
+  Store.listAsync = async () => [{ id: "saved", preview: "saved", messages: 1 }];
+  Store.renameById = (options) => { calls.push(["rename", options.id, options.name]); return { id: options.name, file: "x" }; };
+  Store.deleteById = (options) => { calls.push(["delete", options.id]); return { deleted: 1 }; };
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "session.rename", id: "saved", name: "kept" }));
+    socket.send(JSON.stringify({ type: "session.delete", id: "saved" }));
+    socket.send(JSON.stringify({ type: "session.delete", id: "missing" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "error")) await tick();
+    expect(calls).toEqual([["rename", "saved", "kept"], ["delete", "saved"]]);
+    expect(received.filter((m) => m.type === "command.result").map((m) => m.text)).toEqual(["session named: kept", "session deleted: saved"]);
+    expect(received.find((m) => m.type === "error")?.message).toContain("unknown session");
+    socket.close();
+  } finally { Object.assign(Store, original); web.stop(); }
+});
+
+test("switching sessions keeps the current model unless the session stored its own", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, model: { model: "p1/launch" } });
+  const received = [];
+  const hellos = () => received.filter((m) => m.type === "hello");
+  const nextHello = async (count) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && hellos().length < count) await tick(); return hellos().at(-1)?.agent; };
+  const stored = (id, settings) => { const store = new Agent.SessionStore({ id, dir: Agent.sessionDir(env), origin: env.cwd, settings }); store.append({ type: 2, content: [{ type: "text", text: id }] }); store.close(); };
+  try {
+    const socket = await connect(web, received);
+    expect(await nextHello(1)).toMatchObject({ endpoint: "p1", model: "launch" });
+    env.agents()[0].setModel("p2/picked"); // the user switched models since launch
+    socket.send(JSON.stringify({ type: "session.new" }));
+    expect(await nextHello(2)).toMatchObject({ endpoint: "p2", model: "picked" }); // not the launch last-model
+    stored("with-model", { endpoint: "x", model: "own" });
+    stored("without-model", { name: "plain" });
+    socket.send(JSON.stringify({ type: "session.resume", id: "with-model" }));
+    expect(await nextHello(3)).toMatchObject({ endpoint: "x", model: "own" }); // the session's own model
+    socket.send(JSON.stringify({ type: "session.resume", id: "without-model" }));
+    expect(await nextHello(4)).toMatchObject({ endpoint: "x", model: "own" }); // no model stored: the current one stays
     socket.close();
   } finally { web.stop(); }
 });
@@ -814,7 +866,7 @@ test("every SPA asset the page references is served (no dangling module paths)",
   const env = await testEnv();
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
   try {
-    for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/text-safe.js", "/favicon.svg", "/logo.svg"]) {
+    for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/text-safe.js", "/format.js", "/favicon.svg", "/logo.svg"]) {
       const response = await fetch(`${origin(web)}${path}`);
       expect([path, response.status]).toEqual([path, 200]);
     }
@@ -829,6 +881,8 @@ test("protocol validates the TUI-parity packets", () => {
   expect(parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" }))).toEqual({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" });
   expect(() => parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "global", name: "e", provider: "p", url: "u" }))).toThrow("invalid scope");
   expect(() => parseClientMessage(JSON.stringify({ type: "session.rename", name: "   " }))).toThrow("invalid name");
+  expect(parseClientMessage(JSON.stringify({ type: "session.rename", name: "n", id: "s" }))).toEqual({ type: "session.rename", name: "n", id: "s" });
+  expect(parseClientMessage(JSON.stringify({ type: "session.delete", id: "s" }))).toEqual({ type: "session.delete", id: "s" });
   expect(parseClientMessage(JSON.stringify({ type: "chat.continue" }))).toEqual({ type: "chat.continue" });
 });
 

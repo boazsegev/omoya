@@ -1,6 +1,8 @@
 /**
- * lib/providers/ollama.js — Ollama connector (first target; proves the
- * provider contract and the metadata/models()/login() shape together).
+ * providers/ollama.js — Ollama connector: the reference implementation
+ * of the provider contract (metadata, models(), login(), the
+ * context2msg()/msg2events() translators, and endpoint detection),
+ * canonical for other provider plugins to follow.
  *
  * Direct HTTP to the Ollama local server (never the `ollama` CLI):
  *   POST {url}/api/chat   — NDJSON streaming chat
@@ -70,7 +72,8 @@ function context2msg(context, aiio) {
   // models with levels (e.g. gpt-oss), clamped to the low/medium/high
   // Ollama defines. Undefined: server default.
   const think = aiio?.settings?.think;
-  if (typeof think === "string") body.think = resolveEffort(think, { levels: OLLAMA_EFFORTS });
+  if (think === "none") body.think = false;
+  else if (typeof think === "string") body.think = resolveEffort(think, { levels: OLLAMA_EFFORTS });
   else if (think !== undefined) body.think = think;
   const tools = aiio?.tools?.() ?? [];
   if (tools.length > 0) {
@@ -330,7 +333,8 @@ async function login(aiio, input = {}) {
   return auth;
 }
 
-/** Ollama REST protocol. Construction replaces the old connect() hook. */
+/** Ollama REST protocol: constructed with the endpoint URL, exposing the
+ * translators plus metadata, models(), login(), and testConnection(). */
 export default class OllamaProvider {
   static provider = metadata;
 

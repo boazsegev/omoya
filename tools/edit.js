@@ -2,7 +2,8 @@
  * tools/edit.js — the `edit` tool: exact-text replacement in one file
  * (pi edit semantics): edits[] are matched against the ORIGINAL file
  * content, never incrementally; every edits[].oldText must match
- * exactly ONE location, and matched regions must not overlap. Matching
+ * exactly ONE location (or every occurrence, when `matchAll` is set),
+ * and matched regions must not overlap. Matching
  * runs on LF-normalized text (a BOM is stripped and restored, the
  * file's dominant line ending is preserved), so oldText never needs
  * to guess invisible bytes.
@@ -236,6 +237,8 @@ async function rollbackEdit(rollback, path, context) {
  *   user for permission (5-line preview) instead of refusing outright
  * @param {string} [args.rollback] - reverse a RECORDED edit by its
  *   tool call id (the path must match the record; edits are not needed)
+ * @param {boolean} [args.matchAll] - replace every occurrence of each
+ *   oldText instead of requiring a unique match
  * @param {Object} [context] - harness tool context ({question, call})
  * @returns {Promise<{result: string, display: string}>}
  */

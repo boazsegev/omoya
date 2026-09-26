@@ -1,4 +1,4 @@
-// test/base-markdown.test.js — proof for lib/markdown.js (Markdown):
+// test/base-markdown.test.js — proof for lib/app/markdown/index.js (Markdown):
 // the presentation-free markdown abstraction. Covers the builtin
 // primitives (parseInline spans, classifyLine kinds), the marked-style
 // callback walker (block callbacks receive rendered inner text; block
@@ -10,8 +10,8 @@ import { describe, expect, test } from "bun:test";
 import {
   markdownEngine, lexMarkdown, renderMarkdown, renderInline,
   parseInline, classifyLine, walkTokens,
-} from "../lib/markdown.js";
-import { lexBuiltin } from "../lib/markdown/lexer.js";
+} from "../lib/app/markdown/index.js";
+import { lexBuiltin } from "../lib/app/markdown/lexer.js";
 
 describe("markdown: parseInline spans (builtin inline tokenizer)", () => {
   test("plain text is one text span", () => {

@@ -3,9 +3,8 @@
 //
 //   public modules live at lib/<name>.js; each may own a PRIVATE folder
 //   lib/<name>/ nobody else imports; dependencies point strictly DOWN
-//   the chain markdown < context < env < io < agent < cli < jobs < tui (an
-//   owner is never
-//   owned by what it owns); providers are plugins over context/env/io;
+//   the chain context < env < io < agent < cli < jobs < app (an
+//   owner is never owned by what it owns); providers are plugins over context/env/io;
 //   executables touch public modules only.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
@@ -13,16 +12,13 @@ import { join, dirname } from "node:path";
 import { NAMES } from "../lib/namespace.js";
 
 // Jobs owns headless execution and uses CLI's public model selection contract.
-const RANK = { markdown: 0, context: 1, env: 2, io: 3, agent: 4, cli: 5, jobs: 6, tui: 7, web: 8 };
+const RANK = { context: 1, env: 2, io: 3, agent: 4, cli: 5, jobs: 6, app: 7 };
 const PUBLIC = Object.keys(RANK);
 const FOUNDATIONS = ["namespace", "tool-runtime"];
-/** The tui façade owns two private folders:
- *  lib/tui.js -> lib/tui-app/ -> lib/gtui/gtui.js -> gtui privates,
- *  one direction only, checked below with its own stricter rule
- *  (gtui imports node: + its own files ONLY — no lower public modules;
- *  tui-app imports gtui's FAÇADE only, never a gtui private). */
-const FOLDER_OWNER = { "gtui": "tui", "tui-app": "tui", "web-app": "web" };
-const ownerOf = (folder) => FOLDER_OWNER[folder] ?? folder;
+/** The app façade owns lib/app/, whose areas get their own stricter
+ *  recursive rules below: lib/app.js -> lib/app/{tui,web} -> lib/app/gtui/gtui.js
+ *  (tui only) -> gtui privates, one direction only; lib/app/markdown/ and
+ *  lib/app/shared/ are browser-safe leaves both front ends use. */
 const SPECIFIER = /(?:import\s+(?:[^"']*?\s+from\s+)?|export\s+[^"']*?\s+from\s+|import\s*\(\s*)["']([^"'`]+)["']/g;
 
 const specifiers = (file) =>
@@ -45,7 +41,7 @@ describe("module layout: public façades own private folders", () => {
   test("every lib/<folder>/ (except providers/) has a public façade (several folders may share one)", () => {
     for (const folder of folders("lib")) {
       if (folder === "providers") continue;
-      const owner = ownerOf(folder);
+      const owner = folder;
       expect(existsSync(join("lib", `${owner}.js`)), `lib/${folder}/ has no façade`).toBe(true);
       expect(PUBLIC, `lib/${folder} is not a ranked public module`).toContain(owner);
     }
@@ -104,7 +100,7 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
   test("a public module imports only its own privates and LOWER public modules", () => {
     const offenders = [];
     for (const name of PUBLIC) {
-      const owned = [name, ...Object.keys(FOLDER_OWNER).filter((f) => FOLDER_OWNER[f] === name)];
+      const owned = [name];
       for (const spec of specifiers(join("lib", `${name}.js`))) {
         if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
         if (owned.some((f) => spec.startsWith(`./${f}/`))) continue; // own privates
@@ -121,17 +117,14 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     const offenders = [];
     for (const folder of folders("lib")) {
       if (folder === "providers") continue;
-      const owner = ownerOf(folder);
+      const owner = folder;
       const rank = RANK[owner];
       for (const file of jsFiles(join("lib", folder))) {
         for (const spec of specifiers(file)) {
           if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
-          if (spec === "marked" && file === join("lib", "markdown", "marked.js")) continue; // the one approved optional dependency (test/cli-nodeps.test.js)
           if (/^\.\/[a-z-]+\.js$/.test(spec)) continue; // sibling private (same folder)
           if (/^\.\/[a-z-]+\/[a-z-]+\.js$/.test(spec)) continue; // nested private owned by the same folder
           if (FOUNDATIONS.some((f) => spec === `../${f}.js`)) continue; // dependency-free cross-cutting foundations
-          const crossFolder = /^\.\.\/([a-z-]+)\/[a-z-]+\.js$/.exec(spec);
-          if (crossFolder && ownerOf(crossFolder[1]) === owner) continue; // another folder of the SAME façade
           const target = publicNameOf(spec);
           if (target !== null && spec.startsWith("../") && RANK[target] < rank) continue;
           offenders.push(`${file} -> ${spec}`);
@@ -168,59 +161,61 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     expect(cycles).toEqual([]);
   });
 
-  test("recursive: lib/gtui/** (including nested folders, e.g. widgets/) imports only node:/bun and its own files — never escapes lib/gtui/", () => {
-    const offenders = [];
-    const walk = (dir) => {
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) { walk(full); continue; }
-        if (!entry.endsWith(".js")) continue;
-        for (const spec of specifiers(full)) {
-          if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
-          if (!spec.startsWith(".")) { offenders.push(`${full} -> ${spec} (non-relative import)`); continue; }
-          const resolved = join(dirname(full), spec);
-          if (!resolved.startsWith(join("lib", "gtui") + "/") && resolved !== join("lib", "gtui")) {
-            offenders.push(`${full} -> ${spec}`);
+  // lib/app/ areas, walked recursively. Each imports its own files plus
+  // exactly what its row allows: GTUI stays generic (never escapes its
+  // folder), shared stays a browser-safe leaf (no node:/bun either — the
+  // web server serves it to the SPA), TUI reaches GTUI only through its
+  // façade, and TUI/Web never import each other.
+  const MARKDOWN = join("lib", "app", "markdown", "index.js");
+  const SHARED = join("lib", "app", "shared") + "/";
+  const APP_AREAS = {
+    gtui: { runtime: true, lower: false, allow: [] },
+    // the one approved optional dependency: marked.js's guarded import (test/cli-nodeps.test.js)
+    markdown: { runtime: false, lower: false, allow: [], packages: ["marked"] },
+    shared: { runtime: false, lower: false, allow: [] },
+    tui: { runtime: true, lower: true, allow: [join("lib", "app", "gtui", "gtui.js"), MARKDOWN, SHARED] },
+    // public/text-safe.js re-exports the Markdown display sanitizer for the SPA
+    web: { runtime: true, lower: true, allow: [MARKDOWN, SHARED, join("lib", "app", "markdown", "text-safe.js")] },
+  };
+  test("every lib/app/ folder is a ruled area", () => {
+    expect(folders(join("lib", "app")).filter((folder) => !(folder in APP_AREAS))).toEqual([]);
+  });
+  for (const [area, rule] of Object.entries(APP_AREAS)) {
+    test(`recursive: lib/app/${area}/** imports only its own files and what its area rule allows`, () => {
+      const root = join("lib", "app", area);
+      if (!existsSync(root)) return;
+      const offenders = [];
+      for (const file of filesRecursive(root)) {
+        for (const spec of specifiers(file)) {
+          if (spec.startsWith("node:") || spec.startsWith("bun")) {
+            if (!rule.runtime) offenders.push(`${file} -> ${spec} (runtime import in a browser-safe area)`);
+            continue;
           }
+          if (rule.packages?.includes(spec)) continue;
+          if (!spec.startsWith(".")) { offenders.push(`${file} -> ${spec} (non-relative import)`); continue; }
+          const resolved = join(dirname(file), spec);
+          if (resolved.startsWith(root + "/")) continue; // own file
+          if (rule.allow.some((allowed) => allowed.endsWith("/") ? resolved.startsWith(allowed) : resolved === allowed)) continue;
+          if (rule.lower) {
+            if (FOUNDATIONS.some((f) => resolved === join("lib", `${f}.js`))) continue; // cross-cutting foundation
+            const m = /^lib\/([a-z-]+)\.js$/.exec(resolved);
+            if (m && RANK[m[1]] !== undefined && RANK[m[1]] < RANK.app) continue; // a lower public module
+          }
+          offenders.push(`${file} -> ${spec}`);
         }
       }
-    };
-    walk(join("lib", "gtui"));
-    expect(offenders).toEqual([]);
-  });
+      expect(offenders).toEqual([]);
+    });
+  }
 
-  test("recursive: lib/tui-app/** imports only lib/gtui/gtui.js (never a gtui private), lower-ranked public modules, and its own files", () => {
-    const offenders = [];
-    const gtuiFacade = join("lib", "gtui", "gtui.js");
-    const walk = (dir) => {
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) { walk(full); continue; }
-        if (!entry.endsWith(".js")) continue;
-        for (const spec of specifiers(full)) {
-          if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
-          if (!spec.startsWith(".")) { offenders.push(`${full} -> ${spec} (non-relative import)`); continue; }
-          const resolved = join(dirname(full), spec);
-          if (resolved.startsWith(join("lib", "tui-app") + "/")) continue; // own file
-          if (resolved === join("lib", "namespace.js")) continue; // cross-cutting foundation
-          if (resolved === gtuiFacade) continue; // the gtui FAÇADE only
-          const m = /^lib\/([a-z-]+)\.js$/.exec(resolved);
-          if (m && RANK[m[1]] !== undefined && RANK[m[1]] < RANK.tui) continue; // a lower public module
-          offenders.push(`${full} -> ${spec}`);
-        }
-      }
-    };
-    walk(join("lib", "tui-app"));
-    expect(offenders).toEqual([]);
-  });
-
-  test("providers are plugins over the public context/env/io surfaces only", () => {
+  test("providers use public foundations or another bundled provider's dialect", () => {
     const offenders = [];
     for (const file of jsFiles("providers")) {
       for (const spec of specifiers(file)) {
         if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
         const target = publicNameOf(spec);
         const rootHelper = /^\.\.\/lib\/(context|env|io|namespace)\.js$/.test(spec);
+        if (file === "providers/claude.js" && spec === "./anthropic.js") continue;
         if ((target !== null && spec.startsWith("../") && RANK[target] <= RANK.io) || rootHelper) continue;
         offenders.push(`${file} -> ${spec}`);
       }
@@ -259,7 +254,7 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
   });
 
   test("each façade publishes its canonical namespace and Agent/application entries assemble explicit variants", async () => {
-    const expected = { markdown: "Markdown", context: "Context", env: "Env", io: "IO", agent: "Agent", cli: "CLI", jobs: "Jobs", tui: "TUI", web: "Web" };
+    const expected = { context: "Context", env: "Env", io: "IO", agent: "Agent", cli: "CLI", jobs: "Jobs", app: "App" };
     for (const [file, name] of Object.entries(expected)) {
       const module = await import(`../lib/${file}.js`);
       expect(module.default?.name, `lib/${file}.js default namespace`).toBe(name);
@@ -268,15 +263,13 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     expect(source).toContain('import Agent from "./agent.js";');
     expect(source).toContain('import Jobs from "./jobs.js";');
     expect(source).toContain("export default { ...Agent, Agent, Jobs };");
-    expect(source).not.toContain('"./tui.js"');
+    expect(source).not.toContain('"./app.js"');
     const fullSource = readFileSync("lib/index_app.js", "utf8");
     expect(fullSource).toContain('import Core from "./index.js";');
-    expect(fullSource).toContain('import Markdown from "./markdown.js";');
     expect(fullSource).toContain('import CLI from "./cli.js";');
     expect(fullSource).not.toContain('import Jobs from "./jobs.js";');
-    expect(fullSource).toContain('"./tui.js"');
-    expect(fullSource).toContain("const GTUI = TUI.GTUI;");
-    expect(fullSource).toContain("export default { ...Core, Markdown, CLI, TUI, GTUI, Web };");
+    expect(fullSource).toContain('import App from "./app.js";');
+    expect(fullSource).toContain("export default { ...Core, CLI, App };");
     expect(fullSource).not.toMatch(/^export (const|let|var|class|function) /m);
     expect(fullSource).not.toMatch(/export \{/);
     expect(fullSource).not.toMatch(new RegExp(`\\b${NAMES.Namespace}\\b`));
@@ -292,11 +285,12 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     expect(full.default.Agent).toBe(core.default.Agent);
     expect(core.default.Jobs).toBe((await import("../lib/jobs.js")).default);
     expect(full.default.Jobs).toBe(core.default.Jobs);
-    expect(full.default.GTUI).toBe(full.default.TUI.GTUI);
-    expect(full.default.Web).toBe((await import("../lib/web.js")).default);
-    expect(core.default.TUI).toBeUndefined();
-    expect(core.default.GTUI).toBeUndefined();
-    expect(core.default.Web).toBeUndefined();
+    const App = (await import("../lib/app.js")).default;
+    expect(full.default.App).toBe(App);
+    expect(Object.keys(App).sort()).toEqual(["GTUI", "Markdown", "TUI", "Web"]);
+    expect(App.GTUI).toBe((await import("../lib/app/gtui/gtui.js")).GTUI);
+    for (const name of ["Markdown", "TUI", "GTUI", "Web"]) expect(full.default[name], `no top-level ${name}`).toBeUndefined();
+    expect(core.default.App).toBeUndefined();
     expect(core.default.NAMES).toBe(NAMES);
   });
 

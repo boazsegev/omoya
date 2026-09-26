@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { layoutView } from "../lib/gtui/layout.js";
-import { createControls } from "../lib/gtui/controls.js";
-import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions } from "../lib/tui-app/menu-sources.js";
-import { buildMenuItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/tui-app/menu-data.js";
-import { resolveMenuAction } from "../lib/tui-app/menu-actions.js";
-import { openMenu, previewMenu } from "../lib/tui-app/overlay-controller.js";
-import { overlayView } from "../lib/tui-app/overlay-view.js";
+import { layoutView } from "../lib/app/gtui/layout.js";
+import { createControls } from "../lib/app/gtui/controls.js";
+import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions } from "../lib/app/tui/menu-sources.js";
+import { buildMenuItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/app/tui/menu-data.js";
+import { resolveMenuAction } from "../lib/app/tui/menu-actions.js";
+import { openMenu, previewMenu } from "../lib/app/tui/overlay-controller.js";
+import { overlayView } from "../lib/app/tui/overlay-view.js";
 
 const agent = (name, parent, { busy = false, description = "" } = {}) => ({
   name, parent, description, ioState: busy ? "working" : "idle",

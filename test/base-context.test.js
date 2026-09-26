@@ -306,7 +306,7 @@ describe("append with merging (appendMessage / foldContent)", () => {
     const stored = appendMessage(c, user("second"));
     expect(c).toHaveLength(1);
     expect(stored).toBe(c[0]); // the PREVIOUS message, grown
-    expect(c[0].content).toEqual([{ type: "text", text: "first\nsecond" }]);
+    expect(c[0].content).toEqual([{ type: "text", text: "first\n\nsecond" }]);
   });
 
   test("chat user messages are a metadata border and never merge with real user input", () => {
@@ -322,7 +322,7 @@ describe("append with merging (appendMessage / foldContent)", () => {
     appendMessage(c, { ...user("second"), source: "import" });
     appendMessage(c, { ...user("third"), source: "chat" });
     expect(c).toHaveLength(2);
-    expect(c[0].content[0].text).toBe("first\nsecond");
+    expect(c[0].content[0].text).toBe("first\n\nsecond");
   });
 
   test("different types never merge", () => {
@@ -344,14 +344,14 @@ describe("append with merging (appendMessage / foldContent)", () => {
     expect(c[2].content[0].text).toBe("next");
     // and a record sits comfortably ahead of messages for later appends
     appendMessage(c, user("more"));
-    expect(c[2].content[0].text).toBe("next\nmore"); // the merge skipped the record
+    expect(c[2].content[0].text).toBe("next\n\nmore"); // the merge skipped the record
   });
 
   test("system messages merge like any same-type pair", () => {
     const c = [{ type: 1, content: [{ type: "text", text: "s1" }] }];
     appendMessage(c, { type: 1, content: [{ type: "text", text: "s2" }] });
     expect(c).toHaveLength(1);
-    expect(c[0].content[0].text).toBe("s1\ns2");
+    expect(c[0].content[0].text).toBe("s1\n\ns2");
   });
 
   test("tool results NEVER merge (call linkage is per-message)", () => {
@@ -372,7 +372,7 @@ describe("append with merging (appendMessage / foldContent)", () => {
     const c = [{ type: 3, content: [{ type: "thinking", text: "part one" }] }];
     appendMessage(c, { type: 3, content: [{ type: "thinking", text: "part two" }] });
     expect(c).toHaveLength(1);
-    expect(c[0].content).toEqual([{ type: "thinking", text: "part one\npart two" }]);
+    expect(c[0].content).toEqual([{ type: "thinking", text: "part one\n\npart two" }]);
   });
 
   test("thinking and text blocks stay separate within a merge", () => {
@@ -402,8 +402,8 @@ describe("append with merging (appendMessage / foldContent)", () => {
       ],
     });
     expect(c[0].content).toEqual([
-      { type: "thinking", text: "a\nb" },
-      { type: "text", text: "x\ny" },
+      { type: "thinking", text: "a\n\nb" },
+      { type: "text", text: "x\n\ny" },
     ]);
   });
 
@@ -442,13 +442,13 @@ describe("append with merging (appendMessage / foldContent)", () => {
     ]);
   });
 
-  test("user continuations merge: queued messages fold with newlines", () => {
+  test("user continuations merge: queued messages fold with blank lines", () => {
     const c = [];
     appendMessage(c, user("first queued"));
     appendMessage(c, user("second queued"));
     appendMessage(c, user("third queued"));
     expect(c).toHaveLength(1);
-    expect(c[0].content).toEqual([{ type: "text", text: "first queued\nsecond queued\nthird queued" }]);
+    expect(c[0].content).toEqual([{ type: "text", text: "first queued\n\nsecond queued\n\nthird queued" }]);
   });
 
   test("mergeableMessages encodes the merge policy", () => {

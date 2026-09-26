@@ -129,7 +129,7 @@ describe("standalone source tree (zero required external dependencies)", () => {
   });
 
   test("the optional marked enhancement is guarded and the scan covers every executable", () => {
-    const text = readFileSync(join("lib", "markdown", "marked.js"), "utf8");
+    const text = readFileSync(join("lib", "app", "markdown", "marked.js"), "utf8");
     expect(text).toMatch(/try\s*\{[^}]*import\(\s*["']marked["']\s*\)/s);
     // every wrapper the canonical wrapperMap derives must be on disk
     for (const bin of wrapperNames()) {
@@ -138,7 +138,7 @@ describe("standalone source tree (zero required external dependencies)", () => {
     for (const impl of ["app", "agent", "io", "jobs", "tool", "skills", "tools2bash", "help.js", "index.js", "rename"]) {
       expect(SURFACES).toContain(join("bin", "scripts", impl));
     }
-    expect(SURFACES).toContain(join("lib", "tui-app", "app.js"));
+    expect(SURFACES).toContain(join("lib", "app", "tui", "app.js"));
     expect(SURFACES.length).toBeGreaterThan(100);
   });
 });

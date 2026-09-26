@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";
 
 const selectable = () => GTUI.view.text({ selectionKey: "s", sourceText: "text" }, [{ text: "text", source: { start: 0, end: 4 } }]);

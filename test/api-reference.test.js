@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { collect, collectArchitecture, collectToolCatalog, markdown, renderWith } from "./api-reference.js";
-import App from "../lib/index_app.js";
+import Full from "../lib/index_app.js";
 import { wrapperNames } from "../bin/scripts/index.js";
 
 describe("api-reference: dynamically collected architecture", () => {
@@ -18,18 +18,17 @@ describe("api-reference: dynamically collected architecture", () => {
     expect(jobs.publicDependencies).toEqual(expect.arrayContaining(["Agent", "CLI", "Env"]));
     const agent = architecture.layers.find((layer) => layer.name === "Agent");
     expect(agent.publicDependencies).toEqual(expect.arrayContaining(["Context", "Env", "IO"]));
-    expect(App.GTUI).toBeDefined();
+    expect(Full.App.GTUI).toBeDefined();
     const gtui = architecture.layers.find((layer) => layer.name === "GTUI");
     expect(gtui).toBeDefined();
-    expect(gtui.file).toBe("lib/gtui/gtui.js");
-    const tui = architecture.layers.find((layer) => layer.name === "TUI");
-    // TUI owns gtui/ (the generic runtime) and tui-app/ (the one
-    // application built on it) — tui-app imports gtui's façade, nothing
-    // imports tui-app, so neither crosses the >=2-importer bar for
-    // "shared"; both are "distinct".
-    expect(tui.helperGroups.find((g) => g.kind === "shared")).toBeUndefined();
-    const distinctPaths = tui.helperGroups.filter((g) => g.kind === "distinct").map((g) => g.path).sort();
-    expect(distinctPaths).toEqual(["lib/gtui", "lib/tui-app"]);
+    expect(gtui.file).toBe("lib/app/gtui/gtui.js");
+    const app = architecture.layers.find((layer) => layer.name === "App");
+    // App owns its areas: gtui/ (the generic runtime), tui/ and web/ (the
+    // front ends) — tui imports gtui's façade, nothing imports tui or web,
+    // so none crosses the >=2-importer bar for "shared"; all are "distinct".
+    expect(app.publicDependencies).toEqual(expect.arrayContaining(["TUI", "Web", "GTUI"]));
+    const distinctPaths = app.helperGroups.filter((g) => g.kind === "distinct").map((g) => g.path).sort();
+    expect(distinctPaths).toEqual(expect.arrayContaining(["lib/app/gtui", "lib/app/tui", "lib/app/web"]));
     // the executables are exactly the canonical wrapper set (bin/ FILES)
     // plus the script implementations (bin/scripts/*) — both derived
     const expected = [...wrapperNames(), "app", "agent", "io", "jobs", "tool", "skills", "tools2bash"];

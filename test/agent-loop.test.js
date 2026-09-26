@@ -309,6 +309,19 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
 });
 
 describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call count", () => {
+  test("a fresh large tool result cannot hide behind the previous request's provider usage", async () => {
+    const env = await loopEnv({ t: () => "word ".repeat(80) });
+    env.settings.p = { ...env.settings.p, contextWindow: 200 };
+    const io = scriptedIO([
+      [...TOOLCALL(0, "c1", "t", {}), { type: "done", usage: { inputTokens: 2, outputTokens: 1, source: "provider" } }],
+      [...TEXT(0, "should never be sent"), { type: "done" }],
+    ]);
+    io.contextUsage = { used: 2, total: 200 };
+    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const terminal = await agent.run();
+    expect(terminal.error).toContain("runaway guard");
+    expect(io.writes).toHaveLength(1);
+  });
   test("the OVERALL cap (default 90%) refuses to continue BEFORE even making a request", async () => {
     const env = await loopEnv({});
     const io = scriptedIO([[...TEXT(0, "should never be sent"), { type: "done" }]]);

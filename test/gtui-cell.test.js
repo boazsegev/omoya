@@ -1,7 +1,7 @@
-// test/gtui-cell.test.js — proof for lib/gtui/cell.js: DEAD CODE (see
+// test/gtui-cell.test.js — proof for lib/app/gtui/cell.js: DEAD CODE (see
 // AI-GTUI.md) — a plain cell value, its equality, and its SGR encoding.
 import { describe, expect, test } from "bun:test";
-import { cell, blank, continuation, equalCell, sgr, BOLD, DIM, ITALIC, REVERSE } from "../lib/gtui/cell.js";
+import { cell, blank, continuation, equalCell, sgr, BOLD, DIM, ITALIC, REVERSE } from "../lib/app/gtui/cell.js";
 
 describe("cell()", () => {
   test("defaults to no style and no link", () => {

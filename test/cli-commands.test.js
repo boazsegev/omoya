@@ -1,4 +1,4 @@
-// test/cli-commands.test.js — proof for lib/tui-app/commands.js: REPL
+// test/cli-commands.test.js — proof for lib/app/tui/commands.js: REPL
 // /context-edit, /context-rollback, /context-pop route through the Agent into Context
 // semantics — array/block addressing, stale provider/cache identifier
 // cleanup on edit, tombstone/rewrite events in the session log when
@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createCommands as createAppCommands } from "../lib/tui-app/commands.js";
+import { createCommands as createAppCommands } from "../lib/app/tui/commands.js";
 import { Agent } from "../lib/agent.js";
 
 /** copy defaults to a harmless stub — createCommands requires one
@@ -328,20 +328,20 @@ describe("cli-commands: /agent-thinking", () => {
     await commands.handle("/agent-thinking high");
     expect(agent.thinking).toBe("high");
     expect(lines[1]).toBe("thinking: high");
-    await commands.handle("/agent-thinking off");
-    expect(agent.thinking).toBe("off");
+    await commands.handle("/agent-thinking none");
+    expect(agent.thinking).toBe("none");
     await commands.handle("/agent-thinking bogus");
     expect(lines[3]).toContain("usage: /agent-thinking");
   });
 
-  test("the vocabulary is default/off/low/medium/high/xhigh; default clears the level", async () => {
+  test("the vocabulary is default plus none/low/medium/high/xhigh/max; default clears the level", async () => {
     const { agent, commands, lines } = await setup([]);
     await commands.handle("/agent-thinking xhigh");
     expect(agent.thinking).toBe("xhigh");
     await commands.handle("/agent-thinking default");
     expect(agent.thinking).toBeUndefined();
     await commands.handle("/agent-thinking on");
-    expect(lines.at(-1)).toContain("usage: /agent-thinking [default|off|low|medium|high|xhigh]");
+    expect(lines.at(-1)).toContain("usage: /agent-thinking [default|none|low|medium|high|xhigh|max]");
   });
 
   test("setThinking propagates to live provider connections (think option)", async () => {
@@ -350,7 +350,7 @@ describe("cli-commands: /agent-thinking", () => {
     agent._io.set("fake", io);
     agent.setThinking("low");
     expect(io.options.think).toBe("low");
-    agent.setThinking("off");
+    agent.setThinking("none");
     expect(io.options.think).toBe(false);
     agent.setThinking(undefined);
     expect("think" in io.options ? io.options.think : undefined).toBe(undefined);
@@ -426,8 +426,8 @@ describe("cli-commands: command line routing", () => {
   });
 
   test("completion candidates include the namespace-inside matches", async () => {
-    const { computeCompletions } = await import("../lib/tui-app/completion.js");
-    const { COMMANDS } = await import("../lib/tui-app/command-data.js");
+    const { computeCompletions } = await import("../lib/app/tui/completion.js");
+    const { COMMANDS } = await import("../lib/app/tui/command-data.js");
     const r = computeCompletions("/po", 3, { commands: COMMANDS });
     expect(r.candidates).toEqual(["/context-pop"]);
     const nested = computeCompletions("/fo", 3, { commands: COMMANDS });

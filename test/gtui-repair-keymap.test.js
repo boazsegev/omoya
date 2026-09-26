@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { appBindings } from "../lib/tui-app/bindings.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { appBindings } from "../lib/app/tui/bindings.js";
 
 test("unchanged app binding state reuses one immutable binding list", () => {
   const model = { input: { completions: [] }, overlay: null, question: null };

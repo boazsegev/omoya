@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { informationData } from "../lib/tui-app/information-data.js";
+import { informationData } from "../lib/app/tui/information-data.js";
 
 test("live tool output is a rolling newest-lines viewport without a trailing ellipsis", () => {
   const rows = informationData(null, null, [

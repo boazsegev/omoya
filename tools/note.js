@@ -71,10 +71,10 @@
  * each, the type's badge emoji heading the bold title with its
  * summary trailing when set — DONE notes trail every open one (still
  * published, just last: the TUI's own per-tool line cap discards
- * overflow — lib/tui-helpers/view-rows.js infoLines — so the most
- * actionable notes are the ones that survive it). A live side effect
- * of note-set, unentangled from the model-facing reply (the
- * same pattern as a newly created session appearing in the TUI).
+ * overflow — lib/app/tui/information-data.js's MAX_TOOL_ROWS cap —
+ * so the most actionable notes are the ones that survive it). A live
+ * side effect of note-set, unentangled from the model-facing reply
+ * (the same pattern as a newly created session appearing in the TUI).
  */
 
 import Context from "../lib/context.js";
@@ -286,9 +286,9 @@ function clip(text, max = MAX_EXTRA) {
  * present (the TUI renders the information area's markdown). DONE
  * notes trail every open one (the most actionable notes stay first
  * when the TUI's own per-tool line cap discards overflow —
- * lib/tui-helpers/view-rows.js infoLines — this tool no longer
- * truncates its own message; the display decides how many lines
- * actually fit). An empty result clears the message.
+ * lib/app/tui/information-data.js's MAX_TOOL_ROWS cap — this tool no
+ * longer truncates its own message; the display decides how many
+ * lines actually fit). An empty result clears the message.
  */
 function publish(agent, notes) {
   if (typeof agent.updateToolMessage !== "function") return; // a bare context (tests)

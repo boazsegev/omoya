@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import Context from "../lib/context.js";
-import { contextBlocks } from "../lib/tui-app/context-blocks.js";
-import { createStreamRenderer } from "../lib/tui-app/stream.js";
+import { contextBlocks } from "../lib/app/tui/context-blocks.js";
+import { createStreamRenderer } from "../lib/app/tui/stream.js";
 
 // A binary block carries `mimetype` (Context.binaryContent); the display
 // placeholders must render it, never fall back to "unknown".

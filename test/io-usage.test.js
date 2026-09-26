@@ -5,6 +5,7 @@ import {
   TOKENS_PER_WORD,
   wordCount,
   estimateTokens,
+  estimateContextTokens,
   estimateUsage,
   finalizeUsage,
   usageSummary,
@@ -17,6 +18,11 @@ describe("word count and token estimation", () => {
     expect(wordCount("")).toBe(0);
     expect(wordCount(null)).toBe(0);
     expect(wordCount(42)).toBe(0);
+  });
+
+  test("compact unspaced data is not estimated as a single token", () => {
+    const payload = "a".repeat(4096);
+    expect(estimateContextTokens([{ type: 4, content: [{ type: "text", text: payload }] }])).toBeGreaterThanOrEqual(1024);
   });
 
   test("estimateTokens applies the token-per-word likelihood ratio", () => {

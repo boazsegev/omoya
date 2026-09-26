@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createControls, controlInternals } from "../lib/gtui/controls.js";
-import { layoutView } from "../lib/gtui/layout.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createControls, controlInternals } from "../lib/app/gtui/controls.js";
+import { layoutView } from "../lib/app/gtui/layout.js";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 

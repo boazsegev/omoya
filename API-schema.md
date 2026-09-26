@@ -331,7 +331,7 @@ export const RESPONSE_CALLBACK_EVENTS: unknown;
 export const resultContent: (value: *) => Array<object>;
 export const runFinish: () => unknown;
 export const sameFolder: (a: unknown, b: unknown) => unknown;
-export const sessionDir: () => unknown;
+export const sessionDir: (env: unknown) => unknown;
 export const thinkValue: (level: unknown) => unknown;
 ```
 
@@ -415,21 +415,33 @@ export class SessionStore {
   close: () => unknown;
   constructor(options?: Object);
   static deleteAll: (options?: Object) => {deleted: number};
+  static deleteById: (options?: Object) => {deleted: number};
   edit: (i: unknown, message: unknown) => unknown;
   editBlock: (i: unknown, j: unknown, block: unknown) => unknown;
   flush: () => unknown;
   static latest: (options?: Object) => string|undefined;
-  static list: (options?: Object) => Array<{id: string, file: string, mtime: number, messages: number, preview: string}>;
-  static listAsync: (options?: object) => Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string}>>;
+  static list: (options?: Object) => Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>;
+  static listAsync: (options?: object) => Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>>;
   static originOf: (options?: Object) => string|undefined;
   pop: () => unknown;
   prepend: (messages: unknown) => unknown;
   removeMessages: (indexes: unknown) => unknown;
   rename: (newId: string) => {id: string, file: string};
+  static renameById: (options?: Object) => {id: string, file: string};
   static resume: (options?: Object) => SessionStore;
   rollback: (i: unknown) => unknown;
   save: boolean;
   saveSet: (value: boolean) => boolean;
+  settings: object|undefined;
+  settings: (value: object) => unknown;
+}
+```
+
+### `App`
+
+```ts
+export class App {
+
 }
 ```
 
@@ -562,7 +574,7 @@ export const depletionError: (classified: object) => boolean;
 export const ENV_EVENT: unknown;
 export const isToolModuleFile: (name: string) => boolean;
 export const mergeAuthUpdate: (existing: unknown, data: unknown) => unknown;
-export const openaiWebSearch: (options?: object) => unknown;
+export const openaiWebCapabilities: unknown;
 export const osSandboxAvailable: () => boolean;
 export const osSandboxKind: () => "seatbelt"|"bwrap"|"delegated"|null;
 export const osSandboxWrap: (file: string, args?: string[], cwd?: string, workingDirectory?: string) => [string, string[]];
@@ -610,6 +622,7 @@ export class Env {
   endpointLocal: (name: string) => boolean;
   endpointModels: (name: string, { refresh?: unknown, url: unknown, signal }?: unknown) => Promise<Object>} the model map ({;
   endpointNames: (options?: object) => unknown;
+  endpointRegistered: (name: unknown) => unknown;
   endpointScope: (name: string) => "package"|"local";
   endpointSettings: (endpoint: unknown) => unknown;
   flushSettings: () => unknown;
@@ -852,6 +865,14 @@ export const TUI_ENGINES: unknown;
 
 ```ts
 export class TUI {
+
+}
+```
+
+### `Web`
+
+```ts
+export class Web {
 
 }
 ```

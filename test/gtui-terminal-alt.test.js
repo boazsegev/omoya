@@ -1,9 +1,9 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { renderDiff } from "../lib/gtui/render.js";
-import { terminalHostInternals } from "../lib/gtui/terminal-host.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { renderDiff } from "../lib/app/gtui/render.js";
+import { terminalHostInternals } from "../lib/app/gtui/terminal-host.js";
 
 class FakeInput extends EventEmitter {
   isTTY = true;

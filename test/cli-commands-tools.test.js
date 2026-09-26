@@ -1,4 +1,4 @@
-// test/cli-commands-tools.test.js — proof for lib/tui-app/commands.js
+// test/cli-commands-tools.test.js — proof for lib/app/tui/commands.js
 // + command-handlers.js's runTool: /tool-<name> (the RESERVED tool
 // namespace) runs a registered tool directly (close to the "manual
 // door" bin/ai-tool is — lib/cli/tool-run.js — but WITH the viewed
@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createCommands as createAppCommands } from "../lib/tui-app/commands.js";
+import { createCommands as createAppCommands } from "../lib/app/tui/commands.js";
 import { Agent } from "../lib/agent.js";
 
 const createCommands = (options) => createAppCommands({ copy: () => false, ...options });

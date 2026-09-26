@@ -1,10 +1,10 @@
-// test/gtui-widget-text.test.js — proof for lib/gtui/widgets/text.js:
+// test/gtui-widget-text.test.js — proof for lib/app/gtui/widgets/text.js:
 // DEAD CODE (see AI-GTUI.md) — measure/draw, wrapping via
 // tui-helpers/width.js's wrapWords (reused, not reimplemented).
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { text } from "../lib/gtui/widgets/text.js";
-import { BOLD } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { text } from "../lib/app/gtui/widgets/text.js";
+import { BOLD } from "../lib/app/gtui/cell.js";
 
 const rowText = (buf, y) => buf.row(y).map((c) => c.text ?? " ").join("").replace(/\s+$/, "");
 

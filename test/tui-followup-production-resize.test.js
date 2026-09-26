@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createRepl } from "../lib/tui.js";
+import { createRepl } from "../lib/app/tui/index.js";
 import { Agent } from "../lib/agent.js";
 import { testEnv, scriptedIO } from "./fakes.js";
 import { TerminalInput } from "./terminal-screen.js";

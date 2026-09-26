@@ -14,10 +14,11 @@
  * never per-tool (see those files).
  *
  * Helper imports are stamped with the shared refresh revision
- * (toolRevision() — lib/env/mcp.js, the tiny runtime the tool scan
- * publishes it through): every refreshTools() bumps it, the wrapper
- * re-runs, and the helpers re-import fresh — editing any read/*
- * module applies on refresh without touching this wrapper.
+ * (toolRevision() — lib/tool-runtime.js, the tiny dependency-free
+ * runtime the tool scan publishes it through): every refreshTools()
+ * bumps it, the wrapper re-runs, and the helpers re-import fresh —
+ * editing any read/* module applies on refresh without touching this
+ * wrapper.
  */
 
 import { toolRevision } from "../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp

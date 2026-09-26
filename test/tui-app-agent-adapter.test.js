@@ -7,11 +7,11 @@
 // message — resolved by an effect, abandoned (never left hanging) on
 // teardown.
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
-import { createAgentAdapter } from "../lib/tui-app/agent-adapter.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
-import { QUESTION_MENU_ID } from "../lib/tui-app/questionnaire-view.js";
+import { createAgentAdapter } from "../lib/app/tui/agent-adapter.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
+import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
 import { NAMES } from "../lib/namespace.js";
 import { fakeIO, scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
 
@@ -145,6 +145,81 @@ describe("agent adapter: turns as task streams", () => {
     expect(io.kills).toBe(1);
     ui.stop();
     await running;
+  });
+
+  test("Escape interrupts only the agent currently displayed after paging away from the first", async () => {
+    const env = await testEnv();
+    const firstIO = hangingIO("first partial");
+    const secondIO = hangingIO("second partial");
+    const first = new Agent({ env, model: "p/m", context: [], createIO: () => firstIO });
+    const second = new Agent({ env, model: "p/m", context: [], createIO: () => secondIO });
+    const ui = new GTUI({ host: GTUI.host.memory() });
+    const running = ui.run(createApp(first, { env }));
+    try {
+      ui.dispatch(msg.submit("first"));
+      await until(() => first.busy);
+      ui.dispatch({ type: "key", key: "alt+ctrl+right" });
+      ui.dispatch(msg.submit("second"));
+      await until(() => second.busy);
+      ui.dispatch({ type: "key", key: "escape" });
+      await until(() => !second.busy || firstIO.kills > 0);
+      expect(secondIO.kills).toBe(1);
+      expect(firstIO.kills).toBe(0);
+      expect(first.busy).toBe(true);
+    } finally {
+      ui.stop();
+      await running;
+    }
+  });
+
+  test("Escape in the displayed agent's viewer closes it first; the next Escape interrupts its turn, not the background agent", async () => {
+    const env = await testEnv();
+    const firstIO = hangingIO("first partial");
+    const secondIO = hangingIO("second partial");
+    const first = new Agent({ env, model: "p/m", context: [], createIO: () => firstIO });
+    const second = new Agent({ env, model: "p/m", context: [], createIO: () => secondIO });
+    const memory = GTUI.host.memory();
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(createApp(first, { env }));
+    try {
+      ui.dispatch(msg.submit("first"));
+      await until(() => first.busy);
+      ui.dispatch({ type: "key", key: "alt+ctrl+right" });
+      ui.dispatch(msg.submit("second"));
+      await until(() => second.busy);
+      ui.dispatch({ type: "key", key: "ctrl+o" });
+      ui.dispatch({ type: "key", key: "escape" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // Only the viewer closed; the turn keeps running until the next Escape.
+      expect(secondIO.kills).toBe(0);
+      expect(second.busy).toBe(true);
+      ui.dispatch({ type: "key", key: "escape" });
+      await until(() => !second.busy || firstIO.kills > 0);
+      expect(secondIO.kills).toBe(1);
+      expect(firstIO.kills).toBe(0);
+    } finally { ui.stop(); await running; }
+  });
+
+  test("Escape in a menu closes it first; the next Escape interrupts the displayed busy agent", async () => {
+    const env = await testEnv();
+    const io = hangingIO("partial");
+    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const memory = GTUI.host.memory();
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(createApp(agent, { env }));
+    try {
+      ui.dispatch(msg.submit("go"));
+      await until(() => agent.busy);
+      ui.dispatch({ type: "key", key: "ctrl+x" });
+      await until(() => memory.snapshot().lines.some((line) => line.includes("Menu")));
+      memory.send(GTUI.event.key({ key: "escape" }));
+      await until(() => !memory.snapshot().lines.some((line) => line.includes("Menu")));
+      expect(io.kills).toBe(0);
+      expect(agent.busy).toBe(true);
+      memory.send(GTUI.event.key({ key: "escape" }));
+      await until(() => !agent.busy);
+      expect(io.kills).toBe(1);
+    } finally { ui.stop(); await running; }
   });
 
   test("interrupt is a fire-and-forget agent.cancel() — the SAME turn's event stream reports the cancellation", async () => {

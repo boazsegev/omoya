@@ -1,16 +1,16 @@
 // test/tui-app-theme.test.js — proof for Phase 03 step 5 (Theme
 // settings): tui.theme/tui.themes are discoverable in the settings
 // schema (lib/env/settings-schema.js, discovery-only per that file's
-// own contract — never enforcement there), and lib/tui-app/theme-data.js
+// own contract — never enforcement there), and lib/app/tui/theme-data.js
 // resolves them into tokens ready for GTUI's theme mechanism (Phase 02,
-// lib/gtui/theme.js) with real fallback (unknown theme name) and
+// lib/app/gtui/theme.js) with real fallback (unknown theme name) and
 // reject (malformed shapes) behavior.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { Env } from "../lib/env.js";
-import { createTheme } from "../lib/gtui/theme.js";
-import { ITALIC } from "../lib/gtui/cell.js";
-import { DEFAULT_THEME, resolveTheme, themePreviewRows } from "../lib/tui-app/theme-data.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
+import { ITALIC } from "../lib/app/gtui/cell.js";
+import { DEFAULT_THEME, resolveTheme, themePreviewRows } from "../lib/app/tui/theme-data.js";
 
 describe("bundled themes", () => {
   test("declare an explicit global background so hosts never infer one from text colors", () => {

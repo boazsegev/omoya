@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { attachmentParts, attachmentMessage, attachmentPaste } from "../lib/tui-app/attachment-draft.js";
+import { attachmentParts, attachmentMessage, attachmentPaste } from "../lib/app/tui/attachment-draft.js";
 
 describe("TUI attachment drafts", () => {
   test("turns only whole absolute file-path pastes into canonical markers", async () => {
@@ -36,4 +36,16 @@ describe("TUI attachment drafts", () => {
     expect(message.content[1].filename).toBe("note.txt");
     expect(message.content[2].text).toBe(" after");
   });
+});
+
+test("attachmentChips: basename and size per attached file, missing ones flagged, memoized per draft", async () => {
+  const { attachmentChips } = await import("../lib/app/tui/attachment-draft.js");
+  const file = (await import("node:url")).fileURLToPath(new URL("../package.json", import.meta.url));
+  const draft = `see {{@${file}}} and {{@/definitely/not/here.txt}}`;
+  const chips = attachmentChips(draft);
+  expect(chips[0]).toMatchObject({ name: "package.json" });
+  expect(chips[0].size).toBeGreaterThan(0);
+  expect(chips[1]).toEqual({ name: "here.txt", missing: true });
+  expect(attachmentChips(draft)).toBe(chips);
+  expect(attachmentChips("plain")).toEqual([]);
 });

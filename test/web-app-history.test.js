@@ -1,4 +1,4 @@
-// Web composer history recall (lib/web-app/public/app.js): drafts must never
+// Web composer history recall (lib/app/web/public/app.js): drafts must never
 // be replaced or lost while moving through history with Up/Down. The logic is
 // extracted from app.js verbatim and driven against a fake textarea, so the
 // test fails if the shipped code drifts.
@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const source = readFileSync(join(import.meta.dir, "..", "lib", "web-app", "public", "app.js"), "utf8");
+const source = readFileSync(join(import.meta.dir, "..", "lib", "app", "web", "public", "app.js"), "utf8");
 
 function section(name, next) {
   const start = source.indexOf(`function ${name}(`);
@@ -18,6 +18,7 @@ function section(name, next) {
 }
 
 // Build a tiny harness with the same globals app.js uses.
+const WRAP = 20;
 function makeSession(userTexts) {
   const textarea = {
     value: "", selectionStart: 0, selectionEnd: 0, style: {},
@@ -29,6 +30,10 @@ function makeSession(userTexts) {
     composerByAgent: new Map(),
     textareaEl: textarea,
     hideAutocompleteCalls: 0,
+    caretRowTops: (ta, index) => {
+      const row = (at) => { const lines = ta.value.slice(0, at).split("\n"); return lines.slice(0, -1).reduce((sum, line) => sum + Math.floor(line.length / WRAP) + 1, 0) + Math.floor(lines.at(-1).length / WRAP); };
+      return { start: 0, caret: row(index), end: row(ta.value.length) };
+    },
     input() {
       // The composer input handler, mirrored 1:1 from app.js.
       session.noteComposerInput();
@@ -38,6 +43,9 @@ function makeSession(userTexts) {
     "const { agent, blocks, composerByAgent } = session;",
     "let { textareaEl } = session;",
     "const hideAutocomplete = () => { session.hideAutocompleteCalls++; };",
+    // The DOM mirror measurement, faked: a newline-free line soft-wraps every
+    // WRAP characters, each visual row 1 unit tall.
+    "const caretRowTops = session.caretRowTops;",
     section("autofit", "noteComposerInput"),
     section("noteComposerInput", "recallHistory"),
     section("composerDraft", "saveComposerDraft"),
@@ -109,12 +117,24 @@ describe("web composer history recall", () => {
     expect(s.textarea.value).toBe("history entry");
   });
 
-  test("Up on a soft-wrapped (single newline-free) draft still recalls", () => {
+  test("Up/Down move between soft-wrapped rows first; recall only from the edge rows", () => {
     const s = makeSession(["history entry"]);
-    type(s, "a long draft without any newline that merely wraps visually in the browser");
-    caret(s, 40); // mid-text, but no newline before the caret
+    const draft = "a long draft without any newline that merely wraps visually in the browser";
+    type(s, draft); // caret at the end: the last visual row
+    expect(up(s)).toBe(false);   // native: caret up one visual row
+    caret(s, 45);                // a middle visual row
+    expect(up(s)).toBe(false);
+    caret(s, 5);                 // the first visual row
     expect(up(s)).toBe(true);
     expect(s.textarea.value).toBe("history entry");
+    expect(down(s)).toBe(true);  // back to the draft
+    expect(s.textarea.value).toBe(draft);
+    up(s);                       // browsing again, then a wrapped entry
+    s.textarea.value = draft;    // (as if the recalled entry were long)
+    caret(s, 5);
+    expect(down(s)).toBe(false); // native: caret down one visual row
+    caret(s, draft.length - 1);
+    expect(down(s)).toBe(true);
   });
 
   test("a rebuilt composer restores the working draft, never a recalled entry", () => {

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
 import { fakeIO, testEnv } from "./fakes.js";
 
 const turn = () => new Promise((resolve) => setImmediate(resolve));

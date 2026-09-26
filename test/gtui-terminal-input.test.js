@@ -1,4 +1,4 @@
-// test/gtui-terminal-input.test.js — proof for lib/gtui/terminal-input.js's
+// test/gtui-terminal-input.test.js — proof for lib/app/gtui/terminal-input.js's
 // createTerminalInput: raw bytes -> semantic key/paste events. Found and
 // fixed during Phase 03 step 6 (the parity run): Node's readline sets
 // `key.name` for EVERY keypress, plain printable characters included
@@ -11,7 +11,7 @@
 // real keystroke end to end.
 import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
-import { createTerminalInput, keyName } from "../lib/gtui/terminal-input.js";
+import { createTerminalInput, keyName } from "../lib/app/gtui/terminal-input.js";
 
 class FakeInput extends EventEmitter {
   isTTY = true;

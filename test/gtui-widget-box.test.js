@@ -1,9 +1,9 @@
-// test/gtui-widget-box.test.js — proof for lib/gtui/widgets/box.js:
+// test/gtui-widget-box.test.js — proof for lib/app/gtui/widgets/box.js:
 // DEAD CODE (see AI-GTUI.md) — border/title drawing, inset child nesting.
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { box } from "../lib/gtui/widgets/box.js";
-import { text } from "../lib/gtui/widgets/text.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { box } from "../lib/app/gtui/widgets/box.js";
+import { text } from "../lib/app/gtui/widgets/text.js";
 
 const rowText = (buf, y) => buf.row(y).map((c) => c.text ?? "").join("");
 

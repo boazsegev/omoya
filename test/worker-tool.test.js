@@ -107,7 +107,7 @@ describe("worker tool", () => {
     child._emit(Agent.EVENT.MESSAGE_COMMITTED, message);
     const report = manager.pending.at(-1);
     expect(report.worker).toBe("r");
-    expect(report.content).toEqual([{ type: "text", text: "[Message from worker: \"r\"]" }, ...content]);
+    expect(report.content).toEqual([{ type: "text", text: "[Message from worker: \"r\"]\n" }, ...content]);
     expect(message.content).toBe(content);
     child._parentClosed();
     child._emit(Agent.EVENT.MESSAGE_COMMITTED, message);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 
 async function snapshot(node, size = {}) {
   const memory = GTUI.host.memory(size);
@@ -23,6 +23,15 @@ describe("GTUI semantic layout", () => {
     const table = GTUI.view.table({}, [{ role: "table.head", cells: [[{ text: "A" }], [{ text: "B" }]] }, { cells: [[{ text: "one" }], [{ text: "two" }]] }]);
     const result = await snapshot(table, { width: 20, height: 2 });
     expect(result.lines).toEqual(["     A     B", "     one   two"]);
+  });
+
+  test("tables can start at the text margin and rule off their header row", async () => {
+    const rows = [{ role: "table.head", cells: [[{ text: "A" }], [{ text: "B" }]] }, { cells: [[{ text: "one" }], [{ text: "two" }]] }];
+    const result = await snapshot(GTUI.view.table({ align: "start", headerRule: "muted" }, rows), { width: 20, height: 3 });
+    expect(result.lines).toEqual(["  A     B", "  ─────────", "  one   two"]);
+    expect(result.roles.some((span) => span.role === "muted")).toBe(true);
+    // a header-only table has nothing to rule off
+    expect((await snapshot(GTUI.view.table({ align: "start", headerRule: "muted" }, rows.slice(0, 1)), { width: 20, height: 3 })).lines).toEqual(["  A   B"]);
   });
 
   test("lays out row, column, and fixed/auto/fill grid tracks", async () => {
@@ -96,5 +105,29 @@ describe("GTUI semantic layout", () => {
     const older = GTUI.view.scroll({ id: "history", anchor: "end", offset: 2 }, [content]);
     expect((await snapshot(latest, { width: 10, height: 3 })).lines).toEqual(["line 5", "line 6", "line 7"]);
     expect((await snapshot(older, { width: 10, height: 3 })).lines).toEqual(["line 3", "line 4", "line 5"]);
+  });
+});
+
+describe("input placeholder", () => {
+  test("an empty input shows muted placeholder text; any value hides it", async () => {
+    const render = (value) => snapshot(GTUI.view.input({ id: "i", value, caret: value.length, placeholder: "Ask anything" }), { width: 30, height: 3 });
+    const empty = await render("");
+    expect(empty.lines[1].trim()).toBe("Ask anything");
+    expect(empty.roles.some((span) => span.role === "muted")).toBe(true);
+    expect((await render("hi")).lines[1].trim()).toBe("hi");
+  });
+});
+
+describe("footer", () => {
+  test("pushes start items left and end items right, dropping the lowest priority when tight", async () => {
+    const footer = GTUI.view.footer({}, [
+      { text: "working 12s", priority: 10 },
+      { text: "low", priority: 1 },
+      { text: "right side", align: "end", priority: 5 },
+    ]);
+    expect((await snapshot(footer, { width: 40, height: 1 })).lines[0]).toBe("working 12s · low             right side");
+    expect((await snapshot(footer, { width: 25, height: 1 })).lines[0]).toContain("working 12s");
+    expect((await snapshot(footer, { width: 25, height: 1 })).lines[0]).not.toContain("low");
+    expect(GTUI.view.footer({}, [])).toBeNull();
   });
 });

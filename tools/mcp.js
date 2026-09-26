@@ -237,16 +237,21 @@ async function listTools(name, config, settings) {
 }
 
 /**
- * The mcp tool.
+ * Call one tool on one configured server directly, without the
+ * `action` dispatch — the primitive `tools/web.js`'s MCP-shadowed
+ * web-search/web-fetch mapping and the `mcp` tool's own "call" action
+ * both use.
  * @param {Object} args
- * @param {"servers"|"tools"|"call"} args.action
- * @param {string} [args.server] - the configured server (tools/call)
- * @param {string} [args.tool] - the remote tool's name (call)
- * @param {Object} [args.arguments] - the remote tool's arguments (call)
+ * @param {string} args.server - the configured server name
+ * @param {string} args.tool - the remote tool's name
+ * @param {Object} [args.arguments] - the remote tool's arguments
+ * @param {number} [args.timeout] - request timeout in ms; capped at the
+ *   server's own configured timeout (default 30s)
+ * @param {AbortSignal} [args.signal] - aborts the pending call
  * @param {Object} [context] - the harness tool context ({env}) — the
  *   SAFE VIEW in safe mode (`env.safe` is itself: safe of safe is
- *   the same view), which restricts every action to safe-marked
- *   servers
+ *   the same view), which restricts the reachable server to a
+ *   safe-marked one
  * @returns {Promise<string>}
  */
 export async function callMcp({ server, tool, arguments: toolArgs, timeout, signal } = {}, context) {
@@ -280,6 +285,19 @@ export async function callMcp({ server, tool, arguments: toolArgs, timeout, sign
   return text !== "" ? text : JSON.stringify(result?.structuredContent ?? result ?? null);
 }
 
+/**
+ * The mcp tool.
+ * @param {Object} args
+ * @param {"servers"|"tools"|"call"} args.action
+ * @param {string} [args.server] - the configured server (tools/call)
+ * @param {string} [args.tool] - the remote tool's name (call)
+ * @param {Object} [args.arguments] - the remote tool's arguments (call)
+ * @param {Object} [context] - the harness tool context ({env}) — the
+ *   SAFE VIEW in safe mode (`env.safe` is itself: safe of safe is
+ *   the same view), which restricts every action to safe-marked
+ *   servers
+ * @returns {Promise<string>}
+ */
 export async function mcp({ action, server, tool, arguments: toolArgs } = {}, context) {
   const settings = context?.env?.settings;
   const safeMode = context?.env != null && context.env === context.env.safe; // the safe view's own fingerprint

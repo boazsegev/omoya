@@ -9,8 +9,9 @@
  * from disk on every call (no caching), so a skill added mid-session
  * shows up without a restart.
  *
- * The answer stays BRIEF by design: loading returns "skill loading:
- * <names>" (or "skill not found: <names>"), and with no names the
+ * The answer stays BRIEF by design: loading returns "Loaded skills:
+ * <names>." (naming any requested names still unavailable, or
+ * refusing outright when none of them are), and with no names the
  * skill catalog itself. The skill PAYLOADS never bloat the tool
  * result — they are returned as { result, system }, and the harness
  * appends them as a system message right after the tool result

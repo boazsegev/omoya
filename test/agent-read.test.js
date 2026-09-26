@@ -594,6 +594,51 @@ describe("read grep: the global-regexp core", () => {
     expect(out).toBe(`grep ${rel} /two\\nthree/ (1):\n2: two\n3: three`);
   });
 
+  test("multi-line patterns center each long line on its own matched segment", async () => {
+    const rel = setup("spanning-long.txt", `${"a".repeat(3000)}FIRST\nSECOND${"b".repeat(3000)}`);
+    const lines = (await read({ path: rel, pattern: "FIRST\\nSECOND" })).split("\n").slice(1);
+    expect(lines[0]).toBe(`1: ...${"a".repeat(2043)}FIRST`);
+    expect(lines[1]).toBe(`2: SECOND${"b".repeat(2042)}...`);
+  });
+
+  test("long lines center a 2K excerpt on the actual match with edge ellipses", async () => {
+    const left = "a".repeat(3000);
+    const right = "b".repeat(3000);
+    const rel = setup("center.txt", `${left}TARGET${right}`);
+    const out = await read({ path: rel, pattern: "TARGET" });
+    const shown = out.split("\n")[1].replace(/^1: /, "");
+    expect(shown).toBe(`...${left.slice(-1021)}TARGET${right.slice(0, 1021)}...`);
+    expect(shown.length).toBe(2054);
+  });
+
+  test("long lines at the beginning and end only mark omitted sides", async () => {
+    const rel = setup("edges.txt", `TARGET${"x".repeat(3000)}\n${"y".repeat(3000)}TARGET`);
+    const lines = (await read({ path: rel, pattern: "TARGET" })).split("\n").slice(1);
+    expect(lines[0]).toBe(`1: TARGET${"x".repeat(2042)}...`);
+    expect(lines[1]).toBe(`2: ...${"y".repeat(2042)}TARGET`);
+  });
+
+  test("one matching JSONL line cannot inject megabytes of session history into the model", async () => {
+    const rel = setup("huge.jsonl", "start " + "x".repeat(2_000_000) + " target " + "y".repeat(2_000_000));
+    const out = await read({ path: rel, pattern: "target" });
+    expect(out.length).toBeLessThan(10_000);
+    expect(out).toContain("target");
+    expect(out).toContain("...");
+  });
+
+  test("folder grep uses the same match-centered excerpt", async () => {
+    setup("folder-center.txt", `${"a".repeat(3000)}TARGET${"b".repeat(3000)}`);
+    const out = await read({ path: `./ai-tmp/read-${process.pid}`, pattern: "TARGET" });
+    expect(out).toContain(`folder-center.txt:1: ...${"a".repeat(1021)}TARGET${"b".repeat(1021)}...`);
+  });
+
+  test("recursive folder grep bounds total output even with many long matching lines", async () => {
+    setup("many.txt", Array.from({ length: 100 }, () => "target " + "x".repeat(3000)).join("\n"));
+    const out = await read({ path: `./ai-tmp/read-${process.pid}`, pattern: "target", recursive: true });
+    expect(out.length).toBeLessThan(70_000);
+    expect(out).toContain("output capped");
+  });
+
   test("overlapping ranges never print a line twice", async () => {
     const rel = setup("over.txt", "aaa\nbbb\nccc");
     const out = await read({ path: rel, pattern: "[a-z]", maxMatches: 10 });

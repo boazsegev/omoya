@@ -1,8 +1,8 @@
 // test/cli-connectors.test.js — the ai executable owns its three tiny IO
-// entry modes directly; reusable REPL behavior remains in lib/tui.js.
+// entry modes directly; reusable REPL behavior remains in lib/app/tui/index.js.
 import { describe, expect, test } from "bun:test";
-import { IO_MODES, resolveIoMode } from "../lib/tui-app/cli-run.js";
-import { createRepl, TUI_ENGINES } from "../lib/tui.js";
+import { IO_MODES, resolveIoMode } from "../lib/app/tui/cli-run.js";
+import { createRepl, TUI_ENGINES } from "../lib/app/tui/index.js";
 import { HELP_TEMPLATE } from "../bin/scripts/help.js";
 
 describe("ai IO modes: inline/alt/line", () => {
@@ -18,7 +18,7 @@ describe("ai IO modes: inline/alt/line", () => {
   });
 });
 
-describe("lib/tui.js: engine names inline/alt", () => {
+describe("lib/app/tui/index.js: engine names inline/alt", () => {
   test("the interactive REPL offers inline and alt", () => {
     expect(TUI_ENGINES).toEqual(expect.arrayContaining(["inline", "alt"]));
   });

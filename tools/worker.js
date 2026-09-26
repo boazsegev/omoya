@@ -89,7 +89,7 @@ function routeResponses(worker, manager) {
     if (!content.some((part) => part?.type !== "thinking") || content.some((part) => part?.type === "toolCall")) return;
     manager.enqueue({
       type: 2,
-      content: [{ type: "text", text: `[Message from worker: ${JSON.stringify(worker.name)}]` }, ...content],
+      content: [{ type: "text", text: `[Message from worker: ${JSON.stringify(worker.name)}]\n` }, ...content],
       worker: worker.name,
     });
   });

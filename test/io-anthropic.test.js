@@ -7,7 +7,6 @@
 // the two verification modes, and the ratelimit plan report.
 import { describe, expect, test, afterEach } from "bun:test";
 import { defineProvider } from "../lib/io.js";
-import { oauthPasteOnly } from "../lib/cli.js";
 import AnthropicPlugin from "../providers/anthropic.js";
 
 const Protocol = defineProvider(AnthropicPlugin, { name: "anthropic" });
@@ -55,8 +54,8 @@ describe("anthropic provider: construction and metadata", () => {
 
   test("knownEndpoints: Anthropic (registry + offline models) and message-verified compatible routes", () => {
     const names = Protocol.knownEndpoints.map((e) => e.name);
-    expect(names).toEqual(["anthropic", "anthropic-claude", "deepseek-anthropic", "zai-anthropic", "minimax-anthropic"]);
-    const [anthropic, claude, deepseek, zai, minimax] = Protocol.knownEndpoints;
+    expect(names).toEqual(["anthropic", "deepseek-anthropic", "zai-anthropic", "minimax-anthropic"]);
+    const [anthropic, deepseek, zai, minimax] = Protocol.knownEndpoints;
     expect(anthropic.url).toBe(URL);
     expect(anthropic.registry).toEqual({ url: "https://models.dev/api.json", provider: "anthropic" });
     // model CATALOG is content — the contract is only the entry shape
@@ -70,26 +69,6 @@ describe("anthropic provider: construction and metadata", () => {
     }
     expect(anthropic.verify).toBeUndefined(); // GET /models exists
     expect(anthropic.oauth).toBeUndefined(); // the key preset: no browser flow
-    // the SUBSCRIPTION preset: same API + registry + static list, browser
-    // sign-in (PKCE against claude.ai, the loopback redirect collects the
-    // code AUTOMATICALLY, JSON exchange carrying the state), 1-token verification
-    expect(claude.url).toBe(URL);
-    expect(claude.verify).toBe("messages");
-    expect(claude.registry).toEqual(anthropic.registry);
-    expect(claude.models).toBe(anthropic.models);
-    expect(claude.oauth).toEqual({
-      label: "Claude Pro/Max (subscription)",
-      clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-      authorizeUrl: "https://claude.ai/oauth/authorize",
-      tokenUrl: "https://console.anthropic.com/v1/oauth/token",
-      redirectUri: "http://localhost:54545/callback",
-      scope: "org:create_api_key user:profile user:inference",
-      extraAuthorizeParams: { code: "true" },
-      tokenFormat: "json",
-      tokenIncludesState: true,
-    });
-    expect(claude.oauth.deviceAuthorizationUrl).toBeUndefined(); // grant shape A
-    expect(oauthPasteOnly(claude.oauth)).toBe(false); // the listener collects the code — no pasting
     // the third-party routes have NO /models: a 1-token message verifies the login
     for (const preset of [deepseek, zai, minimax]) {
       expect(preset.verify).toBe("messages");
@@ -120,12 +99,13 @@ describe("anthropic provider: construction and metadata", () => {
     expect(found.anthropic).toBeUndefined();
   });
 
-  test("login stores an API key, or an OAuth access token as a bearer", async () => {
+  test("login stores an API key", async () => {
     const writes = [];
     const connection = new Protocol(URL, aiio({ settings: {}, authSet: (data) => writes.push(data) }));
     expect(await connection.login({ token: "sk-ant-api03-x" })).toEqual({ type: "api_key", token: "sk-ant-api03-x" });
-    expect(await connection.login({ token: "sk-ant-oat01-y" })).toEqual({ type: "oauth", token: "sk-ant-oat01-y" });
-    expect(writes).toHaveLength(2);
+    expect(writes).toHaveLength(1);
+    await expect(connection.login({ token: "sk-ant-oat01-test" })).rejects.toThrow(/claude provider/);
+    expect(writes).toHaveLength(1);
     await expect(connection.login({})).rejects.toThrow(/API key/);
   });
 });
@@ -226,20 +206,23 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
     expect(unknown.context2msg([user("x")])[1].max_tokens).toBe(64000);
   });
 
-  test("bearer tokens (OAuth/subscription) ride authorization + the oauth beta header", () => {
-    const connection = new Protocol(URL, aiio({ settings: { auth: { type: "oauth", token: "sk-ant-oat01-z" } } }));
+  test("environment bearer tokens ride authorization without subscription headers", () => {
+    const connection = new Protocol(URL, aiio({ settings: { auth: { type: "bearer", token: "external" } } }));
     const [headers] = connection.context2msg([user("hi")]);
-    expect(headers.authorization).toBe("Bearer sk-ant-oat01-z");
-    expect(headers["anthropic-beta"]).toBe("oauth-2025-04-20");
-    expect(headers["x-api-key"]).toBeUndefined();
+    expect(headers.authorization).toBe("Bearer external");
+    expect(headers["anthropic-beta"]).toBeUndefined();
+    expect(headers["x-app"]).toBeUndefined();
   });
 
-  test("a subscription (type oauth) token leads the system prompt with the Claude Code identity", () => {
-    const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
+  test("an API key sends no client identity (the subscription attestation is OAuth-only)", () => {
+    const connection = new Protocol(URL, aiio({ settings: { auth: { type: "api_key", token: "sk-ant-test" } } }));
+    const [headers] = connection.context2msg([user("hi")]);
+    expect(headers["user-agent"]).toBeUndefined();
+    expect(headers["x-app"]).toBeUndefined();
+  });
+
+  test("Anthropic sends the supplied system prompt unchanged", () => {
     const at = (auth, context) => new Protocol(URL, aiio({ settings: { auth } })).context2msg(context)[1].system;
-    expect(at({ type: "oauth", token: "t" }, [system("be terse"), user("q")])).toBe(`${IDENTITY}\n\nbe terse`);
-    expect(at({ type: "oauth", token: "t" }, [user("q")])).toBe(IDENTITY); // even with no system prompt
-    // an environment bearer (type bearer) and an API key send the prompt as-is
     expect(at({ type: "bearer", token: "t" }, [system("be terse"), user("q")])).toBe("be terse");
     expect(at({ token: "t" }, [user("q")])).toBeUndefined();
   });
@@ -250,6 +233,8 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
     expect(at(false).thinking).toEqual({ type: "disabled" });
     expect(at(true)).toMatchObject({ thinking: { type: "adaptive", display: "summarized" } });
     expect(at(true).output_config).toBeUndefined();
+    expect(at("none")).toMatchObject({ thinking: { type: "disabled" } });
+    expect(at("none").output_config).toBeUndefined();
     expect(at("xhigh")).toMatchObject({
       thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "xhigh" },
@@ -433,7 +418,25 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     expect(map["claude-haiku-4-5"].reasoning).toBe(true); // a supported thinking type of any kind
     expect(map["claude-plain"]).toEqual({ label: "Plain", reasoning: false });
     expect(writes.models["claude-opus-5"]).toBeDefined(); // the cache refreshed
-    expect(writes.registry.models["claude-next"]).toBeDefined();
+    expect(writes.registry).toBeUndefined(); // a successful live list needs no registry fetch
+  });
+
+  test("a live list never fetches the registry or includes its obsolete ids", async () => {
+    const calls = stubFetch({
+      "models.dev": () => { throw new Error("registry must not be queried"); },
+      "/v1/models": [200, { data: [{ id: "claude-new", display_name: "Claude New" }] }],
+    });
+    const { conn } = connection({ registry: { fetchedAt: Date.now(), models: { "claude-old": { label: "Old" } } } });
+    expect(Object.keys(await conn.models())).toEqual(["claude-new"]);
+    expect(calls.filter((call) => call.url.includes("models.dev"))).toHaveLength(0);
+  });
+
+  test("malformed live list falls back to the cached registry instead of wiping models", async () => {
+    stubFetch({ "/v1/models": [200, { invalid: true }] });
+    const { conn } = connection({ registry: { fetchedAt: Date.now(), models: {
+      "claude-next": { label: "Next", reasoning: true },
+    } } });
+    expect((await conn.models())["claude-next"]).toMatchObject({ label: "Next", reasoning: true });
   });
 
   test("offline: registry snapshot (TTL) + static preset + cached map merge; no writes without fresh data", async () => {

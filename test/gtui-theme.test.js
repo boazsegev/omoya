@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cometFrame, createTheme, flashFrame, themeRoles, waveFrame } from "../lib/gtui/theme.js";
+import { cometFrame, createTheme, flashFrame, themeRoles, waveFrame } from "../lib/app/gtui/theme.js";
 
 describe("GTUI themes", () => {
   test("normalizes colors, variants, attributes, and token fallback", () => {

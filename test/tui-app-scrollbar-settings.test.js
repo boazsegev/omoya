@@ -10,8 +10,8 @@
  */
 
 import { expect, test } from "bun:test";
-import { createInteractiveRepl } from "../lib/tui-app/run.js";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { createInteractiveRepl } from "../lib/app/tui/run.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
 import { Env } from "../lib/env.js";
 import { scriptedIO } from "./fakes.js";

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createCompletionSources } from "../lib/tui-app/completion-sources.js";
-import { initialInput, applyChange } from "../lib/tui-app/input-controller.js";
+import { createCompletionSources } from "../lib/app/tui/completion-sources.js";
+import { initialInput, applyChange } from "../lib/app/tui/input-controller.js";
 
 test("ordinary typing never enumerates saved sessions or prompt files", () => {
   let sessionReads = 0;

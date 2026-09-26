@@ -8,8 +8,9 @@
  * against the WHOLE text — a cheap full-file test answers "no match"
  * without ever splitting lines, and each match maps to its LINE RANGE
  * (first–last line the match spans) rather than a single line: the
- * report prints every line a match touches, and the range structure
- * is where future context (N lines before/after) attaches. Overlaps
+ * report prints a match-centered excerpt of every line a match touches
+ * (2K chars per line, 64K chars per result); the range structure is where
+ * future context (N lines before/after) attaches. Overlaps
  * merge, so one line is never printed twice. With binary: true the
  * same matching runs over RAW BYTES (latin1: one character per byte)
  * — a byte pattern like \x89PNG works on a binary file.
@@ -20,6 +21,18 @@ import { intArg } from "./util.js";
 
 export const DEFAULT_MAX_MATCHES = 100;
 export const DEFAULT_GREP_FILE_SIZE_LIMIT = 5 * 1024 * 1024;
+/** A matching line may be a whole minified document or JSONL session. */
+const MAX_GREP_LINE_CHARS = 2048;
+const MAX_GREP_OUTPUT_CHARS = 64 * 1024;
+
+/** Preserve the match vicinity without printing the rest of an enormous line. */
+function excerptLine(line, { start: matchStart = 0, end: matchEnd = 0 } = {}) {
+  if (line.length <= MAX_GREP_LINE_CHARS) return line;
+  const before = Math.floor((MAX_GREP_LINE_CHARS - Math.min(matchEnd - matchStart, MAX_GREP_LINE_CHARS)) / 2);
+  const start = Math.max(0, Math.min(matchStart - before, line.length - MAX_GREP_LINE_CHARS));
+  const end = start + MAX_GREP_LINE_CHARS;
+  return `${start ? "..." : ""}${line.slice(start, end)}${end < line.length ? "..." : ""}`;
+}
 
 /** Compile the user pattern; a bad pattern is an ordinary error. */
 function compile(pattern, ignoreCase) {
@@ -51,12 +64,13 @@ function lineAt(text, offset, cursor) {
  * line it sits on; a match spanning newlines reports every line it
  * touches. The empty text never matches (a split would invent a
  * phantom empty line).
- * @returns {{ranges: Array<{first: number, last: number}>, total: number}}
- *   0-based inclusive line ranges (unmerged, ascending) and their count
+ * @returns {{ranges: Array<{first: number, last: number}>, total: number, positions: Map<number, {start: number, end: number}>}}
+ *   0-based inclusive line ranges, their count and first match span per line
  */
 export function matchLineRanges(text, pattern, ignoreCase) {
   const re = globalize(pattern, ignoreCase);
   const ranges = [];
+  const positions = new Map();
   const last = text.length - 1;
   let cursor = { line: 0, offset: 0 }; // 0-based line of cursor.offset
   let match;
@@ -65,11 +79,23 @@ export function matchLineRanges(text, pattern, ignoreCase) {
     const endOffset = Math.min(match.index + match[0].length - 1, last);
     const end = lineAt(text, endOffset, start);
     ranges.push({ first: start.line, last: end.line });
+    // Retain the first match's actual span for each printed line,
+    // including lines touched by a multi-line regular expression.
+    let lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+    for (let line = start.line; line <= end.line; line++) {
+      const newline = text.indexOf("\n", lineStart);
+      const lineEnd = newline < 0 ? text.length : newline;
+      if (!positions.has(line)) positions.set(line, {
+        start: Math.max(match.index - lineStart, 0),
+        end: Math.min(match.index + match[0].length - lineStart, lineEnd - lineStart),
+      });
+      lineStart = lineEnd + 1;
+    }
     cursor = end;
     if (match[0] === "") re.lastIndex++; // zero-length matches must not loop
     if (re.lastIndex > text.length) break;
   }
-  return { ranges, total: ranges.length };
+  return { ranges, total: ranges.length, positions };
 }
 
 /**
@@ -93,7 +119,7 @@ export function grep(text, { pattern, ignoreCase, maxMatches, path, lines, lineO
   const flags = ignoreCase ? "i" : "";
   const all = lines ?? text.split("\n");
   // the full-text test first: a file without a match never splits/scans
-  const { ranges, total } = matchLineRanges(all.join("\n"), pattern, ignoreCase);
+  const { ranges, total, positions } = matchLineRanges(all.join("\n"), pattern, ignoreCase);
   if (total === 0) {
     if (stats) stats.matches = 0;
     return `grep: no matches for /${pattern}/${flags} in ${path}`;
@@ -101,15 +127,26 @@ export function grep(text, { pattern, ignoreCase, maxMatches, path, lines, lineO
   if (stats) stats.matches = total;
   const found = [];
   let lastPrinted = -1; // 0-based; overlapping ranges print a line once
-  for (const range of ranges) {
+  let outputChars = 0;
+  let truncated = false;
+  search: for (const range of ranges) {
     if (found.length >= cap) break;
     for (let i = Math.max(range.first, lastPrinted + 1); i <= range.last && found.length < cap; i++) {
-      found.push(`${lineOffset + i}: ${all[i]}`);
+      const line = all[i];
+      const rendered = `${lineOffset + i}: ${excerptLine(line, positions.get(i))}`;
+      if (outputChars + rendered.length > MAX_GREP_OUTPUT_CHARS) {
+        truncated = true;
+        if (found.length === 0) found.push(rendered.slice(0, MAX_GREP_OUTPUT_CHARS));
+        break search;
+      }
+      found.push(rendered);
+      outputChars += rendered.length + 1;
       lastPrinted = i;
     }
   }
   const note = total > cap ? `, showing first ${cap}` : "";
-  return `grep ${path} /${pattern}/${flags} (${total}${note}):\n${header}${found.join("\n")}`;
+  const limitNote = truncated ? `\n[output capped at ${MAX_GREP_OUTPUT_CHARS} characters; narrow the search]` : "";
+  return `grep ${path} /${pattern}/${flags} (${total}${note}):\n${header}${found.join("\n")}${limitNote}`;
 }
 
 /**
@@ -143,6 +180,8 @@ export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches
   let binarySkipped = 0;
   let oversized = 0;
   const matchFiles = new Set();
+  let outputChars = 0;
+  let truncated = false;
   for (const file of files) {
     if (file.binary && !binary) { binarySkipped++; continue; }
     if (sizeLimit !== undefined && sizeLimit !== Infinity) {
@@ -157,7 +196,7 @@ export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches
       unreadable++;
       continue;
     }
-    const { ranges } = matchLineRanges(text, pattern, ignoreCase);
+    const { ranges, positions } = matchLineRanges(text, pattern, ignoreCase);
     if (ranges.length === 0) continue;
     total += ranges.length;
     matchFiles.add(file.rel);
@@ -166,7 +205,16 @@ export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches
     for (const range of ranges) {
       if (found.length >= cap) break;
       for (let i = Math.max(range.first, lastPrinted + 1); i <= range.last && found.length < cap; i++) {
-        found.push(`${file.rel}:${i + 1}: ${lines[i]}`);
+        if (truncated) continue;
+        const line = lines[i];
+        const rendered = `${file.rel}:${i + 1}: ${excerptLine(line, positions.get(i))}`;
+        if (outputChars + rendered.length > MAX_GREP_OUTPUT_CHARS) {
+          truncated = true;
+          if (found.length === 0) found.push(rendered.slice(0, MAX_GREP_OUTPUT_CHARS));
+          continue;
+        }
+        found.push(rendered);
+        outputChars += rendered.length + 1;
         lastPrinted = i;
       }
     }
@@ -182,5 +230,6 @@ export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches
   }
   if (total === 0) return `grep: no matches for /${pattern}/${flags} in ${shown}${skipNote ? ` (${skipNote.slice(2)})` : ""}`;
   const note = total > cap ? `, showing first ${cap}` : "";
-  return `grep ${shown} /${pattern}/${flags} (${total}${note}${skipNote}):\n${found.join("\n")}`;
+  const limitNote = truncated ? `\n[output capped at ${MAX_GREP_OUTPUT_CHARS} characters; narrow the search]` : "";
+  return `grep ${shown} /${pattern}/${flags} (${total}${note}${skipNote}):\n${found.join("\n")}${limitNote}`;
 }

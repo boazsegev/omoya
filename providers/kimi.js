@@ -485,12 +485,10 @@ async function registryModels(connection) {
 }
 
 /**
- * The endpoint's model MAP, three sources merged (freshest wins):
- * the LIVE /models list (existing models auto-detected — Moonshot's
- * is OpenAI-shaped), the models.dev REGISTRY (newly released models
- * arrive with metadata, code-update-free), the preset's static list
- * and the cached map (offline fallbacks). A successful merge
- * refreshes the auth cache.
+ * The live OpenAI-shaped /models IDs and metadata are authoritative.
+ * Cached and static metadata fills only omissions for the same IDs;
+ * the models.dev registry is consulted only if the live list fails.
+ * Offline, registry, static and cached IDs form fallback candidates.
  */
 async function models() {
   const settings = this.aiio?.settings ?? {};
@@ -504,25 +502,34 @@ async function models() {
     }));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
-    live = (body.data ?? [])
-      .map((m) => m?.id)
-      .filter((id) => typeof id === "string" && id !== "");
+    if (!Array.isArray(body.data)) throw new Error("malformed model catalog");
+    live = {};
+    for (const model of body.data) {
+      if (typeof model?.id !== "string" || model.id === "") continue;
+      live[model.id] = {
+        ...(typeof model.name === "string" && model.name !== "" ? { label: model.name } : {}),
+        ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
+        ...(Number.isFinite(model.context_window) ? { contextWindow: model.context_window } : {}),
+        ...(Number.isFinite(model.max_output_tokens) ? { maxTokens: model.max_output_tokens } : {}),
+      };
+    }
   } catch {
     live = null; // offline: registry + static + cached below
   }
-  const registry = await registryModels(this);
+  const registry = live === null ? await registryModels(this) : {};
   const staticModels = endpointPreset(this)?.models ?? {};
   const cached = settings.models && typeof settings.models === "object" && !Array.isArray(settings.models)
     ? settings.models
     : {};
-  const ids = live ?? [...new Set([
+  const ids = live === null ? [...new Set([
     ...Object.keys(staticModels), ...Object.keys(registry), ...Object.keys(cached),
-  ])];
+  ])] : Object.keys(live);
   const map = {};
   for (const id of ids) {
-    const merged = { ...cached[id], ...staticModels[id], ...registry[id] };
+    const liveModel = live === null ? null : live[id];
+    const merged = { ...cached[id], ...staticModels[id], ...registry[id], ...liveModel };
     map[id] = {
-      label: registry[id]?.label ?? staticModels[id]?.label ?? cached[id]?.label ?? id,
+      label: liveModel?.label ?? registry[id]?.label ?? staticModels[id]?.label ?? cached[id]?.label ?? id,
       reasoning: merged.reasoning === true,
       ...(Number.isFinite(merged.contextWindow) ? { contextWindow: merged.contextWindow } : {}),
       ...(Number.isFinite(merged.maxTokens) ? { maxTokens: merged.maxTokens } : {}),

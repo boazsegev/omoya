@@ -60,7 +60,7 @@ describe("Agent construction", () => {
     const first = new Agent({ env, model: model(env), session: "same", sessionDir: dir, context: [USER("first")] });
     first.session.flush();
     const resumed = new Agent({ env, model: model(env), session: "same", sessionDir: dir, context: [USER("second")] });
-    expect(resumed.context).toEqual([USER("first\nsecond")]);
+    expect(resumed.context).toEqual([USER("first\n\nsecond")]);
     expect(resumed.session.id).toBe("same");
     expect(existsSync(resumed.session.file)).toBe(true);
   });

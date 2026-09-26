@@ -62,6 +62,14 @@ describe("Agent: cumulative usage", () => {
     expect(agent.contextUsage).toEqual({ used: 4096, total: 128000, approximate: false });
   });
 
+  test("contextUsage: pending context growth does not remain hidden by the last provider report", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, context: [USER("go")] });
+    agent._contextReport = { used: 2, total: 1000 };
+    agent.context.push(USER("word ".repeat(150)));
+    expect(agent.contextUsage.used).toBeGreaterThan(100);
+  });
+
   test("contextUsage: a provider-sourced usage envelope is the runner-up, settings window the total", async () => {
     const env = await testEnv();
     env.authSet("fake", { models: { m: { contextWindow: 64000 } } });

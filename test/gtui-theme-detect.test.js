@@ -1,9 +1,9 @@
-// test/gtui-theme-detect.test.js — proof for lib/gtui/theme-detect.js
+// test/gtui-theme-detect.test.js — proof for lib/app/gtui/theme-detect.js
 // (ported from lib/tui-helpers/theme.js, AI-TUI MIGRATION.md Phase 01
 // step 2): best-effort dark/light detection from COLORFGBG, and the
 // subtle-background palette index it implies.
 import { describe, expect, test } from "bun:test";
-import { themeDark, subtleBg } from "../lib/gtui/theme-detect.js";
+import { themeDark, subtleBg } from "../lib/app/gtui/theme-detect.js";
 
 describe("themeDark", () => {
   test("a dark-half background index (0-6) reads as dark", () => {

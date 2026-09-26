@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
-import { createTheme } from "../lib/gtui/theme.js";
-import { layoutView, measureView } from "../lib/gtui/layout.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
+import { layoutView, measureView } from "../lib/app/gtui/layout.js";
 
 const bordered = { decoration: { left: { glyph: "▌", role: "border", gap: 1 } } };
 

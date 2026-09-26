@@ -1,11 +1,11 @@
-// test/gtui-ansi.test.js — proof for lib/gtui/ansi.js: DEAD CODE
+// test/gtui-ansi.test.js — proof for lib/app/gtui/ansi.js: DEAD CODE
 // through AI-GTUI.md Phase 8, LIVE in Phase 9 — writeAnsiRow() decodes
 // an SGR-styled string (the exact shape tui-helpers/messages.js's row
 // renderers already produce) into gtui Cells via width.js's tokenize().
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { writeAnsiRow, foldSgr } from "../lib/gtui/ansi.js";
-import { BOLD, DIM, REVERSE } from "../lib/gtui/cell.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { writeAnsiRow, foldSgr } from "../lib/app/gtui/ansi.js";
+import { BOLD, DIM, REVERSE } from "../lib/app/gtui/cell.js";
 
 describe("foldSgr", () => {
   const DEFAULT = { fg: null, bg: null, attrs: 0 };

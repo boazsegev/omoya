@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderMarkdown } from "../lib/markdown.js";
+import { renderMarkdown } from "../lib/app/markdown/index.js";
 
 describe("git diff markdown blocks", () => {
   const diff = "--- a/file.js\n+++ b/file.js\n context\n-old\n+new";
@@ -19,7 +19,7 @@ describe("git diff markdown blocks", () => {
 });
 
 test("parseGitDiff exposes metadata, offsets, fences, and rejects lists", async () => {
-  const { default: Markdown } = await import("../lib/markdown.js");
+  const { default: Markdown } = await import("../lib/app/markdown/index.js");
   const raw = "diff --git a/file.js b/file.js\nindex 111..222 100644\n--- a/file.js\n+++ b/file.js\n@@ -1 +1 @@\n-old\n+new\n same";
   const token = Markdown.parseGitDiff(raw);
   expect(token).toMatchObject({ type: "gitdiff", aFilename: "a/file.js", bFilename: "b/file.js", totalAdd: 1, totalRemove: 1 });
@@ -31,7 +31,7 @@ test("parseGitDiff exposes metadata, offsets, fences, and rejects lists", async 
 });
 
 test("parseGitDiff accepts trailing fenced newlines, CRLF headers, and triple-sign body lines", async () => {
-  const { default: Markdown } = await import("../lib/markdown.js");
+  const { default: Markdown } = await import("../lib/app/markdown/index.js");
   const fence = String.fromCharCode(96).repeat(3);
   const fenced = `${fence}diff\n--- a/a\n+++ b/a\n+ok\n${fence}\n`;
   expect(Markdown.parseGitDiff(fenced)?.sourceLines.map(({ kind }) => kind)).toEqual(["fence", "header", "header", "add", "fence", "context"]);

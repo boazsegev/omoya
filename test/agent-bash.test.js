@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 await import(["..", "lib", "env.js"].join("/")); // initialize public Env before loading the tool
-const { bash, hasCdCommand, hasLinkCommand, hasListCommand, toolDescription } = await import(["..", "tools", "bash.js"].join("/"));
+const { bash, hasCdCommand, hasLinkCommand, toolDescription } = await import(["..", "tools", "bash.js"].join("/"));
 // the literal must not sit in this file (the write tool's own content
 // scan would refuse it) — assemble the existing outside root at runtime
 const ETC = ["", "etc"].join("/");
@@ -23,13 +23,8 @@ describe("bash tool", () => {
     await expect(bash({ command: "ln -s source link" })).rejects.toThrow(/^Remove ln/);
   });
 
-  test("refuses ls and directs folder inspection to read", async () => {
-    expect(hasListCommand("ls")).toBe(true);
-    expect(hasListCommand("echo ok; ls -la ./sub")).toBe(true);
-    expect(hasListCommand("command ls ./sub")).toBe(true);
-    expect(hasListCommand("echo ls")).toBe(false);
-    expect(hasListCommand("printf '%s' list")).toBe(false);
-    await expect(bash({ command: "ls" })).rejects.toThrow(/^Use the read tool/);
+  test("allows ls so listings can stream into other commands", async () => {
+    await expect(bash({ command: "ls -d . | awk '{print \"dir:\" $0}'" })).resolves.toBe("dir:.");
   });
 
   test("validates arguments", async () => {

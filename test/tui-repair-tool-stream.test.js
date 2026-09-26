@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { GTUI } from "../lib/gtui/gtui.js";
+import { GTUI } from "../lib/app/gtui/gtui.js";
 import Agent from "../lib/agent.js";
-import { createApp, msg } from "../lib/tui-app/app.js";
+import { createApp, msg } from "../lib/app/tui/app.js";
 import { fakeIO, testEnv, emitScript, TOOLCALL } from "./fakes.js";
 
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
@@ -78,7 +78,7 @@ test("bash-style live output renders in the transcript with tool-result styling"
     const snapshot = host.snapshot();
     expect(snapshot.lines.join("\n")).toContain("LIVE BASH OUTPUT");
     expect(snapshot.lines.join("\n").indexOf("LIVE BASH OUTPUT")).toBeGreaterThan(snapshot.lines.join("\n").indexOf("streamer"));
-    expect(snapshot.lines.join("\n")).toContain("[tool ok] streamer");
+    expect(snapshot.lines.join("\n")).toContain("◌ streamer"); // one live card: running glyph over the streamed output
     expect(snapshot.roles.map((span) => span.role)).toContain("tool.result");
   } finally { release.resolve(); await settle(); ui.stop(); await run; }
 });

@@ -46,15 +46,17 @@ const SOURCE_EXTENSIONS = new Set([".js"]);
 const isSourceFile = (entry) => entry.isFile() && SOURCE_EXTENSIONS.has(extname(entry.name));
 
 const PUBLIC_MODULES = [
-  { name: "Markdown", file: "lib/markdown.js" },
+  { name: "Markdown", file: "lib/app/markdown/index.js" },
   { name: "Context", file: "lib/context.js" },
   { name: "Env", file: "lib/env.js" },
   { name: "IO", file: "lib/io.js" },
   { name: "Agent", file: "lib/agent.js" },
   { name: "CLI", file: "lib/cli.js" },
   { name: "Jobs", file: "lib/jobs.js" },
-  { name: "TUI", file: "lib/tui.js" },
-  { name: "GTUI", file: "lib/gtui/gtui.js" },
+  { name: "App", file: "lib/app.js" },
+  { name: "TUI", file: "lib/app/tui/index.js" },
+  { name: "Web", file: "lib/app/web/index.js" },
+  { name: "GTUI", file: "lib/app/gtui/gtui.js" },
   { name: "index", file: "lib/index.js" },
 ];
 
@@ -152,10 +154,10 @@ const CONTRACTS = [
   {
     name: "TUI input, cursor, mouse-selection, and questionnaire editing",
     sources: [
-      { file: "lib/tui-app/input-controller.js", moduleDoc: true },
-      { file: "lib/gtui/controls.js", symbols: ["createControls"] },
-      { file: "lib/gtui/terminal-input.js", symbols: ["createTerminalInput"] },
-      { file: "lib/tui-app/questionnaire-view.js", moduleDoc: true },
+      { file: "lib/app/tui/input-controller.js", moduleDoc: true },
+      { file: "lib/app/gtui/controls.js", symbols: ["createControls"] },
+      { file: "lib/app/gtui/terminal-input.js", symbols: ["createTerminalInput"] },
+      { file: "lib/app/tui/questionnaire-view.js", moduleDoc: true },
     ],
   },
   {
@@ -842,13 +844,6 @@ function classifyHelperGroups(ownedDirs, publicByFile) {
   });
 }
 
-/** An owned helper folder's name doesn't always share the façade's own
- *  basename (lib/gtui/ is owned by tui.js despite the name, per AI-TUI
- *  MIGRATION.md — it's the generic runtime tui-app/ is built on, not a
- *  tui-prefixed variant) — the one explicit exception to the
- *  name-prefix heuristic below. */
-const FOLDER_OWNER_ALIASES = { gtui: "tui" };
-
 /**
  * Collect architecture directly from the source tree: public façade
  * import edges, owned private helper folders (split into shared vs
@@ -865,18 +860,26 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   const layers = modules.map(({ name, file }) => {
     const facadeImports = sourceImports(join(ROOT, file));
     const base = basename(file, ".js");
+    // A façade folder holding only sub-areas (lib/app/{gtui,shared,tui,web})
+    // lists those areas as its helper groups.
     const ownedDirs = helperDirs
-      .filter((entry) => entry.name === base || entry.name.startsWith(`${base}-`) || FOLDER_OWNER_ALIASES[entry.name] === base)
-      .map((entry) => {
+      .filter((entry) => entry.name === base || entry.name.startsWith(`${base}-`))
+      .flatMap((entry) => {
         const dir = join(libDir, entry.name);
+        const children = readdirSync(dir, { withFileTypes: true });
+        const areas = children.filter((child) => child.isDirectory());
+        return areas.length > 0 && !children.some((child) => child.isFile() && child.name.endsWith(".js"))
+          ? areas.map((area) => ({ name: `${entry.name}/${area.name}`, dir: join(dir, area.name) }))
+          : [{ name: entry.name, dir }];
+      })
+      .map(({ name: dirName, dir }) => {
         const files = sourceFiles(dir);
         const dirImports = [...new Set(files.flatMap((f) => sourceImports(join(ROOT, f))))].sort();
-        return { name: entry.name, path: rootPath(dir), files, imports: dirImports };
+        return { name: dirName, path: rootPath(dir), files, imports: dirImports };
       });
     const helperGroups = classifyHelperGroups(ownedDirs, publicByFile);
     // the facade's TRUE public dependencies: its own imports plus every
-    // owned dir's (lazy-loaded engines never show up in the facade's
-    // own static imports — see lib/tui.js's createRequire dispatch)
+    // owned dir's
     const allImports = [...new Set([...facadeImports, ...ownedDirs.flatMap((d) => d.imports)])].sort();
     return {
       name,
@@ -898,7 +901,7 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   const executables = [...shimFiles, ...scriptFiles].map((file) => ({
     name: basename(file), file: rootPath(file), doc: sourceDoc(file), imports: sourceImports(file),
   }));
-  const cliRunFile = join(ROOT, "lib", "tui-app", "cli-run.js");
+  const cliRunFile = join(ROOT, "lib", "app", "tui", "cli-run.js");
   const cliRunSource = readFileSync(cliRunFile, "utf8");
   const modeList = /export const IO_MODES\s*=\s*Object\.freeze\(\[([^\]]+)\]\)/.exec(cliRunSource)?.[1] ?? "";
   const connectors = [...modeList.matchAll(/["']([^"']+)["']/g)].map((match) => ({

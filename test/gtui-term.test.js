@@ -1,4 +1,4 @@
-// test/gtui-term.test.js — proof for lib/gtui/term.js (ported from
+// test/gtui-term.test.js — proof for lib/app/gtui/term.js (ported from
 // lib/tui-helpers/term.js + terminal-title.js's OSC 0 mechanism,
 // AI-TUI MIGRATION.md Phase 01 step 2): cursor shape/visibility,
 // synchronized-output framing, window title.
@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import {
   SYNC_START, SYNC_END, CURSOR_SHOW, CURSOR_HIDE,
   cursorStyle, cursorStyleReset, notificationBytes, overlayCursorHidden, titleBytes,
-} from "../lib/gtui/term.js";
+} from "../lib/app/gtui/term.js";
 
 describe("synchronized-output framing", () => {
   test("begin/end bracket a frame", () => {

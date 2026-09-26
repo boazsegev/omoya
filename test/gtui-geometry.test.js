@@ -1,8 +1,8 @@
-// test/gtui-geometry.test.js — proof for lib/gtui/geometry.js: DEAD
+// test/gtui-geometry.test.js — proof for lib/app/gtui/geometry.js: DEAD
 // CODE (see AI-GTUI.md) — pure Rect math (rect, inset, center,
 // splitRows/splitCols).
 import { describe, expect, test } from "bun:test";
-import { rect, inset, center, splitRows, splitCols } from "../lib/gtui/geometry.js";
+import { rect, inset, center, splitRows, splitCols } from "../lib/app/gtui/geometry.js";
 
 describe("rect", () => {
   test("clamps negative width/height to 0", () => {

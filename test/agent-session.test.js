@@ -210,7 +210,7 @@ describe("SessionStore", () => {
     store.append(USER("second"));
     store.flush();
     await pending;
-    expect(lines(store.file)).toEqual([USER("first\nsecond")]);
+    expect(lines(store.file)).toEqual([USER("first\n\nsecond")]);
   });
 
   test("a stale live async snapshot leaves the later mutation dirty for the next async flush", async () => {
@@ -221,7 +221,7 @@ describe("SessionStore", () => {
     await pending;
     expect(store._dirty).toBeTruthy(); // "append" | "full", never false
     await store._flushAsync();
-    expect(lines(store.file)).toEqual([USER("first\nsecond")]);
+    expect(lines(store.file)).toEqual([USER("first\n\nsecond")]);
     expect(store._dirty).toBe(false);
   });
 });
@@ -409,7 +409,7 @@ describe("context merging at append (Agent + SessionStore)", () => {
     store.append(USER("queued one"));
     store.append(USER("queued two"));
     expect(store.context).toHaveLength(1);
-    expect(store.context[0].content).toEqual([{ type: "text", text: "queued one\nqueued two" }]);
+    expect(store.context[0].content).toEqual([{ type: "text", text: "queued one\n\nqueued two" }]);
     store.flush();
     expect(lines(store.file)).toHaveLength(1); // the merge persists
   });
@@ -445,7 +445,7 @@ describe("context merging at append (Agent + SessionStore)", () => {
     const assistants = agent.context.filter((m) => m.type === 3);
     expect(assistants).toHaveLength(1);
     expect(assistants[0].content).toEqual([
-      { type: "thinking", text: "half a thought\nthe rest" },
+      { type: "thinking", text: "half a thought\n\nthe rest" },
       { type: "text", text: "answer" },
     ]);
   });
@@ -507,6 +507,66 @@ describe("SessionStore.list / latest (session folder overview)", () => {
     const sync = SessionStore.list({ dir: ROOT, cwd: process.cwd() });
     expect(await SessionStore.listAsync({ dir: ROOT, cwd: process.cwd() })).toEqual(sync);
     expect(await SessionStore.listAsync({ dir: `${ROOT}/nope` })).toEqual([]);
+  });
+
+  test("previews start at the first meaningful line: courtesy and intro lines skip, bullets strip", () => {
+    const cases = [
+      ["Please fix the following issues:\n\n- Displayed previews should skip filler.\n- Second item", "Displayed previews should skip filler."],
+      ["Hi! Please help. Refactor the parser.", "Refactor the parser."],
+      ["```js\nconst x = 1;\n```\n## Build a CLI", "Build a CLI"],
+      ["<context>\n* [ ] ship the release", "ship the release"],
+      ["1. First step\n2. Second", "First step"],
+      ["Please add a login page", "Please add a login page"], // nothing else: the first line stands
+    ];
+    for (const [text, preview] of cases) {
+      const store = new SessionStore({ id: `p${cases.findIndex((c) => c[0] === text)}`, dir: ROOT });
+      store.append(USER(text));
+      store.close();
+      expect(SessionStore.list({ dir: ROOT }).find((s) => s.id === store.id).preview).toBe(preview);
+    }
+  });
+
+  test("lists carry a non-default agent name; default agent-N names stay out", () => {
+    const named = new SessionStore({ id: "named-agent", dir: ROOT, settings: { name: "reviewer" } });
+    named.append(USER("q"));
+    named.close();
+    const plain = new SessionStore({ id: "plain-agent", dir: ROOT, settings: { name: "agent-3" } });
+    plain.append(USER("q"));
+    plain.close();
+    const list = SessionStore.list({ dir: ROOT });
+    expect(list.find((s) => s.id === "named-agent").agent).toBe("reviewer");
+    expect("agent" in list.find((s) => s.id === "plain-agent")).toBe(false);
+  });
+
+  test("a derived name moves an early-flushed session: the unnamed file goes away, the id lists once", async () => {
+    const store = new SessionStore({ dir: ROOT });
+    store.append({ type: 3, content: [{ type: "thinking", text: "no text to name by" }] });
+    store.flush();
+    const unnamed = store.file;
+    expect(existsSync(unnamed)).toBe(true);
+    store.append({ type: 3, content: [{ type: "text", text: "Named at last" }] });
+    store.flush();
+    expect(store.file).not.toBe(unnamed);
+    expect(existsSync(unnamed)).toBe(false);
+    expect(existsSync(store.file)).toBe(true);
+    store.close();
+    // a leftover copy from before the fix still lists once (newest wins)
+    writeFileSync(unnamed, readFileSync(store.file, "utf8").split("\n").slice(0, 2).join("\n") + "\n");
+    expect(SessionStore.list({ dir: ROOT }).filter((s) => s.id === store.id)).toHaveLength(1);
+    expect((await SessionStore.listAsync({ dir: ROOT })).filter((s) => s.id === store.id)).toHaveLength(1);
+  });
+
+  test("renameById / deleteById manage a stored session without a live store", () => {
+    const store = new SessionStore({ id: "stored", dir: ROOT });
+    store.append(USER("keep me"));
+    store.close();
+    const renamed = SessionStore.renameById({ id: "stored", name: "renamed", dir: ROOT });
+    expect(renamed.id).toBe("renamed");
+    expect(SessionStore.list({ dir: ROOT }).map((s) => s.id)).toEqual(["renamed"]);
+    expect(SessionStore.list({ dir: ROOT })[0].preview).toBe("keep me");
+    expect(SessionStore.deleteById({ id: "renamed", dir: ROOT })).toEqual({ deleted: 1 });
+    expect(SessionStore.list({ dir: ROOT })).toEqual([]);
+    expect(() => SessionStore.renameById({ id: "gone", name: "x", dir: ROOT })).toThrow(/no session/);
   });
 });
 
@@ -717,5 +777,149 @@ describe("Agent.resumeSession / listSessions / latestSessionId", () => {
     expect(existsSync(`${target}/keep.txt`)).toBe(true); // foreign files stay
     expect(existsSync(`${target}/notes.jsonl`)).toBe(true); // foreign .jsonl stays too
     expect(SessionStore.deleteAll({ dir: target })).toEqual({ deleted: 0 });
+  });
+});
+
+describe("Session-persisted agent settings (resume restores the configuration)", () => {
+  test("SessionStore persists the settings record in the metadata line and carries it on resume", () => {
+    const store = new SessionStore({ id: "prefs", dir: ROOT });
+    store.append(USER("q"));
+    store.settings = { safe: true, thinking: "high", endpoint: "p", model: "m" };
+    store.flush();
+    const meta = metadata(store.file);
+    expect(meta.agent).toEqual({ safe: true, thinking: "high", endpoint: "p", model: "m" });
+    store.close();
+
+    const resumed = SessionStore.resume({ id: "prefs", dir: ROOT });
+    expect(resumed.settings).toEqual({ safe: true, thinking: "high", endpoint: "p", model: "m" });
+    resumed.close();
+  });
+
+  test("a session without a settings record resumes with none (tolerant reader)", () => {
+    const store = new SessionStore({ id: "plain", dir: ROOT });
+    store.append(USER("q"));
+    store.close();
+    expect(metadata(store.file).agent).toBeUndefined();
+    const resumed = SessionStore.resume({ id: "plain", dir: ROOT });
+    expect(resumed.settings).toBeUndefined();
+    resumed.close();
+  });
+
+  test("agent mutations record into the store; resumeSession restores them", async () => {
+    const env = await testEnv();
+    const agent = new Agent({
+      env, model: "p/m",
+      session: new SessionStore({ id: "configured", dir: ROOT, origin: env.cwd }), createIO: () => null,
+    });
+    agent.append(USER("hello"));
+    agent.setSafe(true);
+    agent.setThinking("high");
+    agent.setModel("p1/m");
+    agent.name = "pilot";
+    agent.description = "the flying one";
+    agent.setSpawnPermission(true);
+    agent.sessionSaveSet(false);
+    agent.sessionSaveSet(true); // net: saving on
+    agent.session.flush();
+    const meta = metadata(agent.session.file);
+    expect(meta.agent).toMatchObject({ safe: true, thinking: "high", endpoint: "p1", model: "m", name: "pilot", description: "the flying one", spawnPermission: true, sessionSave: true });
+
+    const bare = new Agent({ env, session: new SessionStore({ id: "scratch", dir: ROOT, origin: env.cwd }), createIO: () => null });
+    expect(bare.safe).toBe(false);
+    bare.resumeSession("configured");
+    expect(bare.safe).toBe(true);
+    expect(bare.thinking).toBe("high");
+    expect(bare.endpoint).toBe("p1");
+    expect(bare.model).toBe("m");
+    expect(bare.name).toBe("pilot");
+    expect(bare.description).toBe("the flying one");
+    expect(bare.spawnPermission).toBe(true);
+    expect(bare.sessionSave).toBe(true);
+  });
+
+  test("an explicit caller model wins over the stored one; an unnamed agent keeps its name", async () => {
+    const env = await testEnv();
+    const stored = new Agent({
+      env, model: "p/m", name: "kept",
+      session: new SessionStore({ id: "stored", dir: ROOT, origin: env.cwd }), createIO: () => null,
+    });
+    stored.append(USER("q"));
+    stored.session.flush();
+    stored.close();
+
+    // constructor resume with an explicit --model: the caller's selection
+    // stands — and on close it becomes the session's new stored selection
+    const explicit = new Agent({ env, model: "p2/m", session: "stored", sessionDir: ROOT, createIO: () => null });
+    expect(explicit.endpoint).toBe("p2");
+    expect(explicit.name).toBe("kept"); // stored name fills the default
+    explicit.close(); // close flushes: p2/m now rides the file
+
+    // constructor resume with NO model: the stored selection applies
+    const plain = new Agent({ env: await testEnv(), session: "stored", sessionDir: ROOT, createIO: () => null });
+    expect(plain.endpoint).toBe("p2");
+    expect(plain.model).toBe("m");
+    plain.close();
+
+    // an explicitly named agent resuming mid-flight keeps ITS name
+    const named = new Agent({ env: await testEnv(), name: "explicit-name", session: new SessionStore({ id: "tmp", dir: ROOT }), createIO: () => null });
+    named.resumeSession("stored");
+    expect(named.name).toBe("explicit-name");
+    expect(named.endpoint).toBe("p2"); // no caller model: the stored one applies
+  });
+
+  test("a stored endpoint gone from the env never breaks resume", async () => {
+    const env = await testEnv();
+    const agent = new Agent({
+      env, model: "p/m",
+      session: new SessionStore({ id: "gone-endpoint", dir: ROOT, origin: env.cwd }), createIO: () => null,
+    });
+    agent.append(USER("q"));
+    agent.session.flush();
+    // simulate a provider disappearing: rewrite the metadata with a dead endpoint
+    const file = agent.session.file;
+    const meta = metadata(file);
+    meta.agent = { ...meta.agent, endpoint: "vanished", model: "m" };
+    const rest = readFileSync(file, "utf8").split("\n").slice(1).join("\n");
+    writeFileSync(file, `${JSON.stringify(meta)}\n${rest}`);
+    agent.close();
+
+    const resumed = new Agent({ env, model: "p/m", session: "gone-endpoint", sessionDir: ROOT, createIO: () => null });
+    expect(resumed.endpoint).toBe("p"); // the caller's selection stands
+    resumed.close();
+  });
+
+  test("the default agent-N name never rides the file; a chosen name still does", async () => {
+    const env = await testEnv();
+    const agent = new Agent({
+      env, model: "p/m",
+      session: new SessionStore({ id: "unnamed", dir: ROOT, origin: env.cwd }), createIO: () => null,
+    });
+    agent.append(USER("q"));
+    agent.setSafe(true); // a settings mutation: records the snapshot (name included)
+    agent.session.flush();
+    expect(metadata(agent.session.file).agent.name).toBeUndefined();
+    agent.close();
+
+    // a chosen name still persists — resume restores it onto a default-named agent
+    const named = new Agent({
+      env, model: "p/m", name: "keeper",
+      session: new SessionStore({ id: "named", dir: ROOT, origin: env.cwd }), createIO: () => null,
+    });
+    named.append(USER("q"));
+    named.setSafe(true); // record the snapshot
+    named.session.flush();
+    expect(metadata(named.session.file).agent.name).toBe("keeper");
+    named.close();
+    const resumed = new Agent({ env, model: "p/m", session: "named", sessionDir: ROOT, createIO: () => null });
+    expect(resumed.name).toBe("keeper");
+    resumed.close();
+  });
+
+  test("an injected plain store without the settings setter is left alone", async () => {
+    const env = await testEnv();
+    const store = { context: [] };
+    const agent = new Agent({ env, model: "p/m", session: store, createIO: () => null });
+    expect(() => { agent.setSafe(true); agent.setThinking("low"); agent.name = "x"; }).not.toThrow();
+    expect(store.settings).toBeUndefined();
   });
 });

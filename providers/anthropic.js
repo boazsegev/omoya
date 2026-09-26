@@ -38,15 +38,9 @@
  * whose `message` is the MIRROR (the assembler cannot carry thinking
  * signatures — the mirror can, so replays stay valid).
  *
- * Auth: an API key rides `x-api-key`; an OAuth/bearer token (auth
- * type "oauth"/"bearer" — ANTHROPIC_AUTH_TOKEN, a Claude subscription
- * token) rides `authorization: Bearer` + the oauth beta header. The
- * `anthropic-claude` preset signs a Claude Pro/Max SUBSCRIPTION in
- * through the browser (PKCE against claude.ai, the loopback redirect
- * on port 54545 collects the code automatically — paste stays the
- * headless fallback; the token exchange is JSON and carries the
- * state). Subscription requests must identify as Claude Code: the
- * system prompt is prefixed with that identity line for type "oauth".
+ * Auth: API keys ride `x-api-key`; environment bearer tokens ride
+ * `authorization: Bearer`. Claude subscription OAuth belongs to the
+ * separate providers/claude.js dialect.
  */
 
 import Context from "../lib/context.js";
@@ -56,26 +50,6 @@ const { ProviderError, resolveEffort, registryEffortLevels, singleShot } = Env;
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1";
 const API_VERSION = "2023-06-01";
-const OAUTH_BETA = "oauth-2025-04-20";
-/** The identity a Claude subscription (OAuth) token must present —
- *  the endpoint rejects subscription requests without it. */
-const SUBSCRIPTION_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
-/** The Claude Pro/Max browser sign-in (the pi/opencode template). */
-const CLAUDE_OAUTH = {
-  label: "Claude Pro/Max (subscription)",
-  clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authorizeUrl: "https://claude.ai/oauth/authorize",
-  tokenUrl: "https://console.anthropic.com/v1/oauth/token",
-  // the LOOPBACK redirect this client id is registered for (Claude
-  // Code's own): the listener collects the code automatically; the
-  // console-hosted page (https://console.anthropic.com/oauth/code/
-  // callback) is only the manual paste fallback
-  redirectUri: "http://localhost:54545/callback",
-  scope: "org:create_api_key user:profile user:inference",
-  extraAuthorizeParams: { code: "true" },
-  tokenFormat: "json",
-  tokenIncludesState: true,
-};
 const REGISTRY_URL = "https://models.dev/api.json";
 /** A week: how long a registry snapshot stays fresh. */
 const REGISTRY_TTL = 7 * 24 * 3600 * 1000;
@@ -85,7 +59,7 @@ const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 /** The static OFFLINE fallback for the Anthropic preset (the live
  *  /models list and the models.dev registry both refresh over it). */
-const ANTHROPIC_MODELS = {
+export const ANTHROPIC_MODELS = {
   "claude-fable-5-1": { label: "Claude Fable 5.1", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
   "claude-fable-5": { label: "Claude Fable 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
   "claude-opus-5": { label: "Claude Opus 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
@@ -129,28 +103,13 @@ function isBearer(auth) {
   return auth?.type === "oauth" || auth?.type === "bearer";
 }
 
-/** Is the stored token a Claude SUBSCRIPTION sign-in (the browser
- *  flow's "oauth" type — a bearer from the environment is not)? */
-function isSubscription(auth) {
-  return auth?.type === "oauth";
-}
-
-/** The wire `system` value: the subscription identity line leads when
- *  the token demands it; nil when nothing is to be sent. */
-function systemPrompt(auth, text) {
-  const parts = [
-    ...(isSubscription(auth) ? [SUBSCRIPTION_IDENTITY] : []),
-    ...(text ? [text] : []),
-  ];
-  return parts.length > 0 ? parts.join("\n\n") : undefined;
-}/** The request headers for one endpoint's credentials. */
+/** The request headers for one endpoint's credentials. */
 function authHeaders(auth = {}) {
   const headers = { "anthropic-version": API_VERSION };
   const token = auth.token;
   if (!token) return headers;
   if (isBearer(auth)) {
     headers.authorization = `Bearer ${token}`;
-    headers["anthropic-beta"] = OAUTH_BETA;
   } else {
     headers["x-api-key"] = token;
   }
@@ -173,11 +132,11 @@ function context2msg(context, aiio = this.aiio) {
     stream: true,
     messages: [],
   };
-  const system = systemPrompt(settings.auth, context
+  const system = context
     .filter((message) => message?.type === MessageType.System)
     .map(textOf)
     .filter(Boolean)
-    .join("\n\n"));
+    .join("\n\n");
   if (system) body.system = system;
   for (const message of context) {
     const wire = toMessage(message);
@@ -243,7 +202,7 @@ function collapseAnyOf(schema) {
  */
 function thinkingOptions(think, meta) {
   if (think === undefined || think === null) return {};
-  if (think === false) return { thinking: { type: "disabled" } };
+  if (think === false || think === "none") return { thinking: { type: "disabled" } };
   const out = { thinking: { type: "adaptive", display: "summarized" } };
   if (typeof think === "string") {
     out.output_config = { effort: resolveEffort(think, { levels: meta?.reasoningLevels ?? EFFORT_LEVELS }) };
@@ -575,12 +534,11 @@ function mapLiveModel(model) {
 }
 
 /**
- * The endpoint's model MAP, three sources merged (freshest wins):
- * the LIVE /models list (Anthropic-shaped: display_name,
- * max_input_tokens, max_tokens, capabilities), the models.dev
- * REGISTRY, the preset's static list and the cached map (offline
- * fallbacks). Message-verified presets (third-party /messages
- * routes) have no list route: static + registry + cache only.
+ * Live Anthropic-shaped /models IDs and metadata take precedence;
+ * static and cached metadata fill only missing fields for those IDs.
+ * On failure, registry/static/cache provide the fallback.
+ * Message-verified presets have no list route: static + registry +
+ * cache only.
  */
 async function models() {
   const settings = this.aiio?.settings ?? {};
@@ -593,8 +551,9 @@ async function models() {
       }));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const body = await response.json();
+      if (!Array.isArray(body.data)) throw new Error("malformed model catalog");
       live = {};
-      for (const model of body.data ?? []) {
+      for (const model of body.data) {
         if (typeof model?.id !== "string" || model.id === "") continue;
         live[model.id] = mapLiveModel(model);
       }
@@ -602,7 +561,7 @@ async function models() {
       live = null; // offline: registry + static + cached below
     }
   }
-  const registry = await registryModels(this);
+  const registry = live === null ? await registryModels(this) : {};
   const staticModels = endpointPreset(this)?.models ?? {};
   const cached = settings.models && typeof settings.models === "object" && !Array.isArray(settings.models)
     ? settings.models
@@ -656,7 +615,6 @@ async function testConnection() {
       body: JSON.stringify({
         model,
         max_tokens: 1,
-        ...(systemPrompt(settings.auth) ? { system: systemPrompt(settings.auth) } : {}),
         messages: [{ role: "user", content: "hi" }],
       }),
     });
@@ -752,16 +710,16 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
   if (Object.keys(quotas).length > 0) aiio?.setPlanUsage?.({ quotas });
 }
 
-/** Persist a token supplied by a login wizard: an OAuth access token
- *  (sk-ant-oat…) is stored as a bearer, anything else as an API key. */
+/** Persist an Anthropic API key supplied by a login wizard. */
 async function login(input = {}) {
   const token = input.token ?? this.aiio?.settings?.auth?.token;
   if (!token) {
-    const error = new Error("Anthropic login requires an API key (or an OAuth access token)");
+    const error = new Error("Anthropic login requires an API key");
     error.kind = "auth";
     throw error;
   }
-  const auth = { type: /^sk-ant-oat/.test(token) ? "oauth" : "api_key", token };
+  if (/^sk-ant-oat/.test(token)) throw new Error("Claude subscription OAuth tokens require the claude provider");
+  const auth = { type: "api_key", token };
   this.aiio?.authSet?.({ auth }, input);
   return auth;
 }
@@ -792,16 +750,22 @@ function anthropicHosted(aiio) {
   return String(aiio?.url ?? "").replace(/\/$/, "") === ANTHROPIC_URL;
 }
 
+/** API-key/bearer wire for server-tool requests: plain auth headers,
+ *  body unchanged. Dialects with other auth (claude OAuth) pass their own. */
+function apiWire(aiio, body) {
+  return [{ "content-type": "application/json", ...authHeaders(aiio?.settings?.auth) }, body];
+}
+
 /**
  * One server-tool request against POST {baseUrl}/messages: a single
  * tight user prompt plus the documented tool block, non-streaming.
- * The returned Markdown is the concatenation of the response's text
- * content blocks. A rejected request (4xx/5xx) THROWS with the status
- * — the Agent wraps it as a failure and dispatch falls through; the
- * result is never fabricated.
+ * `wire(aiio, body) -> [headers, body]` applies the dialect's auth and
+ * required framing. The returned Markdown is the concatenation of the
+ * response's text content blocks. A rejected request (4xx/5xx) THROWS
+ * with the status — the Agent wraps it as a failure and dispatch falls
+ * through; the result is never fabricated.
  */
-async function serverToolRequest(aiio, tool, prompt, { signal, deadline }) {
-  const settings = aiio?.settings ?? {};
+async function serverToolRequest(aiio, wire, tool, prompt, { signal, deadline }) {
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
   if (signal?.aborted) onAbort();
@@ -814,16 +778,14 @@ async function serverToolRequest(aiio, tool, prompt, { signal, deadline }) {
     timer?.unref?.();
   }
   try {
+    const [headers, payload] = wire(aiio, {
+      model: aiio.currentModel,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+      tools: [{ ...tool }],
+    });
     const response = await fetch(`${String(aiio.url).replace(/\/$/, "")}/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(settings.auth) },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: aiio.currentModel,
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-        tools: [tool],
-      }),
+      method: "POST", headers, signal: controller.signal, body: JSON.stringify(payload),
     });
     if (!response.ok) throw await statusError(response);
     const body = await response.json();
@@ -845,6 +807,35 @@ const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_u
  *  name "web_fetch", max_uses caps the server's fetches. */
 const WEB_FETCH_TOOL = { type: "web_fetch_20250910", name: "web_fetch", max_uses: 1 };
 
+/**
+ * The provider-side `web-search` / `web-fetch` capabilities (the path
+ * tools/web.js takes first via Agent.callProviderCapability), bound to a
+ * dialect's server-tool wire. Undefined = unsupported → MCP/package.
+ * @param {(aiio: object, body: object) => [object, object]} [wire]
+ */
+export function webCapabilities(wire = apiWire) {
+  return {
+    "web-search": async function ({ aiio, args, signal, deadline }) {
+      if (providerWebDisabled(aiio)) return undefined;
+      if (!anthropicHosted(aiio)) return undefined;
+      const query = String(args?.query ?? "").trim();
+      if (query === "") return undefined;
+      return serverToolRequest(aiio, wire, WEB_SEARCH_TOOL,
+        `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet from the page.`,
+        { signal, deadline });
+    },
+    "web-fetch": async function ({ aiio, args, signal, deadline }) {
+      if (providerWebDisabled(aiio)) return undefined;
+      if (!anthropicHosted(aiio)) return undefined;
+      const url = String(args?.url ?? "").trim();
+      if (url === "") return undefined;
+      return serverToolRequest(aiio, wire, WEB_FETCH_TOOL,
+        `Fetch ${url} and answer with the page's main content as clean Markdown, preserving its headings and links.`,
+        { signal, deadline });
+    },
+  };
+}
+
 /** Anthropic Messages protocol. */
 export default class AnthropicProvider {
   static provider = {
@@ -853,29 +844,7 @@ export default class AnthropicProvider {
       tools: true,
       thinking: true,
       streaming: true,
-      "web-search": async function ({ aiio, args, signal, deadline }) {
-        if (providerWebDisabled(aiio)) return undefined;
-        // server tools are NOT available on a Claude subscription
-        // (OAuth) token — fall through honestly instead of sending a
-        // request the endpoint must reject
-        if (isSubscription(aiio?.settings?.auth)) return undefined;
-        if (!anthropicHosted(aiio)) return undefined;
-        const query = String(args?.query ?? "").trim();
-        if (query === "") return undefined;
-        return serverToolRequest(aiio, WEB_SEARCH_TOOL,
-          `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet from the page.`,
-          { signal, deadline });
-      },
-      "web-fetch": async function ({ aiio, args, signal, deadline }) {
-        if (providerWebDisabled(aiio)) return undefined;
-        if (isSubscription(aiio?.settings?.auth)) return undefined;
-        if (!anthropicHosted(aiio)) return undefined;
-        const url = String(args?.url ?? "").trim();
-        if (url === "") return undefined;
-        return serverToolRequest(aiio, WEB_FETCH_TOOL,
-          `Fetch ${url} and answer with the page's main content as clean Markdown, preserving its headings and links.`,
-          { signal, deadline });
-      },
+      ...webCapabilities(),
     },
   };
 
@@ -892,19 +861,6 @@ export default class AnthropicProvider {
       url: ANTHROPIC_URL,
       registry: { url: REGISTRY_URL, provider: "anthropic" },
       models: ANTHROPIC_MODELS,
-    },
-    {
-      // the SUBSCRIPTION sign-in: same API, a browser-issued bearer.
-      // Verified by a 1-token message (the path real requests take —
-      // identity line included); the catalog is the static list +
-      // registry (no key-style model listing is assumed)
-      name: "anthropic-claude",
-      label: "Claude Pro/Max (subscription)",
-      url: ANTHROPIC_URL,
-      verify: "messages",
-      registry: { url: REGISTRY_URL, provider: "anthropic" },
-      models: ANTHROPIC_MODELS,
-      oauth: CLAUDE_OAUTH,
     },
     {
       name: "deepseek-anthropic",

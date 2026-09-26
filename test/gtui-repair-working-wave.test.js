@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createTheme } from "../lib/gtui/theme.js";
+import { createTheme } from "../lib/app/gtui/theme.js";
 
 test("wave uses three configured crest colors over normal bold text", () => {
   const theme = createTheme({ working: { bold: true, animation: { type: "wave", period: 1400, colors: [220, 208, 220] } } });

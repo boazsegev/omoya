@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import AI from "../../lib/index_app.js";
 import { formatHelp } from "./help.js";
 
-const { CLI, TUI, NAMES } = AI;
+const { CLI, App, NAMES } = AI;
 // The invoked name: argv[1] holds the wrapper's file name; a bare
 // `bun bin/scripts/app` has none, so the app's own command — the bare
 // prefix — fills in (never a stale literal).
@@ -73,13 +73,13 @@ async function main() {
   }
   if (await administrativeCommand(args)) return;
   if (args.serve) {
-    const { serve } = (await import("../../lib/web.js")).default;
+    const { serve } = App.Web;
     const web = await serve({ ...launchState(args), host: args.host });
     process.stderr.write(`web: ${web.url}\n`);
     await web.done;
     return;
   }
-  const result = await TUI.run(launchState(args));
+  const result = await App.TUI.run(launchState(args));
   if (result.session) process.stderr.write(`session: ${result.session.id} (resume with: ${program} --resume ${result.session.id})\n`);
   else process.stderr.write("session: anonymous (not persisted)\n");
   process.exitCode = result.code;

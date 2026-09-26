@@ -94,7 +94,7 @@ describe("library namespaces", () => {
     expect(API.CLI).toBeUndefined();
     expect(API.Markdown).toBeUndefined();
     expect(typeof API.Jobs.dispatchJobs).toBe("function");
-    const core = Bun.spawnSync([process.execPath, "-e", 'import AI from "./lib/index.js"; process.stdout.write(String(AI.TUI))'], { cwd: process.cwd() });
+    const core = Bun.spawnSync([process.execPath, "-e", 'import AI from "./lib/index.js"; process.stdout.write(String(AI.App))'], { cwd: process.cwd() });
     expect(core.exitCode).toBe(0);
     expect(core.stdout.toString()).toBe("undefined");
     // ONE export — the default; importing names it (or `import * as`).
@@ -112,16 +112,16 @@ describe("library namespaces", () => {
     expect(FullAPI.Env).toBe(API.Env);
     expect(FullAPI.Agent).toBe(API.Agent);
     expect(FullAPI.NAMES).toBe(NAMES);
-    expect(API.TUI).toBeUndefined();
+    expect(API.App).toBeUndefined();
     expect(typeof FullAPI.CLI.parseFlags).toBe("function");
-    expect(typeof FullAPI.Markdown.renderMarkdown).toBe("function");
+    expect(typeof FullAPI.App.Markdown.renderMarkdown).toBe("function");
     expect(FullAPI.Jobs).toBe(API.Jobs);
-    expect(typeof FullAPI.TUI.createRepl).toBe("function");
-    // GTUI rides on the TUI namespace and as a top-level shortcut — one object.
-    expect(FullAPI.TUI.GTUI).toBeDefined();
-    expect(FullAPI.GTUI).toBe(FullAPI.TUI.GTUI);
-    expect(typeof FullAPI.GTUI.host.memory).toBe("function");
-    expect(FullAPI.GTUI.view).toBeDefined();
+    expect(typeof FullAPI.App.TUI.createRepl).toBe("function");
+    expect(typeof FullAPI.App.Web.serve).toBe("function");
+    // Presentation lives under App only — no top-level aliases.
+    for (const name of ["Markdown", "TUI", "GTUI", "Web"]) expect(FullAPI[name]).toBeUndefined();
+    expect(typeof FullAPI.App.GTUI.host.memory).toBe("function");
+    expect(FullAPI.App.GTUI.view).toBeDefined();
   });
 });
 
@@ -216,7 +216,7 @@ describe("library binding: engine over callbacks only", () => {
   });
 
   test("zero-dependency constraint: engine imports are node:/bun:/relative only", () => {
-    // One approved, narrow exception: lib/markdown/marked.js's guarded
+    // One approved, narrow exception: lib/app/markdown/marked.js's guarded
     // dynamic import("marked") — optional at runtime, never a declared
     // dependency (see README.md and test/cli-nodeps.test.js).
     const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -226,7 +226,7 @@ describe("library binding: engine over callbacks only", () => {
       const imports = transpiler.scan(readFs(`./${file}`, "utf8")).imports
         .map((entry) => entry.path)
         .filter((s) => !s.startsWith(".") && !s.startsWith("node:") && !s.startsWith("bun"))
-        .filter((s) => !(s === "marked" && file === "lib/markdown/marked.js"));
+        .filter((s) => !(s === "marked" && file === "lib/app/markdown/marked.js"));
       expect(imports, `${file}: external imports ${imports}`).toEqual([]);
     }
   });

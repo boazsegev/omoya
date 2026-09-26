@@ -1,9 +1,9 @@
-// test/gtui-widget-dropdown.test.js — proof for lib/gtui/widgets/
+// test/gtui-widget-dropdown.test.js — proof for lib/app/gtui/widgets/
 // dropdown.js: DEAD CODE (see AI-GTUI.md) — a box+list popup anchored
 // to a point, clamped to stay within the drawable area.
 import { describe, expect, test } from "bun:test";
-import { createBuffer } from "../lib/gtui/buffer.js";
-import { dropdown } from "../lib/gtui/widgets/dropdown.js";
+import { createBuffer } from "../lib/app/gtui/buffer.js";
+import { dropdown } from "../lib/app/gtui/widgets/dropdown.js";
 
 describe("dropdown: positioning", () => {
   test("opens at the anchor when there's room on every side", () => {

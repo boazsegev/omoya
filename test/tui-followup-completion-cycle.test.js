@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { initialInput, applyChange, cycleCompletions, acceptCompletion } from "../lib/tui-app/input-controller.js";
+import { initialInput, applyChange, cycleCompletions, acceptCompletion } from "../lib/app/tui/input-controller.js";
 
 const sources = { commands: ["/alpha", "/alpine", "/alps"] };
 

@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { createCompletionSources } from "../lib/tui-app/completion-sources.js";
-import { createApp } from "../lib/tui-app/app.js";
+import { createCompletionSources } from "../lib/app/tui/completion-sources.js";
+import { createApp } from "../lib/app/tui/app.js";
 
 test("filesystem completion never uses synchronous directory IO", async () => {
-  const source = await readFile("lib/tui-app/completion.js", "utf8");
+  const source = await readFile("lib/app/tui/completion.js", "utf8");
   expect(source).not.toMatch(/\breaddirSync\s*\(/);
 });
 

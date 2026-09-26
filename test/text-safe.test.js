@@ -1,6 +1,6 @@
 // test/text-safe.test.js — display sanitization of untrusted tool output.
 import { describe, expect, test } from "bun:test";
-const { sanitizeText, BashSanitizer } = await import(["..", "lib", "markdown.js"].join("/"));
+const { sanitizeText, BashSanitizer } = await import(["..", "lib", "app", "markdown", "index.js"].join("/"));
 
 describe("sanitizeText — escape/control stripping", () => {
   test("passes plain text through", () => {

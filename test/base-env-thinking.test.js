@@ -6,8 +6,8 @@ import {
 } from "../lib/env.js";
 
 describe("thinking vocabulary", () => {
-  test("the visible levels are default/off/low/medium/high/xhigh; a silent model thinks at medium", () => {
-    expect(THINKING_LEVELS).toEqual(["default", "off", "low", "medium", "high", "xhigh"]);
+  test("the normalized levels are none through max; a silent model thinks at high", () => {
+    expect(THINKING_LEVELS).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
     expect(DEFAULT_THINKING).toBe("high");
   });
 });
@@ -21,12 +21,18 @@ describe("resolveEffort", () => {
 
   test("off is none where accepted, else the weakest accepted symbol", () => {
     expect(resolveEffort(false)).toBe("none");
+    expect(resolveEffort("none")).toBe("none");
     expect(resolveEffort("off", { levels: ["none", "low", "medium"] })).toBe("none");
     expect(resolveEffort(false, { levels: ["minimal", "low", "medium", "high"] })).toBe("minimal");
     expect(resolveEffort(false, { levels: ["low", "medium", "high", "xhigh", "max"] })).toBe("low");
   });
 
   test("a level the model lacks maps to its nearest symbol; ties go stronger", () => {
+    expect(resolveEffort("max", { levels: ["low", "medium", "high"] })).toBe("high");
+    expect(resolveEffort("max", { levels: ["none", "minimal", "low", "medium", "high", "ultra"] })).toBe("ultra");
+    expect(resolveEffort("medium", { levels: ["none", "low", "high"] })).toBe("high");
+    expect(resolveEffort("xhigh", { levels: ["low", "medium", "high", "max"] })).toBe("max");
+    expect(resolveEffort("low", { levels: ["none", "minimal", "medium", "high"] })).toBe("minimal");
     expect(resolveEffort("xhigh", { levels: ["low", "medium", "high"] })).toBe("high");
     expect(resolveEffort("medium", { levels: ["low", "high", "max"] })).toBe("high");
     expect(resolveEffort("high", { levels: ["high"] })).toBe("high");

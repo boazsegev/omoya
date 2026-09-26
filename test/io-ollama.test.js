@@ -50,7 +50,9 @@ describe("Ollama thinking control", () => {
     expect(think(undefined)).toBeUndefined();
     expect(think(false)).toBe(false);
     expect(think(true)).toBe(true);
+    expect(think("none")).toBe(false);
     expect(think("low")).toBe("low");
+    expect(think("max")).toBe("high");
     expect(think("xhigh")).toBe("high");
   });
 });
