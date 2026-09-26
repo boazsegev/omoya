@@ -33,6 +33,7 @@
       "url": "string",
     },
   },
+  "read": "unknown",
   "retryBase": "unknown",
   "retryMax": "unknown",
   "skills": "unknown",

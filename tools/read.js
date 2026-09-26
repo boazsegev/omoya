@@ -23,10 +23,15 @@
 import { toolRevision } from "../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp
 
 const timestamp = toolRevision(); // shared tool-registry revision
-const { read, readDescription } = await import(`./read/read.js?now=${timestamp}`);
+const { read, readDescription, readSettingsSchema } = await import(`./read/read.js?now=${timestamp}`);
 
 export { read };
 
 export function toolDescription() {
   return { read: readDescription() };
+}
+
+/** This tool's own contribution to env.defaultsSchema(). */
+export function settingsSchema() {
+  return readSettingsSchema();
 }

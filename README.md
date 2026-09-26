@@ -16,7 +16,7 @@ Filesystem boundaries are enforced by the OS, not by prompt instructions. Every 
 
 **Transparency** — inspect and edit the exact context the model receives, watch every tool call, read the unified diff of every edit.
 
-**Convention over configuration** — auto-detection for local Ollama / LM Studio models, SearXNG (`SEARXNG_URL`), and known endpoints (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) — zero-configuration functionality.
+**Convention over configuration** — auto-detection for local Ollama / LM Studio models, [SearXNG](https://docs.searxng.org/) (`SEARXNG_URL`), and known endpoints (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) — zero-configuration functionality.
 
 ## Try it now
 
@@ -35,7 +35,11 @@ bun add -g omoya                   # installs omoya, and its short form om
 om --model ollama/gpt-oss:20b      # a local Ollama model needs no account at all
 ```
 
-From a source checkout, `bin/` holds the same commands: `git clone https://github.com/boazsegev/omoya.git && cd omoya && bun bin/om --login`.
+From a source checkout, `bin/` holds the same commands:
+
+```sh
+git clone https://github.com/boazsegev/omoya.git && cd omoya && bun bin/om --login
+```
 
 ## The terminal interface
 
@@ -48,6 +52,16 @@ From a source checkout, `bin/` holds the same commands: `git clone https://githu
 - **`/`** — browse commands and reusable prompts; Tab completes commands, arguments, and paths
 
 Multi-line input, large-paste handling, queued follow-ups, mouse-aware overlays, themes, and inline or alternate-screen modes are built in. Run `om --help` for the complete key and command guide.
+
+## The system message is yours
+
+Fresh sessions layer instructions from three `AGENTS.md` files — the harness's own, your user settings folder's, and the working project's — plus `settings.system` and anything you append live. There is no hidden third-party agent CLI between your instructions and the model provider.
+
+Reusable **skills** and **prompts** accumulate across package, user, and project roots (`ai-skills/`, `ai-prompts/`); the `skill` tool loads them into the conversation on demand.
+
+## The project is the unit of memory
+
+What an agent learns belongs to the project folder it learned it in: `ai-settings.json` (`om --init` writes a commented template), `ai-auth-*.json`, `ai-skills/`, `ai-prompts/`, `ai-jobs/`, `AGENTS.md`. None of it is visible from another project; the `ai-` prefix never changes, even if the harness is renamed (`bin/scripts/rename` rewrites every other name in one step). To share a tool, skill, or instruction everywhere, put it in the user settings folder.
 
 ## Providers are plugins
 
@@ -78,7 +92,11 @@ Each agent has a working folder (defaults to `cwd`), **making it the agent's roo
 
 With no sandbox available, safe mode is forced: only read-only tools exist. `--safe` selects the same posture at any time.
 
-Session logs live outside the project tree, so cwd-scoped tools cannot rewrite their own history; tool schemas never carry security metadata; a package-shipped refusal list strips provider API keys from spawned child processes (a settings list you can extend — or disable).
+Further safeguards:
+
+- Session logs live outside the project tree, so cwd-scoped tools cannot rewrite their own history.
+- Tool schemas never carry security metadata.
+- A package-shipped refusal list strips provider API keys from spawned child processes (a settings list you can extend — or disable).
 
 **Note:** the OS sandbox confines writes, not reads — an agent can always find ways to read external data, even though its tools block its ability to alter that data. This allows the agent to analyze more data while limiting its side-effects and its ability to perform malicious actions. See [SECURITY.md](SECURITY.md).
 
@@ -99,7 +117,7 @@ const agent = new Agent({ env, model: "ollama/gpt-oss:20b", safe: true });
 
 ```sh
 echo "Summarize this project" | om-agent --model ollama/gpt-oss:20b
-echo "Hello" | om-io --model anthropic/claude-sonnet-4-6
+echo "Hello" | om-io --model anthropic/claude-sonnet-5
 ```
 
 Both accept structured context as JSON or JSONL (plain input becomes a user message). They stream stable JSONL events, exit distinctly per failure class (2 auth, 3 network, 4 provider, 5 malformed input), and cancel on SIGINT — the partial response is persisted, exit 130.
@@ -112,19 +130,9 @@ om --serve --port 9900
 
 A standalone chat SPA over HTTP and WebSocket, carrying the same Agent/Env events used everywhere else. The server owns the agent; the browser only renders it — closing the tab detaches the view while the agent keeps running. It binds to loopback and checks the WebSocket Origin header. There is no auth token: **reaching the port means owning the agent**, so keep it off shared networks unless you put your own auth in front.
 
-## The system message is yours
-
-Fresh sessions layer instructions from three `AGENTS.md` files — the harness's own, your user settings folder's, and the working project's — plus `settings.system` and anything you append live. There is no hidden third-party agent CLI between your instructions and the model provider.
-
-Reusable **skills** and **prompts** accumulate across package, user, and project roots (`ai-skills/`, `ai-prompts/`); the `skill` tool loads them into the conversation on demand.
-
 ## The web, without an account
 
-**Web search and fetch** need no account: every call routes through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries a configured or auto-detected SearXNG instance first (`SEARXNG_URL`/`SEARXNG_BASE`), then falls back to the aggregate engines (DuckDuckGo and Mojeek by default; `BRAVE_API_KEY` adds Brave).
-
-## The project is the unit of memory
-
-What an agent learns belongs to the project folder it learned it in: `ai-settings.json` (`om --init` writes a commented template), `ai-auth-*.json`, `ai-skills/`, `ai-prompts/`, `ai-jobs/`, `AGENTS.md`. None of it is visible from another project; the `ai-` prefix never changes, even if the harness is renamed (`bin/scripts/rename` rewrites every other name in one step). To share a tool, skill, or instruction everywhere, put it in the user settings folder.
+**Web search and fetch** need no account: every call routes through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries a configured or auto-detected [SearXNG](https://docs.searxng.org/) instance first (`SEARXNG_URL`/`SEARXNG_BASE`), then falls back to the aggregate engines (DuckDuckGo and Mojeek by default; `BRAVE_API_KEY` adds Brave).
 
 ## Sessions and jobs
 
@@ -154,7 +162,16 @@ Configuration is layered — package, then the user settings directory, then env
 | `safe` | Start read-only |
 | `timeout` / `toolTimeout` | Per-request and per-tool-call duration limits |
 
-The context guard caps runaway turns at 90% of the context window. Namespace-derived variables (`OMOYA_SETTINGS_DIR`, `OMOYA_SKILLS_DIR`, `OMOYA_PROMPTS_DIR`, `OMOYA_OS_SANDBOX`) override discovery and sandbox behavior; endpoint detection reads the provider keys listed above; `web-search` reads `SEARXNG_URL`/`SEARXNG_BASE` and `BRAVE_API_KEY`. Command-line tokens apply to one invocation and are never persisted.
+Environment variables:
+
+| variable | effect |
+|---|---|
+| `OMOYA_SETTINGS_DIR`, `OMOYA_SKILLS_DIR`, `OMOYA_PROMPTS_DIR` | Override settings, skill, and prompt discovery |
+| `OMOYA_OS_SANDBOX` | Override sandbox behavior |
+| Provider keys ([listed above](#providers-are-plugins)) | Endpoint auto-detection |
+| `SEARXNG_URL` / `SEARXNG_BASE`, `BRAVE_API_KEY` | `web-search` backends |
+
+The `OMOYA_` prefix is namespace-derived and follows the harness name. The context guard caps runaway turns at 90% of the context window. Command-line tokens apply to one invocation and are never persisted.
 
 ## Development
 

@@ -23,15 +23,17 @@
  * FOLDER, a line range is accepted as an entry/match cap (an initial
  * maxMatches: `startLine:1, endLine:20` lists/searches at most 20);
  * an explicit non-zero maxMatches always wins.
- * Two REFUSAL layers keep searches meaningful. grep is a text-only
+ * Two RELEVANCE layers keep searches meaningful. grep is a text-only
  * operation: a file whose CONTENT sniffs as binary (bytes above 127
  * that decode as neither valid UTF-8 nor valid UTF-16 — never a mime
  * map or an extension) is refused on a direct grep and skipped (with
- * a count) in a folder grep. And known system files (.DS_Store and
- * friends) plus anything matched by a `.ignore` file (gitignore
- * syntax, `.gitignore` itself NOT consulted) are treated as NOT
- * EXISTING: absent from listings, skipped in searches, ENOENT on a
- * direct read.
+ * a count) in a folder grep, unless binary: true explicitly searches
+ * raw bytes. And known system files (.DS_Store and friends) plus
+ * anything matched by a `.ignore` file (gitignore syntax, `.gitignore`
+ * itself NOT consulted) never appear in LISTINGS and never match in
+ * searches — .ignore is a relevance indicator, not an access wall:
+ * a file asked for BY NAME still reads, and a direct search reports
+ * no matches with a hint rather than refusing.
  * Output form is a separate concern from read mode:
  *   - default: UTF-8 text (or a folder listing);
  *   - binary: true: the byte range as BINARY content (a mime-detected
@@ -56,7 +58,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { toolRevision } from "../../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp
 const guardTimestamp = toolRevision();
 const { rejectSymlinkPath, resolveCwdPath } = await import(`../guard/resolve.js?now=${guardTimestamp}`);
-import { grep, grepFolder, DEFAULT_MAX_MATCHES } from "./grep.js";
+import { grep, grepFolder, DEFAULT_MAX_MATCHES, DEFAULT_GREP_FILE_SIZE_LIMIT } from "./grep.js";
 import { matchesGlob } from "./glob.js";
 import { isBinary } from "./binary.js";
 import { ancestorIgnores, isIgnored, isSystemFile, loadIgnore } from "./ignore.js";
@@ -85,6 +87,15 @@ function missingPathHint(error, { cwd, boundary }) {
   return error;
 }
 
+export function readSettingsSchema() {
+  return {
+    read: {
+      default: { grepFileSizeLimit: DEFAULT_GREP_FILE_SIZE_LIMIT },
+      description: "read tool: grepFileSizeLimit caps the file size a folder grep will search, in bytes (bigger files are skipped, counted, and reported; a direct file grep is never capped).",
+    },
+  };
+}
+
 export function readDescription() {
   return {
     // READ-ONLY: published as safe (safe-mode Agents may read files)
@@ -104,7 +115,7 @@ export function readDescription() {
         glob: { type: "string", description: "optional glob filtering file names (for example '*.ts') or relative paths (for example 'src/**/*.ts'); applies to folder listings/searches and verifies a file path matches" },
         ignoreCase: { type: "boolean", description: "case-insensitive pattern matching" },
         maxMatches: { type: "integer", description: `cap on grep matches (default ${DEFAULT_MAX_MATCHES}); on a folder also caps ls/find output (overrides a line range's cap)` },
-        recursive: { type: "boolean", description: "on a folder: include sub-folders — grep descends into them and ls/find output nests their entries" },
+        recursive: { type: "boolean", description: "on a folder: include sub-folders — ls/find output nests the sub-folder's entries and grep descends into the sub-folder itself (an ignored sub-folder is never entered)" },
         info: { type: "boolean", description: "return information about the file/query instead of the content: metadata (type, size, created, modified — for a file, also its WHOLE character and line counts) and how many bytes (or matches/entries) the requested read would return" },
       },
       required: ["path"],
@@ -152,30 +163,38 @@ export async function read({
   const cwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
   const boundary = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
   const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd, boundary }), { cwd: boundary });
-  // Ignored entries behave as if they don't exist: known system files
-  // (.DS_Store and friends) and anything a `.ignore` file covers (the
-  // boundary-relative path keeps the verdict stable for a sub-folder
-  // agent reading through `../`).
-  const boundaryRel = relative(boundary, resolved).split(sep).join("/");
-  let directStat = null;
+  let fileStat;
   try {
-    directStat = await stat(resolved);
+    fileStat = await stat(resolved);
   } catch (error) {
     throw missingPathHint(error, { cwd, boundary });
   }
-  const directRel = directStat.isDirectory() ? `${boundaryRel}/` : boundaryRel;
-  if (isSystemFile(directRel) || isIgnored(await ancestorIgnores(boundary, resolved), directRel)) {
-    const error = new Error(`ENOENT: no such file or directory, stat '${resolved}'`);
-    error.code = "ENOENT";
-    throw missingPathHint(error, { cwd, boundary });
+  let stack = null; // the .ignore stack: loaded lazily, only when a pattern is given
+  const ignores = async () => (stack ??= await ancestorIgnores(boundary, resolved));
+  const boundaryRel = relative(boundary, resolved).split(sep).join("/");
+  // A search of an ignored file or folder FINDS NOTHING, but it never
+  // refuses: the content stays directly readable, the .ignore only
+  // speaks to relevance (a .ignore'd file search hints why; a system
+  // file like .git or .DS_Store simply has no matches).
+  let ignoredFolder = false;
+  if (pattern !== undefined) {
+    if (fileStat.isDirectory()) {
+      const rel = `${boundaryRel}/`;
+      ignoredFolder = isSystemFile(rel) || isIgnored(await ignores(), rel);
+    } else {
+      if (isIgnored(await ignores(), boundaryRel)) {
+        return `grep: no matches for /${pattern}/${ignoreCase ? "i" : ""} in ${path} (the file may be ignored — .ignore marks project-irrelevant files)`;
+      }
+      if (isSystemFile(boundaryRel)) return `grep: no matches for /${pattern}/${ignoreCase ? "i" : ""} in ${path}`;
+    }
   }
-  let fileStat = directStat;
   if (info && base64) throw new Error("Use either info or base64, not both.");
   if (fileStat.isDirectory()) {
     return await folderRead(resolved, {
       path, pattern, glob, ignoreCase, maxMatches, recursive, info,
       binary, base64, startLine, endLine, startChar, endChar,
-      rootHint: subfolderHint({ cwd, boundary }),
+      rootHint: subfolderHint({ cwd, boundary }), ignoredFolder,
+      sizeLimit: grepFileSizeLimit(context?.env?.settings),
     });
   }
   // FILE-specific info always reports the WHOLE file's character and
@@ -188,19 +207,21 @@ export async function read({
 
   const lineRange = startLine !== undefined || endLine !== undefined;
   const charRange = startChar !== undefined || endChar !== undefined;
+  // a PATTERN with binary: true redefines binary: a raw-BYTE grep
+  // (latin1 — one character per byte — so \x89PNG works), not a byte
+  // range; binary without a pattern keeps the byte-range mode
+  const byteGrep = binary && pattern !== undefined;
   // a line range AND a character range is NOT a conflict: the line
   // range selects first, the character range caps the selection
   // ("up to 200 lines, but no more than 4K characters" is a valid ask)
   if (binary && lineRange) {
     throw new Error("Binary reads use startChar/endChar, not startLine/endLine.");
   }
-  if (binary && pattern !== undefined) {
-    throw new Error("Binary reads cannot use pattern. Remove pattern or binary.");
-  }
   // grep is a TEXT operation: sniff the content (never the name or a
-  // mime map — bytes only) and refuse actual binary files up front
-  if (pattern !== undefined && await isBinaryFile(resolved)) {
-    throw new Error("grep applies only to text files; this file looks binary (use binary: true to read its bytes).");
+  // mime map — bytes only) and refuse actual binary files up front,
+  // unless binary: true explicitly asks to search the raw bytes
+  if (pattern !== undefined && !byteGrep && await isBinaryFile(resolved)) {
+    throw new Error("grep applies only to text files; this file looks binary (use binary: true to search its bytes).");
   }
   if (glob !== undefined && !matchesGlob(relative(cwd, resolved), glob)) {
     throw new Error(`The file does not match glob "${glob}".`);
@@ -208,7 +229,7 @@ export async function read({
 
   /* ------------------------------------------------ binary byte range */
 
-  if (binary) {
+  if (binary && !byteGrep) {
     const buf = await readFile(resolved);
     const s = intArg(startChar ?? 0, "startChar", 0);
     const e = intArg(endChar ?? buf.length, "endChar", 0);
@@ -229,7 +250,7 @@ export async function read({
 
   /* ------------------------------------------------------ text modes */
 
-  let text = await readFile(resolved, "utf8");
+  let text = await readFile(resolved, byteGrep ? "latin1" : "utf8");
   // only counted when actually needed (info:true) — a plain read of a
   // huge file never pays for a full code-point scan it doesn't ask for
   if (info) fullTextCounts = { characters: [...text].length, lines: text.split("\n").length };
@@ -299,7 +320,7 @@ async function isBinaryFile(abs) {
 
 /** ls/find listing or grep over a folder's entries. */
 async function folderRead(resolved, options) {
-  const { path, pattern, glob, recursive, info } = options;
+  const { path, pattern, glob, recursive, info, ignoreCase, binary } = options;
   // LENIENCY (simple models stack guards): a line range on a folder
   // is accepted as an entry/match CAP — `startLine:1, endLine:20`
   // means "at most 20 entries/matches" (an initial maxMatches; an
@@ -323,9 +344,12 @@ async function folderRead(resolved, options) {
     ? intArg(options.maxMatches, "maxMatches", 1) : undefined;
   const cap = explicit ?? lineCap; // the explicit maxMatches overrides the line range's cap
   const shown = path === "" || path === "." ? "." : path.replace(/\/+$/, "");
-  const entries = await walk(resolved, "", recursive, []);
+  // A plain listing never pays for content sniffs: the walk opens
+  // files only when a search will actually need the binary verdict.
+  const sniff = pattern !== undefined;
+  const entries = await walk(resolved, "", recursive, [], await loadIgnore(resolved, ""), sniff);
   const folderStat = await stat(resolved);
-  const filtered = glob === undefined ? entries : entries.filter((e) => !e.dir && matchesGlob(e.rel, glob));
+  let filtered = glob === undefined ? entries : entries.filter((e) => !e.dir && matchesGlob(e.rel, glob));
   if (pattern === undefined) {
     const suffix = `${recursive ? " (recursive)" : ""}${glob === undefined ? "" : ` (glob: ${glob})`}`;
     const capped = cap !== undefined && filtered.length > cap;
@@ -353,8 +377,20 @@ async function folderRead(resolved, options) {
     const end = intArg(options.endChar, "endChar", 0);
     return [...result].slice(0, end).join("");
   }
+  // A search never descends into an ignored folder: it FINDS NOTHING
+  // instead (a relevance verdict, not a refusal — a direct read of
+  // the folder still lists, and the hint points at the file modes).
+  if (options.ignoredFolder) {
+    const flags = ignoreCase ? "i" : "";
+    const no = `grep: no matches for /${pattern}/${flags} in ${shown}`;
+    if (info) {
+      return infoBlock(shown, folderStat, "folder",
+        `grep would return 0 matches in 0 file(s), ${filtered.length} ignored skipped`);
+    }
+    return `${no} (${filtered.length} ignored skipped)`;
+  }
   const files = filtered.filter((e) => !e.dir);
-  return await grepFolder(files, { shown, ...options, maxMatches: cap, stat: folderStat, infoBlock, binary: (e) => e.binary });
+  return await grepFolder(files, { shown, pattern, ignoreCase, maxMatches: cap, info, stat: folderStat, infoBlock, binary, sizeLimit: options.sizeLimit });
 }
 
 /**
@@ -362,12 +398,13 @@ async function folderRead(resolved, options) {
  * are entered only when recursive. Directories carry a "/" suffix.
  * System files and `.ignore`d entries are skipped as if absent (each
  * visited folder's own `.ignore` joins the stack — nested rules
- * refine deeper paths). File entries are pre-sniffed for a grep:
- * `binary` marks content the folder search will skip.
+ * refine deeper paths). When `sniff` is set (a folder SEARCH), file
+ * entries are pre-sniffed: `binary` marks content the search will
+ * skip. A plain listing never sniffs — open + 64 KiB read per file
+ * is search-only cost.
  * @returns {Array<{rel: string, abs: string, dir: boolean, binary?: boolean}>}
  */
-async function walk(abs, prefix, recursive, ignores) {
-  const own = await loadIgnore(join(abs, prefix || "."), prefix);
+async function walk(abs, prefix, recursive, ignores, own, sniff) {
   const stack = own ? [...ignores, own] : ignores;
   const entries = (await readdir(join(abs, prefix || "."), { withFileTypes: true }))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -383,12 +420,31 @@ async function walk(abs, prefix, recursive, ignores) {
     if (e.isDirectory()) {
       const shown = `${rel}/`;
       if (isSystemFile(rel) || isIgnored(stack, shown)) continue;
+      // the sub-folder's own .ignore loads ONLY when the walk will
+      // actually descend — a plain listing names the folder without
+      // ever opening its .ignore
+      const deeper = recursive ? await loadIgnore(target, rel) : null;
       out.push({ rel: shown, abs: join(abs, rel), dir: true });
-      if (recursive) out.push(...(await walk(abs, rel, true, stack)));
+      if (recursive) out.push(...(await walk(abs, rel, true, stack, deeper, sniff)));
     } else {
       if (isSystemFile(rel) || isIgnored(stack, rel)) continue;
-      out.push({ rel, abs: join(abs, rel), dir: false, binary: await isBinaryFile(target) });
+      out.push({ rel, abs: join(abs, rel), dir: false, binary: sniff ? await isBinaryFile(target) : undefined });
     }
   }
   return out;
+}
+
+/**
+ * The folder-grep file size ceiling from settings
+ * (read.grepFileSizeLimit; default 5 MB). 0 (or a negative value)
+ * disables the cap; a non-number or invalid value falls back to the
+ * default. A DIRECT file grep is never capped — the agent asked for
+ * that specific file.
+ */
+function grepFileSizeLimit(settings) {
+  const raw = settings?.read?.grepFileSizeLimit;
+  if (raw === undefined) return DEFAULT_GREP_FILE_SIZE_LIMIT;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_GREP_FILE_SIZE_LIMIT;
+  if (raw <= 0) return Infinity;
+  return Math.floor(raw);
 }

@@ -1,7 +1,8 @@
 /**
  * website/static/assets/app.js — progressive enhancement for the Omoya site:
- * a client-side search over the static index, and a light/dark/system theme
- * control persisted in localStorage. Vanilla ESM, no dependencies, no
+ * a client-side search over the static index, a light/dark/system theme
+ * control persisted in localStorage, API sidebar scroll-spy, install tabs
+ * with copy buttons, and scroll reveals. Vanilla ESM, no dependencies, no
  * network calls beyond the one same-origin fetch of the search index.
  */
 
@@ -33,6 +34,24 @@ for (const button of themeButtons) {
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (themeChoice === "site") applyTheme("site");
 });
+
+/* ------------------------------------------------------------ header */
+
+/**
+ * Publish the sticky header's bottom edge as --header-h so hash targets,
+ * the sticky API sidebar, and scroll-spy all sit below it. The header wraps
+ * to more rows on narrow screens, so it is measured rather than assumed.
+ */
+const header = document.querySelector(".site-header");
+function headerBottom() {
+  if (!header) return 0;
+  return Math.ceil(header.offsetHeight + (parseFloat(getComputedStyle(header).top) || 0));
+}
+function publishHeaderHeight() {
+  if (header) document.documentElement.style.setProperty("--header-h", `${headerBottom()}px`);
+}
+publishHeaderHeight();
+if (header && "ResizeObserver" in window) new ResizeObserver(publishHeaderHeight).observe(header);
 
 /* ------------------------------------------------------------ search */
 
@@ -136,7 +155,7 @@ scrollToHash("auto"); // initial load with a hash (search follow / deep link)
 /**
  * Highlight the sidebar sub-navigation entry for the symbol currently in
  * view. Each `.api-sections` hash link is paired with its section; an
- * IntersectionObserver tracks visibility and the bottom-most visible entry
+ * IntersectionObserver tracks visibility and the top-most visible entry
  * wins (sections are in document order). Pure enhancement: without JS the
  * sub-navigation is simply a static list of working hash links.
  */
@@ -150,7 +169,7 @@ if (spyLinks.length && "IntersectionObserver" in window) {
     let current = null;
     for (const [link, section] of pairs) {
       link.classList.remove("current");
-      if (visible.has(section)) current = link;
+      if (!current && visible.has(section)) current = link;
     }
     // Nothing in view (between sections): keep the last entry above the fold.
     if (!current) {
@@ -159,6 +178,15 @@ if (spyLinks.length && "IntersectionObserver" in window) {
       }
     }
     current?.classList.add("current");
+    // Keep the highlight visible inside the sidebar's own scroll area only
+    // (scrollIntoView would also move the page).
+    const nav = current?.closest(".api-nav");
+    if (nav && nav.scrollHeight > nav.clientHeight) {
+      const top = current.getBoundingClientRect().top - nav.getBoundingClientRect().top;
+      if (top < 0 || top > nav.clientHeight - current.offsetHeight) {
+        nav.scrollTop += top - nav.clientHeight / 3;
+      }
+    }
   };
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
@@ -166,7 +194,7 @@ if (spyLinks.length && "IntersectionObserver" in window) {
       else visible.delete(entry.target);
     }
     highlight();
-  }, { rootMargin: "-5% 0px -70% 0px" });
+  }, { rootMargin: `-${headerBottom()}px 0px -70% 0px` }); // ignore what the sticky header covers
   for (const [, section] of pairs) observer.observe(section);
   highlight();
 }
@@ -219,3 +247,69 @@ document.addEventListener("keydown", (event) => {
     input.focus();
   }
 });
+
+/* ------------------------------------------------ install tabs + copy */
+
+/**
+ * Install boxes: tab buttons switch panels (arrow keys move between tabs);
+ * Copy writes the panel's plain command text. The markup stacks every panel
+ * and hides the controls until html.js is set, so nothing depends on this.
+ */
+for (const box of document.querySelectorAll("[data-tabs]")) {
+  const tabs = [...box.querySelectorAll("[data-tab]")];
+  const panels = [...box.querySelectorAll("[data-panel]")];
+  box.querySelector(".install-tabs")?.setAttribute("role", "tablist");
+  const select = (tab, focus = false) => {
+    for (const t of tabs) {
+      const on = t === tab;
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+    }
+    for (const p of panels) p.toggleAttribute("data-inactive", p.dataset.panel !== tab.dataset.tab);
+    if (focus) tab.focus();
+  };
+  for (const [i, tab] of tabs.entries()) {
+    tab.setAttribute("role", "tab");
+    tab.addEventListener("click", () => select(tab));
+    tab.addEventListener("keydown", (event) => {
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+      if (step) select(tabs[(i + step + tabs.length) % tabs.length], true);
+    });
+  }
+  for (const p of panels) p.setAttribute("role", "tabpanel");
+  select(tabs.find((t) => t.getAttribute("aria-selected") === "true") ?? tabs[0]);
+}
+
+for (const button of document.querySelectorAll("button.copy[data-copy]")) {
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(button.dataset.copy);
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Select ↑";
+    }
+    button.classList.add("copied");
+    setTimeout(() => { button.textContent = "Copy"; button.classList.remove("copied"); }, 1600);
+  });
+}
+
+/* ------------------------------------------------ scroll reveal */
+
+/**
+ * `.reveal` elements rise in once, the first time they enter the viewport.
+ * Without IntersectionObserver, or with reduced motion requested, they are
+ * shown immediately.
+ */
+const reveals = [...document.querySelectorAll(".reveal")];
+if (!("IntersectionObserver" in window) || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  for (const el of reveals) el.classList.add("in");
+} else {
+  const revealer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add("in");
+      revealer.unobserve(entry.target);
+    }
+  }, { rootMargin: "0px 0px -8% 0px" });
+  for (const el of reveals) revealer.observe(el);
+}

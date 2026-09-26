@@ -14,12 +14,14 @@ The build output is `website/build/`. It is excluded from the npm package by the
 
 - `build.js` — clean-first builder: wipes `build/`, renders every page, emits the search index, LLM manifests (`llms.txt`, `llms-full.txt`), `robots.txt`, `sitemap.xml`, and copies `static/`
 - `site.js` / `site.json` — shared site data (canonical origin, title, vanity domains)
-- `lib/home.js` — the landing page body
+- `lib/home.js` — the landing page body (hero, tabbed install box, annotated command terminal, feature sections); every product statement must restate the root README.md (no new claims), and commands shown must be runnable as printed
 - `lib/api.js` — per-module API pages plus architecture/contracts/tools/settings, rendered from `collect()` in `test/api-reference.js`; `buildApiLinks()` indexes every documented API point so `linkApiReferences()` can cross-link whole-identifier `code` mentions (scoped, longest-prefix) to their page anchor
 - `lib/html.js` — escaping and the shared page shell (nav, theme control, search, metadata)
 - `lib/markdown.js` — the small escaping Markdown subset used for docs prose
 - `lib/search.js` — the static client-side search index
-- `static/assets/` — `style.css` (light + dark palettes) and `app.js` (theme control + browser search + hash-anchor re-scroll after layout), copied verbatim
+- `static/assets/` — `style.css` (plain light palette; warm night-sky dark palette with a seeded starfield from `ai-tools/gen-stars.js`; serif prose, mono chrome, system fonts only) and `app.js` (theme control, browser search, hash-anchor re-scroll, sidebar scroll-spy, install tabs + copy, scroll reveals), copied verbatim. Enhancement-only styles are scoped to `html.js` (set by the inline bootstrap), so script-less readers see all content.
+
+Preview locally: `bun ai-tools/serve-site.js` → http://localhost:4173/
 
 Verify a build with `bun ai-tools/ai-website-check.js` (static checks: search anchors resolve, search re-scrolls to the hash, API cross-links are emitted, builtins never link).
 

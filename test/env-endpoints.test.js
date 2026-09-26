@@ -406,6 +406,100 @@ describe("Env.removeEndpoint (logout)", () => {
     expect(existsSync(join(dir, "auth-temporary.json"))).toBe(false);
   });
 
+  test("detection removes a stale persisted record of a dynamic endpoint", async () => {
+    // a build that persisted environment-detected endpoints left
+    // auth-openai.json behind: its self-contained record would
+    // resurrect the endpoint after OPENAI_API_KEY is removed
+    writeFileSync(join(dir, "auth-openai.json"), JSON.stringify({
+      openai: { provider: "openai", url: "https://api.openai.com/v1", auth: { type: "api_key", token: "sk-stale" } },
+    }));
+    const env = new Env({ dir, cwd: dir });
+    env.registerProvider("openai", OpenAIPlugin);
+    expect(env.endpoint("openai")?.url).toBe("https://api.openai.com/v1"); // auto-cataloged from the file
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-stale"; // unchanged since the buggy build persisted it
+    try {
+      const added = await env.detectEndpoints();
+      expect(added).not.toContain("openai"); // the stale record kept the slot
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+    expect(existsSync(join(dir, "auth-openai.json"))).toBe(false); // cleaned
+    expect(env.isDynamic("openai")).toBe(true);
+    expect(env.endpointSettings("openai").auth.token).toBe("sk-stale"); // the environment re-derives it
+  });
+
+  test("a persisted record that DIFFERS from the environment is an explicit login — never claimed", async () => {
+    writeFileSync(join(dir, "auth-openai.json"), JSON.stringify({
+      openai: { provider: "openai", url: "https://api.openai.com/v1", auth: { type: "api_key", token: "sk-mine" } },
+    }));
+    const env = new Env({ dir, cwd: dir });
+    env.registerProvider("openai", OpenAIPlugin);
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-ambient";
+    try {
+      const added = await env.detectEndpoints();
+      expect(added).not.toContain("openai"); // the explicit record keeps the slot
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+    expect(existsSync(join(dir, "auth-openai.json"))).toBe(true); // untouched
+    expect(env.isDynamic("openai")).toBe(false);
+    expect(env.endpointSettings("openai").auth.token).toBe("sk-mine"); // the user's token wins
+  });
+
+  test("a dynamic endpoint drops out of the live map when the environment key is removed", async () => {
+    const env = new Env({ dir, cwd: dir });
+    env.registerProvider("openai", OpenAIPlugin);
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-ambient";
+    try {
+      await env.detectEndpoints();
+      expect(env.isDynamic("openai")).toBe(true);
+      delete process.env.OPENAI_API_KEY;
+      const added = await env.detectEndpoints(); // a fresh probe without the key
+      expect(added).not.toContain("openai");
+      expect(env.endpoint("openai")).toBeUndefined();
+      expect(env._settings.openai).toBeUndefined(); // no in-memory auth left behind
+      expect(existsSync(join(dir, "auth-openai.json"))).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  test("authSet on a dynamic endpoint merges in memory only — no auth file ever", async () => {
+    const env = new Env({ dir, cwd: dir });
+    env.registerProvider("openai", OpenAIPlugin);
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-ambient";
+    try {
+      await env.detectEndpoints();
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+    const file = join(dir, "auth-openai.json");
+    expect(env.isDynamic("openai")).toBe(true);
+    expect(existsSync(file)).toBe(false);
+    // providers call authSet blindly: a model-catalog refresh and a
+    // credential update on an env-key endpoint must stay memory-only
+    env.authSet("openai", { models: { gpt: null }, modelsProbedAt: 1 });
+    env.authSet("openai", { auth: { token: "sk-rotated" } });
+    expect(env.endpointSettings("openai").models.gpt).toBeNull();
+    expect(env.endpointSettings("openai").auth.token).toBe("sk-rotated");
+    expect(existsSync(file)).toBe(false);
+    // a write batch must not turn the update into a file either
+    await env.batch(() => env.authSet("openai", { models: { gpt2: null } }));
+    expect(existsSync(file)).toBe(false);
+    // saveEndpoint promotes the endpoint out of dynamic: auth persists then
+    env.saveEndpoint("openai", { provider: "openai", url: "https://api.openai.com/v1" });
+    expect(env.isDynamic("openai")).toBe(false);
+    expect(existsSync(file)).toBe(true);
+  });
+
   test("a dynamic (environment-detected) endpoint: memory-only removal, no files touched", async () => {
     const env = new Env({ dir, cwd: dir });
     env.registerProvider("openai", OpenAIPlugin);

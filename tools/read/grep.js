@@ -10,13 +10,16 @@
  * (first–last line the match spans) rather than a single line: the
  * report prints every line a match touches, and the range structure
  * is where future context (N lines before/after) attaches. Overlaps
- * merge, so one line is never printed twice.
+ * merge, so one line is never printed twice. With binary: true the
+ * same matching runs over RAW BYTES (latin1: one character per byte)
+ * — a byte pattern like \x89PNG works on a binary file.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat as statFile } from "node:fs/promises";
 import { intArg } from "./util.js";
 
 export const DEFAULT_MAX_MATCHES = 100;
+export const DEFAULT_GREP_FILE_SIZE_LIMIT = 5 * 1024 * 1024;
 
 /** Compile the user pattern; a bad pattern is an ordinary error. */
 function compile(pattern, ignoreCase) {
@@ -111,9 +114,12 @@ export function grep(text, { pattern, ignoreCase, maxMatches, path, lines, lineO
 
 /**
  * grep-like search over every file of a folder listing. Binary files
- * (content-sniffed by the walk, never by name) are skipped — grep is
- * a text operation — and unreadable files never sink a folder search
- * (both counted and reported).
+ * (content-sniffed by the walk, never by name) are skipped unless
+ * `binary: true` explicitly includes them — grep is a text operation
+ * — and unreadable files never sink a folder search (every skip is
+ * counted and reported). Files bigger than `sizeLimit` bytes are
+ * skipped too (the setting read.grepFileSizeLimit; default 5 MB — a
+ * folder search stays a RELEVANCE query, not a disk scan).
  * @param {Array<{rel: string, abs: string, binary?: boolean}>} files
  * @param {Object} options
  * @param {string} options.shown - the folder path as shown
@@ -121,24 +127,32 @@ export function grep(text, { pattern, ignoreCase, maxMatches, path, lines, lineO
  * @param {boolean} [options.ignoreCase]
  * @param {number} [options.maxMatches]
  * @param {boolean} [options.info] - return the would-return summary
+ * @param {boolean} [options.binary] - include binary files in the search
+ * @param {number} [options.sizeLimit] - skip files bigger than this
  * @param {Object} [options.stat] - folder stat (info:true)
  * @param {(path: string, stat: Object, kind: string, query: string) => string} options.infoBlock
  * @returns {string}
  */
-export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches, info, stat, infoBlock }) {
+export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches, info, binary = false, sizeLimit, stat, infoBlock }) {
   compile(pattern, ignoreCase);
   const cap = intArg(maxMatches ?? DEFAULT_MAX_MATCHES, "maxMatches", 1);
   const flags = ignoreCase ? "i" : "";
   const found = [];
   let total = 0;
   let unreadable = 0;
-  let binary = 0;
+  let binarySkipped = 0;
+  let oversized = 0;
   const matchFiles = new Set();
   for (const file of files) {
-    if (file.binary) { binary++; continue; }
+    if (file.binary && !binary) { binarySkipped++; continue; }
+    if (sizeLimit !== undefined && sizeLimit !== Infinity) {
+      let size;
+      try { size = (await statFile(file.abs)).size; } catch { unreadable++; continue; }
+      if (size > sizeLimit) { oversized++; continue; }
+    }
     let text;
     try {
-      text = await readFile(file.abs, "utf8");
+      text = await readFile(file.abs, binary ? "latin1" : "utf8");
     } catch {
       unreadable++;
       continue;
@@ -158,7 +172,8 @@ export async function grepFolder(files, { shown, pattern, ignoreCase, maxMatches
     }
   }
   const parts = [];
-  if (binary > 0) parts.push(`${binary} binary skipped`);
+  if (binarySkipped > 0) parts.push(`${binarySkipped} binary skipped`);
+  if (oversized > 0) parts.push(`${oversized} oversized skipped`);
   if (unreadable > 0) parts.push(`${unreadable} unreadable skipped`);
   const skipNote = parts.length > 0 ? `, ${parts.join(", ")}` : "";
   if (info) {

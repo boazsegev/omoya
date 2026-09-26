@@ -2,7 +2,7 @@
 // read-only, cwd-rooted, path-traversal protection (no ".." or
 // absolute-path escape), published by the independent tools/read.js
 // wrapper.
-import { mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { Env } from "../lib/env.js";
 import { read, readDescription } from "../tools/read/read.js";
@@ -361,7 +361,6 @@ describe("read ranges and grep-like search", () => {
   test("conflicting options are ordinary errors", async () => {
     const rel = setup("lines.txt", numbered(5));
     await expect(read({ path: rel, binary: true, startLine: 1 })).rejects.toThrow("Binary reads use startChar/endChar, not startLine/endLine.");
-    await expect(read({ path: rel, binary: true, pattern: "x" })).rejects.toThrow("Binary reads cannot use pattern. Remove pattern or binary.");
     await expect(read({ path: rel, startLine: -1 })).rejects.toThrow(/startLine/);
   });
 
@@ -432,7 +431,15 @@ describe("read grep: binary content is never searched", () => {
     setup();
     writeFileSync(`${ROOT}/data.txt`, PNG); // a TEXT extension cannot launder binary bytes
     await expect(read({ path: rel("data.txt"), pattern: "x" }))
-      .rejects.toThrow("grep applies only to text files; this file looks binary (use binary: true to read its bytes).");
+      .rejects.toThrow("grep applies only to text files; this file looks binary (use binary: true to search its bytes).");
+  });
+
+  test("binary: true opts a direct grep into searching RAW BYTES", async () => {
+    setup();
+    writeFileSync(`${ROOT}/data.bin`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a, 0xff, 0xfe]));
+    // latin1: one character per byte — the whole 7-byte file is one line
+    expect(await read({ path: rel("data.bin"), pattern: "PNG", binary: true }))
+      .toBe(`grep ${rel("data.bin")} /PNG/ (1):\n1: \x89PNG`);
   });
 
   test("UTF-8 and UTF-16 text with bytes above 127 is NOT binary", async () => {
@@ -469,7 +476,7 @@ describe("read grep: binary content is never searched", () => {
   });
 });
 
-describe("read: system files and .ignore behave as if absent", () => {
+describe("read: system files and .ignore mark project-irrelevant content", () => {
   const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
   const setup = () => {
     mkdirSync(`${ROOT}/sub/deep`, { recursive: true });
@@ -478,18 +485,19 @@ describe("read: system files and .ignore behave as if absent", () => {
     writeFileSync(`${ROOT}/sub/deep/d.txt`, "apple deep");
   };
 
-  test("known system files vanish from listings, searches, and direct reads", async () => {
+  test("known system files vanish from listings and searches but still READ by name", async () => {
     setup();
     writeFileSync(`${ROOT}/.DS_Store`, "junk apple");
     writeFileSync(`${ROOT}/sub/Thumbs.db`, "junk apple");
     expect(await read({ path: rel("."), recursive: true })).not.toContain("DS_Store");
     expect(await read({ path: rel("."), recursive: true })).not.toContain("Thumbs");
     expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("DS_Store");
-    await expect(read({ path: rel(".DS_Store") })).rejects.toThrow(/ENOENT/);
-    await expect(read({ path: rel("sub/Thumbs.db") })).rejects.toThrow(/ENOENT/);
+    // relevance, not an access wall: a direct read answers
+    expect(await read({ path: rel(".DS_Store") })).toBe("junk apple");
+    expect(await read({ path: rel("sub/Thumbs.db"), info: true })).toContain("type: file");
   });
 
-  test(".git folders never exist: not listed, not searched, not readable", async () => {
+  test(".git folders never list or match — but a named file still reads", async () => {
     setup();
     mkdirSync(`${ROOT}/.git/objects`, { recursive: true });
     writeFileSync(`${ROOT}/.git/config`, "apple git internals");
@@ -497,12 +505,17 @@ describe("read: system files and .ignore behave as if absent", () => {
     writeFileSync(`${ROOT}/sub/.git/config`, "apple nested git");
     expect(await read({ path: rel("."), recursive: true })).not.toContain(".git");
     expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("git");
-    await expect(read({ path: rel(".git") })).rejects.toThrow(/ENOENT/);
-    await expect(read({ path: rel(".git/config") })).rejects.toThrow(/ENOENT/);
-    await expect(read({ path: rel("sub/.git/config") })).rejects.toThrow(/ENOENT/);
+    // a search of a .git path itself finds nothing (system content is never searched)
+    expect(await read({ path: rel(".git"), pattern: "apple" }))
+      .toBe(`grep: no matches for /apple/ in ${rel(".git")} (2 ignored skipped)`);
+    expect(await read({ path: rel(".git/config"), pattern: "apple" }))
+      .toBe(`grep: no matches for /apple/ in ${rel(".git/config")}`);
+    // but the content is never REFUSED
+    expect(await read({ path: rel(".git/config") })).toBe("apple git internals");
+    expect(await read({ path: rel("sub/.git/config") })).toBe("apple nested git");
   });
 
-  test("a .ignore file hides matching files and folders (gitignore-like syntax)", async () => {
+  test("a .ignore file hides matching files and folders from listings and searches", async () => {
     setup();
     writeFileSync(`${ROOT}/.ignore`, "# comment\nsecret.txt\n/deep-root.txt\n");
     writeFileSync(`${ROOT}/secret.txt`, "apple secret");
@@ -516,8 +529,32 @@ describe("read: system files and .ignore behave as if absent", () => {
     const found = await read({ path: rel("."), pattern: "apple", recursive: true });
     expect(found).not.toContain("secret.txt");
     expect(found).toContain("sub/deep-root.txt:1: apple not anchored");
-    await expect(read({ path: rel("secret.txt") })).rejects.toThrow(/ENOENT/);
-    await expect(read({ path: rel("sub/secret.txt") })).rejects.toThrow(/ENOENT/);
+  });
+
+  test("a direct read of an ignored file ANSWERS; a direct search finds nothing with a hint", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.ignore`, "secret.txt\n");
+    writeFileSync(`${ROOT}/secret.txt`, "apple secret");
+    // by name, info and data always answer
+    expect(await read({ path: rel("secret.txt") })).toBe("apple secret");
+    const i = await read({ path: rel("secret.txt"), info: true });
+    expect(i).toContain("type: file");
+    expect(i).toContain("size: 12 bytes");
+    // a search never REFUSES: it finds nothing and hints at irrelevance
+    expect(await read({ path: rel("secret.txt"), pattern: "apple" }))
+      .toBe(`grep: no matches for /apple/ in ${rel("secret.txt")} (the file may be ignored — .ignore marks project-irrelevant files)`);
+  });
+
+  test("a search of an ignored FOLDER finds nothing and reports the skipped entries", async () => {
+    setup();
+    writeFileSync(`${ROOT}/.ignore`, "sub/deep/\n");
+    const out = await read({ path: rel("sub/deep"), pattern: "apple" });
+    expect(out).toBe(`grep: no matches for /apple/ in ${rel("sub/deep")} (1 ignored skipped)`);
+    // a recursive search from ABOVE simply never enters the ignored folder
+    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
+    expect(found).toBe(`grep ${rel(".")} /apple/ (2):\na.txt:1: apple top\nsub/c.txt:1: apple sub`);
+    // a LISTING of the ignored folder itself still answers (relevance, not refusal)
+    expect(await read({ path: rel("sub/deep") })).toContain("d.txt (10 bytes)");
   });
 
   test("a directory pattern hides the whole subtree; a nested .ignore refines", async () => {
@@ -531,7 +568,8 @@ describe("read: system files and .ignore behave as if absent", () => {
     expect(listing).toContain("keep.txt"); // re-included (the negation never excluded it)
     const found = await read({ path: rel("."), pattern: "apple", recursive: true });
     expect(found).toBe(`grep ${rel(".")} /apple/ (2):\na.txt:1: apple top\nsub/keep.txt:1: apple kept`);
-    await expect(read({ path: rel("sub/deep/d.txt") })).rejects.toThrow(/ENOENT/);
+    // nested .ignore rules load on descent — and on a DIRECT search too
+    expect(await read({ path: rel("sub/c.txt"), pattern: "apple" })).toContain("may be ignored");
   });
 
   test(".gitignore is NOT consulted (only .ignore is)", async () => {
@@ -574,6 +612,60 @@ describe("read grep: the global-regexp core", () => {
     expect(rooted).not.toContain("nested");
     const deep = await read({ path: folder, glob: "**/*.txt", recursive: true });
     expect(deep).toContain("sub/nested.txt");
+  });
+});
+
+describe("read grep: the folder-search file size ceiling", () => {
+  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
+  const setup = () => {
+    mkdirSync(ROOT, { recursive: true });
+    writeFileSync(`${ROOT}/small.txt`, "apple small");
+    writeFileSync(`${ROOT}/big.txt`, "apple " + "x".repeat(2048));
+  };
+  const ctx = (limit) => ({ env: { cwd: process.cwd(), settings: { read: { grepFileSizeLimit: limit } } } });
+
+  test("files over the ceiling are skipped and REPORTED; the rest still match", async () => {
+    setup();
+    const out = await read({ path: rel("."), pattern: "apple" }, ctx(1024));
+    expect(out).toBe(`grep ${rel(".")} /apple/ (1, 1 oversized skipped):\nsmall.txt:1: apple small`);
+    expect(await read({ path: rel("."), pattern: "apple", info: true }, ctx(1024)))
+      .toContain("grep would return 1 matches in 1 file(s), 1 oversized skipped");
+    // skip notes compose with the binary count
+    writeFileSync(`${ROOT}/pic.png`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]));
+    const mixed = await read({ path: rel("."), pattern: "apple" }, ctx(1024));
+    expect(mixed).toContain("(1, 1 binary skipped, 1 oversized skipped):");
+  });
+
+  test("a DIRECT file grep is never capped", async () => {
+    setup();
+    const out = await read({ path: rel("big.txt"), pattern: "apple" }, ctx(4));
+    expect(out).toContain("(1):");
+    expect(out).toContain("1: apple ");
+  });
+
+  test("an unset setting defaults to 5 MB; 0 disables the ceiling", async () => {
+    setup();
+    const plain = await read({ path: rel("."), pattern: "apple" }); // 5 MB default: nothing skipped
+    expect(plain).toContain("(2):");
+    expect(plain).not.toContain("oversized");
+    const off = await read({ path: rel("."), pattern: "apple" }, ctx(0));
+    expect(off).toContain("(2):");
+    expect(off).not.toContain("oversized");
+  });
+});
+
+describe("read folders: listings never pay for content sniffs", () => {
+  test("a plain listing of unopenable files still answers (stat-only)", async () => {
+    const dir = `${ROOT}/locked`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(`${dir}/a.txt`, "apple");
+    chmodSync(`${dir}/a.txt`, 0o000);
+    try {
+      const out = await read({ path: `./ai-tmp/read-${process.pid}/locked` });
+      expect(out).toContain("a.txt");
+    } finally {
+      chmodSync(`${dir}/a.txt`, 0o644); // let afterEach clean up
+    }
   });
 });
 

@@ -14,8 +14,10 @@ export function escapeHtml(value) {
 /**
  * The theme bootstrap: runs before first paint so a saved or system dark
  * choice never flashes light. `site` defers to `prefers-color-scheme`.
+ * It also marks <html class="js"> so enhancement-only styles (scroll
+ * reveals, install tabs) never hide content from script-less readers.
  */
-const THEME_BOOTSTRAP = `(function(){try{var t=localStorage.getItem("omoya-theme")||"site";var dark=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.documentElement.dataset.themeChoice=t;}catch(e){}})();`;
+const THEME_BOOTSTRAP = `(function(){document.documentElement.classList.add("js");try{var t=localStorage.getItem("omoya-theme")||"site";var dark=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.documentElement.dataset.themeChoice=t;}catch(e){}})();`;
 
 /** Relative prefix from a page path back to the site root ("/" → "./", "/api/" → parent ref). */
 export function depthPrefix(path) {
@@ -113,8 +115,9 @@ export function page({ title, description, path, body, apiNav, apiSections }) {
   </header>
   ${sidebar ? `<div class="with-sidebar">${sidebar}<main id="content">${body}</main></div>` : `<main id="content">${body}</main>`}
   <footer class="site-footer">
-    <p>Omoya is an MIT-licensed transparent Bun agent harness. Canonical site: <a href="${site.origin}/">${site.domains.canonical}</a> (also reachable via ${site.domains.vanity.map((d) => escapeHtml(d)).join(", ")}).</p>
-    <p>Built from the current source tree. No cookies, no analytics, no external requests.</p>
+    <div class="footer-brand"><a class="brand" href="${rebase(prefix, "/")}">${wordmark("omoya")}</a><p>MIT-licensed transparent Bun agent harness.</p></div>
+    <nav class="footer-links" aria-label="Footer"><a href="${rebase(prefix, "/api/")}">API reference</a><a href="${site.repository}">GitHub</a><a href="https://www.npmjs.com/package/omoya">npm</a><a href="${site.repository}/blob/main/SECURITY.md">Security</a><a href="${site.origin}/llms.txt">llms.txt</a></nav>
+    <p class="footer-note">${site.domains.canonical} · also ${site.domains.vanity.map((d) => escapeHtml(d)).join(", ")} · built from the current source tree · no cookies, no analytics, no external requests.</p>
   </footer>
 </body>
 </html>

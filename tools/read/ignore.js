@@ -1,12 +1,13 @@
 /**
  * tools/read/ignore.js — INTERNAL helper of the `read` tool (never a
  * tool itself: the scan is not recursive). Decides which files the
- * read tool treats as NOT EXISTING at all (they are skipped in folder
- * listings and searches, and a direct read reports ENOENT):
+ * read tool treats as PROJECT-IRRELEVANT: they never appear in folder
+ * LISTINGS and never match in SEARCHES — but a file asked for BY NAME
+ * still reads normally (relevance, never an access wall):
  *
- *   1. well-known system / junk names (an exact basname set, matched
+ *   1. well-known system / junk names (an exact basename set, matched
  *      against EVERY path segment — a `.git` folder anywhere hides
- *      everything under it);
+ *      everything under it from listings and searches);
  *   2. files matched by a `.ignore` file — same rule syntax as
  *      `.gitignore`, but ONLY `.ignore` is consulted (`.gitignore`
  *      stays a git concern: the tool must not hide a tracked file).
@@ -27,10 +28,10 @@ import { readFile } from "node:fs/promises";
 import { matchesGlob } from "./glob.js";
 
 /**
- * Well-known system / junk names — never shown, never searched, never
- * directly readable. `.git` sits here too: repository internals are
- * not project content (a `.ignore` could not even express "any .git
- * folder, anywhere" without a `**` pattern).
+ * Well-known system / junk names — never listed, never searched (a
+ * direct read still answers). `.git` sits here too: repository
+ * internals are not project content (a `.ignore` could not even
+ * express "any .git folder, anywhere" without a `**` pattern).
  */
 export const SYSTEM_FILES = new Set([
   ".git", // repository internals — as if the folder never existed
