@@ -1,4 +1,4 @@
-# API (2026-09-25)
+# API (2026-09-26)
 
 ## Agent
 
@@ -456,7 +456,7 @@ Published endpoints with published cached model ids for the menu; loginRequired 
 
 Published endpoint/model completion candidates (cache-only).
 
-### `async CLI.listModels(env, { access = env.settings?.modelAccess ?? "all" } = {…})`
+### `async CLI.listModels(env, { access = env.settings?.modelAccess ?? "all", timeout } = {…})`
 
 Query each published endpoint and return its currently available public model ids.
 
@@ -1730,6 +1730,18 @@ Validate the complete persisted v2 schema before it is used for admission.
 
 ## Markdown
 
+### `Markdown.BashSanitizer.constructor({ markdown = false } = {…})`
+
+Create one sanitizer for one live tool call.
+
+### `Markdown.BashSanitizer.end()`
+
+Flush held bytes (dropping an unfinished escape) when the call ends.
+
+### `Markdown.BashSanitizer.push(chunk)`
+
+Sanitize the next raw chunk.
+
 ### `Markdown.classifyLine(line, state = {…})`
 
 Classify one complete line of markdown.
@@ -1757,6 +1769,10 @@ Render one fragment of inline markdown through a renderer's inline callbacks, sy
 ### `async Markdown.renderMarkdown(text, renderer = {…})`
 
 Render complete markdown text through a renderer's callbacks, engine-routed (see lexMarkdown).
+
+### `Markdown.sanitizeText(text, { markdown = false, state = null, open = false } = {…})`
+
+Sanitize a COMPLETE untrusted string for display.
 
 ### `Markdown.walkTokens(tokens, renderer = {…})`
 

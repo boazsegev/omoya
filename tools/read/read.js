@@ -82,9 +82,18 @@ function subfolderHint({ cwd, boundary }) {
 
 function missingPathHint(error, { cwd, boundary }) {
   if (error?.code !== "ENOENT") return error;
+  // Policy: relative paths always — never leak the container's absolute
+  // folder layout through a raw fs error ("stat '/abs/work/dir/x'").
+  const shown = relative(cwd, resolvedFrom(error)).split(sep).join("/");
+  error.message = `ENOENT: no such file or directory, stat '${shown === "" ? "." : shown}'`;
   const hint = subfolderHint({ cwd, boundary });
   if (hint) error.message += ` ${hint}`;
   return error;
+}
+
+/** The absolute path a failed fs call was aimed at (errno carries it). */
+function resolvedFrom(error) {
+  return typeof error?.path === "string" ? error.path : process.cwd();
 }
 
 export function readSettingsSchema() {

@@ -56,13 +56,17 @@ const NAV_ITEMS = [
  * @param {Array<{href: string, label: string}>} [options.apiNav] - API sidebar links
  * @param {Array<{hash: string, label: string, children?: Array<{hash: string, label: string}>}>} [options.apiSections]
  *   - in-page sections listed under the current sidebar entry
+ * @param {boolean} [options.rootRelative] - emit root-relative links/assets (for error
+ *   pages served at arbitrary missing URLs, where relative URLs would break)
+ * @param {boolean} [options.noindex] - add a robots noindex directive (error pages)
  */
-export function page({ title, description, path, body, apiNav, apiSections }) {
+export function page({ title, description, path, body, apiNav, apiSections, rootRelative = false, noindex = false }) {
   const canonical = `${site.origin}${path}`;
-  const prefix = depthPrefix(path);
+  const prefix = rootRelative ? "/" : depthPrefix(path);
+  const href = (rootRelativeHref) => rootRelative ? rootRelativeHref : rebase(prefix, rootRelativeHref);
   const nav = NAV_ITEMS.map((item) => {
     const current = item.href === "/" ? path === "/" : path.startsWith(item.href);
-    return `<a href="${rebase(prefix, item.href)}"${current ? ' aria-current="page"' : ""}>${item.label}</a>`;
+    return `<a href="${href(item.href)}"${current ? ' aria-current="page"' : ""}>${item.label}</a>`;
   }).join("");
   const sectionList = (sections) => `<ul class="api-sections">${sections.map((s) =>
     `<li><a href="#${escapeHtml(s.hash)}">${escapeHtml(s.label)}</a>${s.children?.length
@@ -71,7 +75,7 @@ export function page({ title, description, path, body, apiNav, apiSections }) {
   const sidebar = apiNav
     ? `<nav class="api-nav" aria-label="API sections"><h2 class="api-nav-title">API sections</h2><ul>${apiNav.map((item) => {
         const current = item.href === path;
-        return `<li${current ? ' class="current"' : ""}><a href="${rebase(prefix, item.href)}"${current ? ' aria-current="page"' : ""}>${escapeHtml(item.label)}</a>${current && apiSections?.length ? sectionList(apiSections) : ""}</li>`;
+        return `<li${current ? ' class="current"' : ""}><a href="${href(item.href)}"${current ? ' aria-current="page"' : ""}>${escapeHtml(item.label)}</a>${current && apiSections?.length ? sectionList(apiSections) : ""}</li>`;
       }).join("")}</ul></nav>`
     : "";
   return `<!doctype html>
@@ -80,7 +84,7 @@ export function page({ title, description, path, body, apiNav, apiSections }) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="${escapeHtml(description)}">
-  <meta name="color-scheme" content="light dark">
+  ${noindex ? '<meta name="robots" content="noindex">\n  ' : ""}<meta name="color-scheme" content="light dark">
   <meta property="og:title" content="${escapeHtml(title)}">
   <meta property="og:description" content="${escapeHtml(description)}">
   <meta property="og:type" content="website">
@@ -97,7 +101,7 @@ export function page({ title, description, path, body, apiNav, apiSections }) {
 <body>
   <a class="skip-link" href="#content">Skip to content</a>
   <header class="site-header">
-    <a class="brand" href="${rebase(prefix, "/")}">${wordmark("omoya")}</a>
+    <a class="brand" href="${href("/")}">${wordmark("omoya")}</a>
     <nav class="site-nav" aria-label="Site">${nav}<a href="${site.repository}">Repository</a></nav>
     <div class="header-controls">
       <search class="site-search">
@@ -115,8 +119,8 @@ export function page({ title, description, path, body, apiNav, apiSections }) {
   </header>
   ${sidebar ? `<div class="with-sidebar">${sidebar}<main id="content">${body}</main></div>` : `<main id="content">${body}</main>`}
   <footer class="site-footer">
-    <div class="footer-brand"><a class="brand" href="${rebase(prefix, "/")}">${wordmark("omoya")}</a><p>MIT-licensed transparent Bun agent harness.</p></div>
-    <nav class="footer-links" aria-label="Footer"><a href="${rebase(prefix, "/api/")}">API reference</a><a href="${site.repository}">GitHub</a><a href="https://www.npmjs.com/package/omoya">npm</a><a href="${site.repository}/blob/main/SECURITY.md">Security</a><a href="${site.origin}/llms.txt">llms.txt</a></nav>
+    <div class="footer-brand"><a class="brand" href="${href("/")}">${wordmark("omoya")}</a><p>MIT-licensed transparent Bun agent harness.</p></div>
+    <nav class="footer-links" aria-label="Footer"><a href="${href("/api/")}">API reference</a><a href="${site.repository}">GitHub</a><a href="https://www.npmjs.com/package/omoya">npm</a><a href="${site.repository}/blob/main/SECURITY.md">Security</a><a href="${site.origin}/llms.txt">llms.txt</a></nav>
     <p class="footer-note">${site.domains.canonical} · also ${site.domains.vanity.map((d) => escapeHtml(d)).join(", ")} · built from the current source tree · no cookies, no analytics, no external requests.</p>
   </footer>
 </body>

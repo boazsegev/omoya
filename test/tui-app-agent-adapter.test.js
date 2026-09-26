@@ -307,6 +307,48 @@ describe("agent adapter: the question bridge", () => {
     await running;
   });
 
+  test("a REAL tool timeout boundary closes the window and a late answer is inert", async () => {
+    // End-to-end: the Agent's tool-timeout boundary (not a manual
+    // bridge.timeout() call) must dismiss the questionnaire and refuse
+    // the pending ask — a late menu answer can never resume the
+    // timed-out tool call.
+    const env = await testEnv();
+    await env.loadTools({ dirs: ["./tools"] });
+    const io = scriptedIO([
+      [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [{ question: "Pick one?", header: "Choice", options: [
+        { label: "Alpha", description: "first" }, { label: "Beta", description: "second" },
+      ] }] }), { type: "done" }],
+      [{ type: "start" }, ...TEXT(0, "moved on"), { type: "done" }],
+    ]);
+    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io, toolCall: { timeout: 300 } });
+    const app = createApp(agent);
+    const memory = GTUI.host.memory();
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(app);
+
+    ui.dispatch(msg.submit("ask me"));
+    await until(() => memory.snapshot().lines.some((line) => line.includes("Alpha")));
+
+    // Never answer: the 300ms tool-call timeout fires the boundary itself.
+    await until(() => !agent.busy);
+    const result = agent.context.find((message) => message.type === 4 && message.name === "question");
+    expect(result.content[0].text).toContain('tool "question" timed out after 300ms');
+    // The tool-call JSON echoed into the transcript mentions the option
+    // labels; the QUESTIONNAIRE overlay is what must be gone.
+    expect(memory.snapshot().lines.some((line) => line.includes("Submit"))).toBe(false);
+    expect(memory.snapshot().lines.some((line) => line.includes("Type something"))).toBe(false);
+
+    // A late menu answer resolves nothing (the pending map was cleared):
+    // no second question call, no resumed tool action.
+    ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Alpha" } });
+    ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Alpha" } });
+    await until(() => !agent.busy);
+    expect(agent.context.filter((message) => message.type === 4 && message.name === "question")).toHaveLength(1);
+
+    ui.stop();
+    await running;
+  });
+
   test("abandonPending resolves every open question with null — a clean exit never hangs a tool call", async () => {
     let capturedBridge;
     const fakeAgent = {

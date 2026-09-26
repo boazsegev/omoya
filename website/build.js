@@ -7,14 +7,16 @@
  * website/build/, renders the home page, collects the API JSON document from
  * test/api-reference.js and renders one page per module plus
  * overview/architecture/contracts/tools/settings sections, emits the static
- * search index, and copies website/static/ assets verbatim. Fails on any
- * unexpected source error (no catch-and-continue).
+ * search index and the 404.html error page, and copies website/static/
+ * assets verbatim. Fails on any unexpected source error
+ * (no catch-and-continue).
  */
 import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { collect, contractProblems } from "../test/api-reference.js";
 import { ROOT, site } from "./site.js";
 import { homePage } from "./lib/home.js";
+import { notFoundPage } from "./lib/not-found.js";
 import { apiPages } from "./lib/api.js";
 import { searchIndex } from "./lib/search.js";
 import { llmsFullTxt, llmsTxt, robotsTxt, sitemapXml } from "./lib/llms.js";
@@ -112,11 +114,13 @@ mkdirSync(join(BUILD, "assets", "search"), { recursive: true });
 writeFileSync(join(BUILD, "assets", "search", "index.json"), JSON.stringify(index));
 
 for (const p of pages) writePage(p.path, p.html);
+writeFileSync(join(BUILD, "404.html"), notFoundPage());
 writeFileSync(join(BUILD, "llms.txt"), llmsTxt(data));
 writeFileSync(join(BUILD, "llms-full.txt"), llmsFullTxt());
 writeFileSync(join(BUILD, "robots.txt"), robotsTxt());
 writeFileSync(join(BUILD, "sitemap.xml"), sitemapXml(pages));
 
 const elapsed = (performance.now() - started).toFixed(0);
-console.log(`built website/build: ${pages.length} pages (${data.modules.length} API modules), ${index.entries.length} search entries, in ${elapsed}ms`);
+console.log(`built website/build: ${pages.length} pages (${data.modules.length} API modules), ${index.entries.length} search entries, plus 404.html, in ${elapsed}ms`);
 for (const p of pages) console.log(`  ${p.path}`);
+console.log(`  /404.html (error page — not in sitemap or search index)`);

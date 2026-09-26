@@ -220,6 +220,29 @@ describe("kimi provider: context2msg (chat-completions dialect)", () => {
     }
   });
 
+  test("a later request on the same IO reuses the extracted text instead of re-uploading", async () => {
+    const calls = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      if (String(url).endsWith("/files")) return new Response(JSON.stringify({ id: "file-123" }), { status: 200 });
+      if (String(url).endsWith("/files/file-123/content")) return new Response("hello", { status: 200 });
+      return new Response("", { status: 200 });
+    };
+    try {
+      const io = aiio();
+      const context = [{ type: 2, content: [{ type: "binary", mimetype: "text/plain", filename: "notes.txt", content: "aGVsbG8=" }] }];
+      for (let i = 0; i < 2; i++) {
+        const connection = new Protocol("https://api.moonshot.ai/v1", io);
+        await connection.send(connection.context2msg(context));
+      }
+      expect(calls.filter((u) => u.includes("/files"))).toHaveLength(2); // one upload + one extraction, total
+      expect(calls.filter((u) => u.endsWith("/chat/completions"))).toHaveLength(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("the coding endpoint refuses a non-image binary with a clear error, no upload", async () => {
     let fetches = 0;
     const originalFetch = globalThis.fetch;

@@ -329,7 +329,7 @@ test("statusSnapshot() carries the provider's plan/quota report (mirrors tui-app
 
 test("the settings packet carries settings.web display prefs (defaults + overrides)", async () => {
   const env = await testEnv();
-  env.settings.web = { toolLines: 3, theme: "dark", collapse: { thinking: false } };
+  env.settings.web = { theme: "dark", collapse: { thinking: false } };
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
   const received = [];
   try {
@@ -337,7 +337,7 @@ test("the settings packet carries settings.web display prefs (defaults + overrid
     await tick(60);
     const packet = received.find((m) => m.type === "settings");
     expect(packet).toBeDefined();
-    expect(packet.prefs.toolLines).toBe(3);
+    expect(packet.prefs).not.toHaveProperty("toolLines"); // previews follow the theme
     expect(packet.prefs.theme).toBe("dark");
     expect(packet.prefs.collapse.thinking).toBe(false);
     expect(packet.prefs.collapse.tools).toBe(true); // untouched default
@@ -798,6 +798,158 @@ test("a question asked through the bridge opens over the wire and an answer reso
     expect(JSON.stringify(opened.questions)).toContain("Pick");
     socket.send(JSON.stringify({ type: "question.answer", requestId: opened.requestId, answers: [{ question: "Pick", answer: "A" }] }));
     await expect(bridgePromise).resolves.toEqual([{ question: "Pick", answer: "A" }]);
+    socket.close();
+  } finally { web.stop(); }
+});
+
+/* ------------------------------------------------ TUI-parity packets */
+
+const until = async (predicate, ms = 4000) => {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !predicate()) await tick();
+  return predicate();
+};
+
+test("every SPA asset the page references is served (no dangling module paths)", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  try {
+    for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/text-safe.js", "/favicon.svg", "/logo.svg"]) {
+      const response = await fetch(`${origin(web)}${path}`);
+      expect([path, response.status]).toEqual([path, 200]);
+    }
+  } finally { web.stop(); }
+});
+
+test("protocol validates the TUI-parity packets", () => {
+  expect(parseClientMessage(JSON.stringify({ type: "session.new", anonymous: true, safe: true }))).toEqual({ type: "session.new", anonymous: true, safe: true });
+  expect(parseClientMessage(JSON.stringify({ type: "session.add", model: "p/m" }))).toEqual({ type: "session.add", safe: false, model: "p/m" });
+  expect(parseClientMessage(JSON.stringify({ type: "agent.rename", name: "  scribe " }))).toEqual({ type: "agent.rename", name: "scribe" });
+  expect(parseClientMessage(JSON.stringify({ type: "settings.spawn", value: "Ask" }))).toEqual({ type: "settings.spawn", value: null });
+  expect(parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" }))).toEqual({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" });
+  expect(() => parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "global", name: "e", provider: "p", url: "u" }))).toThrow("invalid scope");
+  expect(() => parseClientMessage(JSON.stringify({ type: "session.rename", name: "   " }))).toThrow("invalid name");
+  expect(parseClientMessage(JSON.stringify({ type: "chat.continue" }))).toEqual({ type: "chat.continue" });
+});
+
+test("agents are renamed, delegation is set, and the theme persists to the shared tui.theme", async () => {
+  const env = await testEnv();
+  env.settings.tui = { themes: { night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } } } };
+  const agent = scripted(env);
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "agent.rename", name: "scribe" }));
+    socket.send(JSON.stringify({ type: "settings.spawn", value: false }));
+    socket.send(JSON.stringify({ type: "settings.theme", name: "night" }));
+    expect(await until(() => received.some((m) => m.type === "settings" && m.prefs?.activeTheme === "night"))).toBe(true);
+    expect(agent.name).toBe("scribe");
+    expect(agent.spawnPermission).toBe(false);
+    expect(env.settings.tui.theme).toBe("night");
+    expect(received.findLast((m) => m.type === "settings").prefs.themeModes.night).toBe("dark");
+    expect(received.some((m) => m.type === "agent" && m.agent.name === "scribe")).toBe(true);
+    const css = await (await fetch(`${origin(web)}/themes.css`)).text();
+    expect(css).toContain('.theme-card[data-theme="night"]{');
+    socket.send(JSON.stringify({ type: "settings.theme", name: "system" }));
+    expect(await until(() => env.settings.tui.theme === "default")).toBe(true);
+    socket.close();
+  } finally { web.stop(); }
+});
+
+// A verifiable no-network protocol (the CLI login tests' fake): login
+// always runs a connection test and a model listing.
+class LoginProtocol {
+  static provider = { label: "Login", capabilities: {} };
+  constructor(url, aiio) { this.url = url; this.aiio = aiio; }
+  async login({ token }) { return { type: "api_key", token }; }
+  async testConnection() { return { models: 1 }; }
+  async models() { const models = { "model-1": { label: "Model 1" } }; this.aiio.authSet({ models }); return models; }
+  async close() {}
+}
+
+test("endpoints are listed, signed in (direct form) and signed out over the wire", async () => {
+  const env = await testEnv();
+  env.registerProvider("wire", LoginProtocol);
+  const agent = scripted(env);
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "endpoint.list" }));
+    expect(await until(() => received.some((m) => m.type === "endpoints"))).toBe(true);
+    expect(received.find((m) => m.type === "endpoints")).toMatchObject({ endpoints: expect.any(Array), presets: expect.any(Array), removable: expect.any(Array) });
+    socket.send(JSON.stringify({ type: "endpoint.login", scope: "package", name: "added", provider: "wire", url: "https://added.test/v1", token: "t" }));
+    await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint saved: added")) || received.some((m) => m.type === "error"));
+    expect(received.filter((m) => m.type === "error")).toEqual([]);
+    expect(agent.endpoint).toBe("added");
+    expect(agent.model).toBe("model-1");
+    expect(env.endpointNames()).toContain("added");
+    socket.send(JSON.stringify({ type: "endpoint.logout", name: "added" }));
+    expect(await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint removed: added")))).toBe(true);
+    expect(env.endpointNames()).not.toContain("added");
+    expect(agent.endpoint).toBeUndefined();
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("a pending question is re-opened for a view that attaches later (reload)", async () => {
+  const env = await testEnv();
+  const agent = scripted(env);
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const first = [];
+  const second = [];
+  try {
+    const socketA = await connect(web, first);
+    await tick();
+    const answer = agent._question.ask([{ question: "Pick", header: "H", options: [{ label: "A" }] }]);
+    expect(await until(() => first.some((m) => m.type === "question.open"))).toBe(true);
+    socketA.close();
+    const socketB = await connect(web, second);
+    expect(await until(() => second.some((m) => m.type === "question.open"))).toBe(true);
+    const { requestId } = second.find((m) => m.type === "question.open");
+    socketB.send(JSON.stringify({ type: "question.answer", requestId, answers: [{ labels: ["A"] }] }));
+    expect(await answer).toEqual([{ labels: ["A"] }]);
+    socketB.close();
+  } finally { web.stop(); }
+});
+
+test("a run that throws ends the turn with an error terminal (indicators never stick)", async () => {
+  const env = await testEnv();
+  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => { throw new Error("no usable endpoint"); } });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "chat.submit", text: "hi" }));
+    expect(await until(() => received.some((m) => m.type === "turn.end"))).toBe(true);
+    const end = received.find((m) => m.type === "turn.end");
+    expect(end.terminal).toMatchObject({ type: "error" });
+    expect(end.busy).toBe(false);
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("collapsed-preview rows come from each theme's <role>.preview.maxRows (TUI defaults otherwise)", async () => {
+  const env = await testEnv();
+  env.settings.tui = { themes: {
+    tall: { "tool.preview": { maxRows: 12 }, "message.thinking.preview": { maxRows: false } },
+    child: { parent: "tall", "message.system.preview": { maxRows: 3 } },
+    broken: { "tool.preview": { maxRows: -1 } },
+  } };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    expect(await until(() => received.some((m) => m.type === "settings"))).toBe(true);
+    const rows = received.find((m) => m.type === "settings").prefs.previewRows;
+    expect(rows.default).toEqual({ system: 8, thinking: 8, tool: 7 });
+    expect(rows.tall).toEqual({ system: 8, thinking: false, tool: 12 });
+    expect(rows.child).toEqual({ system: 3, thinking: false, tool: 12 }); // parent chain
+    expect(rows.broken.tool).toBe(7); // invalid values fall back
     socket.close();
   } finally { web.stop(); }
 });

@@ -29,6 +29,7 @@
  * envelope; a stream that ends without one gets a synthesized done.
  */
 
+import { createHash } from "node:crypto";
 import Context from "../lib/context.js";
 const { MessageType, ContentType, mimetypeOf } = Context;
 import Env from "../lib/env.js";
@@ -255,10 +256,27 @@ async function uploadFiles(connection, headers, body) {
     for (let index = 0; index < message.content.length; index += 1) {
       const part = message.content[index];
       if (part?.type !== "file" || !part.file?.data) continue;
-      message.content[index] = await uploadFile(connection, headers, part.file);
+      message.content[index] = await extractedPart(connection, headers, part.file);
     }
   }
   return body;
+}
+
+/** Extracted text per IO instance (one conversation), keyed by endpoint and
+ *  file bytes. Every request re-sends the whole context, so without this each
+ *  tool round re-uploaded every attachment in history (two sequential round
+ *  trips per file) before the chat request could start. */
+const extractedCache = new WeakMap();
+
+async function extractedPart(connection, headers, file) {
+  const owner = connection.aiio;
+  if (owner === null || typeof owner !== "object") return uploadFile(connection, headers, file);
+  let cache = extractedCache.get(owner);
+  if (!cache) extractedCache.set(owner, cache = new Map());
+  const key = `${connection.baseUrl}\0${file.mimetype}\0${file.filename}\0${createHash("sha256").update(file.data).digest("base64")}`;
+  let part = cache.get(key);
+  if (!part) cache.set(key, part = await uploadFile(connection, headers, file));
+  return { ...part };
 }
 
 async function uploadFile(connection, headers, file) {

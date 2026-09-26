@@ -130,6 +130,8 @@ om --serve --port 9900
 
 A standalone chat SPA over HTTP and WebSocket, carrying the same Agent/Env events used everywhere else. The server owns the agent; the browser only renders it — closing the tab detaches the view while the agent keeps running. It binds to loopback and checks the WebSocket Origin header. There is no auth token: **reaching the port means owning the agent**, so keep it off shared networks unless you put your own auth in front.
 
+It offers the TUI's feature set: every slash command, a command palette (Ctrl/⌘+K, the TUI's ^X menu), the shared TUI themes (`tui.theme`), endpoint sign-in and sign-out including browser OAuth, live thinking and tool-call cards, questions, agent and session naming, the context viewer, and queued-message recall.
+
 ## The web, without an account
 
 **Web search and fetch** need no account: every call routes through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries a configured or auto-detected [SearXNG](https://docs.searxng.org/) instance first (`SEARXNG_URL`/`SEARXNG_BASE`), then falls back to the aggregate engines (DuckDuckGo and Mojeek by default; `BRAVE_API_KEY` adds Brave).

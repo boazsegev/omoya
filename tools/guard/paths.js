@@ -66,6 +66,9 @@ export async function findWriteTraversal(content, { cwd = process.cwd(), max = 5
     // preceded by a path-segment character. Match the complete ~/ path;
     // never truncate it to the slash-prefixed suffix.
     for (const match of text.matchAll(/(?<![A-Za-z0-9._~-])(?:\.\.\/|~\/|\/)(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)/g)) {
+      // Device files (mirrors isTraversalToken/commandTokenViolation): a
+      // mention of /dev/null & friends is never an outside-tree reference.
+      if (DEVICE_PATHS.has(match[0])) continue;
       if (!isImportMetaUrlPath(text, match[0]) && await existingOutsidePath(match[0], cwd)) {
         found.push({ line: index + 1, token: match[0], text });
         break;

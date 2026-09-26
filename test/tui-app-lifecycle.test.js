@@ -25,11 +25,11 @@ async function until(fn, timeout = 2000) {
   return fn();
 }
 
-async function harness() {
+async function harness(options = {}) {
   const env = await testEnv();
   const io = scriptedIO([[{ type: "done" }]]);
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
-  const app = createApp(agent, { env });
+  const app = createApp(agent, { env, ...options });
   const memory = GTUI.host.memory({ width: 80, height: 10 });
   const ui = new GTUI({ host: memory });
   const running = ui.run(app);
@@ -79,6 +79,38 @@ describe("TUI login wizard", () => {
       ui.dispatch(msg.submit("/endpoint-login"));
       await until(() => memory.snapshot().lines.some((line) => line.includes("Login — choose an endpoint")));
       expect(memory.snapshot().lines.some((line) => line.includes("Login — choose an endpoint"))).toBe(true);
+    } finally {
+      ui.stop();
+      await running;
+    }
+  });
+
+  test("selecting an OAuth preset closes the picker and starts the sign-in (no flicker loop)", async () => {
+    const opened = [];
+    const { env, memory, ui, running } = await harness({ open: (url) => { opened.push(url); return true; } });
+    try {
+      const preset = {
+        name: "claude-sub", label: "Claude Pro/Max (subscription)", url: "https://api.anthropic.com", provider: "anthropic",
+        oauth: { label: "Claude", clientId: "test-client", authorizeUrl: "https://claude.example/authorize", tokenUrl: "https://claude.example/token", redirectUri: "https://claude.example/callback", scope: "openid" },
+      };
+      env.knownEndpoints = () => [preset];
+      ui.dispatch(msg.submit("/endpoint-login"));
+      await until(() => memory.snapshot().lines.some((line) => line.includes("Login — choose an endpoint")));
+      // Select the preset (the picker's second selectable row, after "← back").
+      ui.dispatch({ type: "menu.select", id: "overlay-menu", item: { kind: "action", label: preset.label, value: { type: "oauth-login", preset } } });
+      // The picker must close and the sign-in must start — never reopen the picker.
+      await until(() => memory.snapshot().lines.some((line) => line.includes("sign-in")), 3000);
+      const lines = memory.snapshot().lines;
+      expect(lines.some((line) => line.includes("Login — choose an endpoint"))).toBe(false);
+      expect(lines.some((line) => line.includes("sign-in"))).toBe(true);
+      expect(memory.effects.some((value) => value?.type === "open" && String(value.url).includes("claude.example"))).toBe(true);
+      // The flow's own browser open was the app-injected stub — never a
+      // real system browser (xdg-open fails CI and disrupts desktops).
+      expect(opened.some((url) => String(url).includes("claude.example"))).toBe(true);
+      // A paste-only preset redirects to a provider-hosted page, so no loopback
+      // listener exists — the flow waits on the paste channel.
+      await until(() => memory.snapshot().lines.some((line) => /paste what the sign-in page shows|waiting for the code/.test(line)), 3000);
+      expect(memory.snapshot().lines.some((line) => /paste what the sign-in page shows|waiting for the code/.test(line))).toBe(true);
     } finally {
       ui.stop();
       await running;

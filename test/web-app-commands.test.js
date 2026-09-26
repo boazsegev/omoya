@@ -24,3 +24,35 @@ describe("web-app commands: /agent-name", () => {
     expect(catalog(agent).commands).toContain("/agent-name");
   });
 });
+
+describe("web-app commands: TUI parity", () => {
+  test("a unique prefix resolves; an ambiguous one does not", async () => {
+    const { resolveCommand } = await import("../lib/web-app/commands.js");
+    expect(resolveCommand("/agent-st")).toBe("/agent-status");
+    expect(resolveCommand("/context-c")).toBe("/context-c");
+  });
+
+  test("/context-copy hands the last response to the client clipboard", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [
+      { type: 2, content: [{ type: "text", text: "q" }] },
+      { type: 3, content: [{ type: "text", text: "the answer" }] },
+    ] });
+    expect(await runCommand(agent, "/context-copy")).toEqual({ copy: "the answer" });
+  });
+
+  test("dialog-backed commands open client views", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [] });
+    expect(await runCommand(agent, "/endpoint-login")).toEqual({ open: "login" });
+    expect(await runCommand(agent, "/menu")).toEqual({ open: "palette" });
+    expect(await runCommand(agent, "/context-edit 3")).toEqual({ open: "context", index: 3 });
+  });
+
+  test("the catalog carries argument hints for the composer ghost text", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [] });
+    expect(catalog(agent).hints["/session-name"]).toBe("<name>");
+    expect(catalog(agent).commands).toContain("/session-delete-all!");
+  });
+});

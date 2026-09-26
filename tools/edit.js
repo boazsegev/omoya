@@ -295,6 +295,7 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
 export function toolDescription() {
   return {
     edit: {
+      trusted: true,
       description: "Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll: true to replace every occurrence of each oldText. To reverse an edit, pass the edit id returned after it as rollback.",
       inputSchema: {
         type: "object",

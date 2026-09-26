@@ -447,7 +447,7 @@ export const exitCodeFor: (terminal: unknown) => number;
 export const formatToolResult: (result: unknown) => unknown;
 export const listEndpointModels: (env: unknown, { access?: unknown) => unknown;
 export const listModelCandidates: (env: unknown, { access?: unknown) => unknown;
-export const listModels: (env: unknown, { access?: unknown) => unknown;
+export const listModels: (env: unknown, { access?: unknown, timeout }?: unknown) => unknown;
 export const loginEndpoint: (env: unknown, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => unknown;
 export const logoutEndpoint: (env: object, name: string) => {name: string, dynamic: boolean};
 export const oauthPasteOnly: (descriptor: unknown) => unknown;
@@ -816,7 +816,18 @@ export const parseGitDiff: (text: unknown) => unknown;
 export const parseInline: (text: string) => Array<{type: string, text: string, href?: string}>;
 export const renderInline: (text: string, renderer?: object) => string;
 export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
+export const sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
 export const walkTokens: (tokens: Array<object>, renderer?: object) => string;
+```
+
+### `BashSanitizer`
+
+```ts
+export class BashSanitizer {
+  constructor(options?: object);
+  end: () => unknown;
+  push: (chunk: string) => string;
+}
 ```
 
 ### `Markdown`

@@ -75,6 +75,30 @@ describe("Agent-owned tool timeout policy", () => {
     expect(outcome.message).toMatchObject({ type: 4, error: true, name: "timed-cleanup" });
   });
 
+  test("a question-capable call's first window is raised only WITHIN the limit", async () => {
+    // The interactive 5-minute first window (prepareToolTimeout's
+    // question-capable fallback) must never extend a call past
+    // toolTimeoutLimit: a tight limit caps the boost too.
+    const env = new Env({ settingsDir: null, settings: { toolTimeout: 50, toolTimeoutLimit: 150 } });
+    register(env, "asking", () => new Promise(() => {})); // never settles
+    const agent = new Agent({
+      env, context: [],
+      question: { ask: async () => null }, // bridge present: the boost applies
+    });
+    const started = Date.now();
+    const outcome = await agent._execute(call("asking"));
+    expect(Date.now() - started).toBeLessThan(500); // 150ms limit, NOT 300s
+    expect(textOf(outcome)).toContain('tool "asking" timed out after 150ms');
+
+    // Room under the limit: the full 5-minute first window applies.
+    const roomy = new Env({ settingsDir: null, settings: { toolTimeout: 50 } });
+    register(roomy, "asking-roomy", () => new Promise(() => {}));
+    const roomyAgent = new Agent({ env: roomy, context: [], question: { ask: async () => null } });
+    const prepared = (await import("../lib/agent/tool-timeout.js")).prepareToolTimeout(
+      roomyAgent, roomy.toolEntry("asking-roomy"), {});
+    expect(prepared.timeout).toBe(300_000);
+  });
+
   test("clears the ordinary deadline after a fast tool settles", async () => {
     const env = new Env({ settingsDir: null, settings: { toolTimeout: 100_000 } });
     const agent = new Agent({ env, context: [] });

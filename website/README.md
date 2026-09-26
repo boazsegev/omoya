@@ -15,6 +15,7 @@ The build output is `website/build/`. It is excluded from the npm package by the
 - `build.js` — clean-first builder: wipes `build/`, renders every page, emits the search index, LLM manifests (`llms.txt`, `llms-full.txt`), `robots.txt`, `sitemap.xml`, and copies `static/`
 - `site.js` / `site.json` — shared site data (canonical origin, title, vanity domains)
 - `lib/home.js` — the landing page body (hero, tabbed install box, annotated command terminal, feature sections); every product statement must restate the root README.md (no new claims), and commands shown must be runnable as printed
+- `lib/not-found.js` — the 404 error page, emitted as a flat `build/404.html` with root-relative links (it is served at whatever URL was requested), `noindex`, and excluded from the sitemap, search index, and link gate
 - `lib/api.js` — per-module API pages plus architecture/contracts/tools/settings, rendered from `collect()` in `test/api-reference.js`; `buildApiLinks()` indexes every documented API point so `linkApiReferences()` can cross-link whole-identifier `code` mentions (scoped, longest-prefix) to their page anchor
 - `lib/html.js` — escaping and the shared page shell (nav, theme control, search, metadata)
 - `lib/markdown.js` — the small escaping Markdown subset used for docs prose
