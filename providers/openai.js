@@ -1,10 +1,11 @@
-// OpenAI Responses protocol plugin. Missing instance methods are completed
-// by Env's internal OpenAI defaults; the plugin owns metadata and known
-// OpenAI-compatible endpoint detection only.
+// OpenAI Responses protocol plugin. The library's OpenAI defaults complete
+// it: Env its catalog statics (models/testConnection/login), IO its wire
+// methods. The plugin owns metadata, presets, endpoint detection, and the
+// hosted web-search tool.
 
 import { NAMES } from "../lib/namespace.js";
-import Env from "../lib/env.js";
-const { singleShot, openaiWebCapabilities } = Env;
+import Context from "../lib/context.js";
+const { ContentType, MessageType } = Context;
 
 const LM_STUDIO_URL = "http://localhost:1234/v1";
 
@@ -24,18 +25,107 @@ const ENV_ENDPOINTS = [
   { name: "xai", env: "XAI_API_KEY", url: "https://api.x.ai/v1" },
 ];
 
+/* --------------------------------------------------- web-search tool */
+
+/** The response head gets three seconds; after it, 1200 ms without another event. */
+const HEAD_TIMEOUT = 3_000;
+const IDLE_TIMEOUT = 1_200;
+/** Endpoint+model pairs proven not to run the hosted tool (process lifetime). */
+const unsupported = new Set();
+
+/**
+ * The `web-search` provider tool over the Responses hosted `web_search`
+ * tool, probed per endpoint+model. Undefined = unsupported here (the
+ * conventional web-search tool takes over).
+ * @param {{aiio: object, args: object, signal?: AbortSignal, deadline?: number}} call
+ * @returns {Promise<string|undefined>}
+ */
+async function webSearch({ aiio, args, signal, deadline }) {
+  const query = String(args?.query ?? "").trim();
+  if (query === "" || !aiio?.url) return undefined;
+  // the Codex catalog already says when a model cannot use web_search
+  if (aiio.settings?.models?.[aiio.modelCurrent]?.webSearch === false) return undefined;
+  const probeKey = `${aiio.url} ${aiio.modelCurrent}`;
+  if (unsupported.has(probeKey)) return undefined;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal.reason ?? new Error("web request cancelled"));
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener?.("abort", onAbort, { once: true });
+  const remaining = () => (Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : Infinity);
+  // one watchdog: the response head, then every received byte, re-arms it
+  let timer;
+  let expire;
+  const expired = new Promise((_, reject) => { expire = reject; });
+  expired.catch(() => {});
+  const arm = (limit, message) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const error = new Error(message);
+      controller.abort(error);
+      expire(error);
+    }, Math.min(limit, remaining()));
+    timer.unref?.();
+  };
+  const within = (promise) => Promise.race([promise, expired]);
+  const connection = aiio.connectionCreate({
+    signal: controller.signal,
+    onBytes: () => arm(IDLE_TIMEOUT, "provider web-search response stream stalled"),
+  });
+  try {
+    const prompt = `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet.`;
+    const [headers, body] = connection.context2msg([{ type: MessageType.User, content: [{ type: ContentType.Text, text: prompt }] }], aiio);
+    body.tools = [{ type: "web_search" }];
+    body.tool_choice = "required";
+    arm(HEAD_TIMEOUT, "provider web-search response head timed out");
+    try {
+      await within(connection.send([headers, body]));
+    } catch (error) {
+      if (error?.status >= 400 && error.status < 500 && /web_search|tool/i.test(String(error.body ?? error.message))) {
+        unsupported.add(probeKey);
+        return undefined;
+      }
+      throw error;
+    }
+    arm(IDLE_TIMEOUT, "provider web-search response stream stalled");
+    const items = [];
+    for (;;) {
+      const event = await within(connection.read());
+      if (!event) break;
+      if (event.type === "response.output_item.done" && event.item) items.push(event.item);
+      if (event.type === "response.completed") break;
+      if (event.type === "error" || event.type === "response.failed") {
+        throw new Error(event.error?.message ?? event.response?.error?.message ?? "web search response failed");
+      }
+    }
+    if (!items.some((item) => item.type === "web_search_call")) {
+      unsupported.add(probeKey);
+      return undefined;
+    }
+    return items
+      .filter((item) => item.type === "message")
+      .flatMap((item) => item.content ?? [])
+      .filter((block) => typeof block?.text === "string")
+      .map((block) => block.text)
+      .join("");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
+    await connection.close();
+  }
+}
+
 export default class OpenAIProvider {
   static provider = {
     label: "OpenAI",
     capabilities: {
-      tools: true,
-      thinking: true,
       streaming: true,
-      // web-search over the Responses hosted `web_search` tool, probed
-      // per endpoint+model; web-fetch stays on the package backend (implementation in
-      // lib/env/openai.js — this module is metadata only, but the
-      // Agent's capability lookup reads THIS static object)
-      ...openaiWebCapabilities,
+      thinking: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      // the effort sent when neither the user nor the model names one
+      thinkingDefault: "high",
+      // web-search over the Responses hosted `web_search` tool. OpenAI
+      // exposes open_page only as an agentic web_search action, never a
+      // direct fetch inside a usable budget: web-fetch is not offered.
+      tools: { "web-search": { function: webSearch } },
     },
   };
 
@@ -91,7 +181,7 @@ export default class OpenAIProvider {
     { name: "lm-studio", label: "LM Studio (local)", url: "http://localhost:1234/v1" },
   ];
 
-  static async detectEndpoints({ endpoints = {}, signal } = {}) {
+  static async detect({ endpoints = {}, signal } = {}) {
     const found = {};
     // ambient API keys (pi's environment naming — see ENV_ENDPOINTS):
     // the process environment configures endpoints with no login at
@@ -113,7 +203,7 @@ export default class OpenAIProvider {
     }
     if (!endpoints["lm-studio"]) {
       try {
-        const response = await fetch(`${LM_STUDIO_URL}/models`, singleShot({ signal }));
+        const response = await fetch(`${LM_STUDIO_URL}/models`, { headers: { connection: "close" }, signal });
         if (response.ok) found["lm-studio"] = { provider: "openai", url: LM_STUDIO_URL, dynamic: true };
       } catch { /* no local LM Studio */ }
     }

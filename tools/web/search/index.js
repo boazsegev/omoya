@@ -1,26 +1,17 @@
 import { createHash, randomBytes } from "node:crypto";
+import { BROWSER_HEADERS, fetchWithConnectTimeout, webRateSettings, webBudgetMs, __resetWebRateForTests, rateEnter } from "../shared.js";
 
 const DEFAULT_LIMIT = 40;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const ENGINE_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 3_000;
 const DEFAULT_CACHE_SECONDS = 300;
 const MAX_CACHE_SECONDS = 3_600;
 const DEFAULT_CACHE_ENTRIES = 32;
 const MAX_CACHE_ENTRIES = 256;
 const MAX_REDIRECTS = 8;
 const MAX_OUTPUT_CHARS = 50_000;
-const MAX_CONCURRENT = 4;
-const BURST_LIMIT = 8;
-const BURST_WINDOW_MS = 30_000;
-const ROLLING_LIMIT = 60;
-const ROLLING_WINDOW_MS = 300_000;
 const RRF_K = 60;
-const BROWSER_HEADERS = Object.freeze({
-  "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
-  accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.5",
-  "upgrade-insecure-requests": "1",
-});
 
 const TRACKING_PARAMS = new Set([
   "fbclid", "gclid", "gbraid", "wbraid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid", "igshid",
@@ -35,13 +26,10 @@ const DEFAULT_ENGINES = Object.freeze([
 ]);
 
 const cache = new Map();
-const rateTimestamps = [];
-let activeCalls = 0;
 
 export function __resetPackageSearchForTest() {
   cache.clear();
-  rateTimestamps.length = 0;
-  activeCalls = 0;
+  __resetWebRateForTests();
 }
 
 class SearchConfigError extends Error {
@@ -71,21 +59,23 @@ class SearchBackendError extends Error {
 export async function packageSearch(args, context = {}, options = {}) {
   validateArgs(args);
   const clock = options.clock ?? Date;
-  const now = clock.now();
-  checkRate(now);
-  if (activeCalls >= MAX_CONCURRENT) throw new SearchBackendError("web-search is busy; retry after another search completes", { retryable: true });
-  activeCalls += 1;
+  const web = context.env?.settings?.web;
+  const rate = webRateSettings(web);
+  const isDebug = readDebugSetting(web);
+  const config = { ...parseSearchConfig(web?.search, options.env ?? process.env), isDebug };
+  const key = cacheKey(args, config);
+  const cached = readCache(key, clock.now());
+  if (cached !== undefined) return appendClampNotice(cached, args.wasClamped);
+  const budgetMs = webBudgetMs(context);
+  const leave = await rateEnter(rate, clock, context.signal, options.sleep, budgetMs, "web-search");
+  let successful = false;
   try {
-    const web = context.env?.settings?.web;
-    const isDebug = readDebugSetting(web);
-    const config = { ...parseSearchConfig(web?.search, options.env ?? process.env), isDebug };
-    const key = cacheKey(args, config);
-    const cached = readCache(key, now);
-    const content = cached ?? await runSearch(args, context, options, config, now);
-    if (cached === undefined) writeCache(key, content, config.cacheSeconds, config.cacheMaxEntries, clock.now());
+    const content = await runSearch(args, context, options, config, clock.now());
+    writeCache(key, content, config.cacheSeconds, config.cacheMaxEntries, clock.now());
+    successful = true;
     return appendClampNotice(content, args.wasClamped);
   } finally {
-    activeCalls -= 1;
+    await leave(successful);
   }
 }
 
@@ -95,28 +85,18 @@ function validateArgs(args) {
   if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > DEFAULT_LIMIT) throw new TypeError("web-search limit must be a normalized integer from 1 through 40");
 }
 
-function checkRate(now) {
-  pruneTimes(rateTimestamps, now - ROLLING_WINDOW_MS);
-  const burstCount = rateTimestamps.filter((value) => value > now - BURST_WINDOW_MS).length;
-  if (burstCount >= BURST_LIMIT) throw new SearchBackendError("web-search burst rate limit reached; retry after 30 seconds", { retryable: true });
-  if (rateTimestamps.length >= ROLLING_LIMIT) throw new SearchBackendError("web-search rolling rate limit reached; retry after 5 minutes", { retryable: true });
-  rateTimestamps.push(now);
-}
-
-function pruneTimes(values, minTime) {
-  while (values.length > 0 && values[0] <= minTime) values.shift();
-}
-
 async function runSearch(args, context, options, config, startTime) {
   const deadline = startTime + config.timeoutMs;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new SearchConfigError("fetch is unavailable; provide options.fetchImpl or a runtime fetch");
   const errors = [];
 
+  const access = typeof context.accessLabel === "string" && config.isDebug ? `${context.accessLabel} ` : "";
   for (const backend of config.backends) {
     try {
       const results = await searchSearxng(backend, args.query, fetchImpl, context.signal, deadline);
-      return renderMarkdown(args.query, results.slice(0, args.limit), config.isDebug ? `SearXNG (${backend.name})` : undefined, config.isDebug);
+      if (results.length === 0) throw new Error("no usable search results");
+      return renderMarkdown(args.query, results.slice(0, args.limit), config.isDebug ? `${access}SearXNG (${backend.name})` : undefined, config.isDebug);
     } catch (error) {
       errors.push(formatCause(backend.name, error));
     }
@@ -131,20 +111,21 @@ async function runSearch(args, context, options, config, startTime) {
   const diagnostics = [];
   for (const [index, result] of settled.entries()) {
     const name = engineLabel(config.engines[index].type);
-    if (result.status === "fulfilled") {
+    if (result.status === "fulfilled" && result.value.results.length > 0) {
       successes.push(result.value);
       diagnostics.push(`${name}: success (${result.value.results.length} results)`);
     } else {
-      const cause = formatCause(config.engines[index].type, result.reason);
+      const reason = result.status === "rejected" ? result.reason : new Error("no usable search results");
+      const cause = formatCause(config.engines[index].type, reason);
       errors.push(cause);
-      diagnostics.push(`${name}: failed (${sanitizeLine(result.reason?.message ?? result.reason)})`);
+      diagnostics.push(`${name}: failed (${sanitizeLine(reason?.message ?? reason)})`);
     }
   }
   if (successes.length === 0) throw aggregateFailure("all configured search engines failed", errors);
   return renderMarkdown(
     args.query,
     mergeResults(successes).slice(0, args.limit),
-    config.isDebug ? "engine aggregate" : undefined,
+    config.isDebug ? `${access}engine aggregate` : undefined,
     config.isDebug,
     diagnostics,
   );
@@ -391,7 +372,7 @@ async function fetchWithDeadline(fetchImpl, url, init, deadline) {
   try {
     if (sourceSignal?.aborted) throw sourceSignal.reason ?? new Error("web-search cancelled");
     sourceSignal?.addEventListener("abort", abort, { once: true });
-    return await fetchImpl(url, { ...init, signal: controller.signal });
+    return await fetchWithConnectTimeout(fetchImpl, url, { ...init, signal: controller.signal }, { connectTimeoutMs: Math.min(CONNECT_TIMEOUT_MS, ms), message: "web-search connection timed out" });
   } finally {
     sourceSignal?.removeEventListener("abort", abort);
     clearTimeout(timeout);
@@ -562,7 +543,7 @@ function engineLabel(type) {
 
 function renderMarkdown(query, results, codePath, isDebug = false, diagnostics = []) {
   const lines = [
-    ...(codePath ? [`Code Path: ${codePath}`, ...diagnostics.map((line) => `Engine Attempt: ${line}`), ""] : []),
+    ...(codePath ? [`HTTP: ${codePath}`, ...diagnostics.map((line) => `Engine Attempt: ${line}`), ""] : []),
     `Search Results for ${JSON.stringify(query)}:`,
     "",
   ];

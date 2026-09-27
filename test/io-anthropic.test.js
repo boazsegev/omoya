@@ -6,13 +6,14 @@
 // the Anthropic-shaped /models listing with registry auto-detection,
 // the two verification modes, and the ratelimit plan report.
 import { describe, expect, test, afterEach } from "bun:test";
-import { defineProvider } from "../lib/io.js";
-import AnthropicPlugin from "../providers/anthropic.js";
+import { providerClass } from "./fakes.js";
+import { resetAtMs } from "../lib/app/shared/format.js";
+import AnthropicPlugin, * as anthropicExports from "../providers/anthropic.js";
 
-const Protocol = defineProvider(AnthropicPlugin, { name: "anthropic" });
+const Protocol = await providerClass(AnthropicPlugin, "anthropic");
 const URL = "https://api.anthropic.com/v1";
 
-const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_WORKSPACE_ID"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {
   for (const k of ENV_KEYS) {
@@ -22,7 +23,7 @@ afterEach(() => {
 });
 
 const aiio = (over = {}) => ({
-  currentModel: "claude-opus-5",
+  modelCurrent: "claude-opus-5",
   settings: { auth: { token: "sk-ant-test" } },
   tools: () => [],
   ...over,
@@ -34,21 +35,26 @@ const assistant = (content) => ({ type: 3, content });
 const toolResult = (callId, text, extra = {}) => ({ type: 4, callId, name: "read", content: [{ type: "text", text }], ...extra });
 
 describe("anthropic provider: construction and metadata", () => {
+  test("exports only the provider class", () => {
+    expect(Object.keys(anthropicExports)).toEqual(["default"]);
+  });
+
   test("the URL targets /messages; OpenAI defaults complete the transport only", () => {
     const connection = new Protocol(URL, aiio());
     expect(connection.baseUrl).toBe(URL);
     expect(connection.url).toBe(`${URL}/messages`);
-    for (const method of ["send", "read", "close", "models", "login", "testConnection", "reportPlanUsage"]) {
+    for (const method of ["send", "read", "close", "reportPlanUsage"]) {
       expect(typeof connection[method], method).toBe("function");
     }
+    for (const method of ["models", "login", "testConnection", "detect"]) {
+      expect(typeof Protocol[method], method).toBe("function");
+    }
     expect(typeof Protocol.provider.label).toBe("string"); // the label text is content
-    // flags stay boolean; the proven server web tools join the surface
+    // native thinking modes; the proven server web tools are its provider tools
     expect(Protocol.provider.capabilities).toEqual({
-      tools: true,
-      thinking: true,
       streaming: true,
-      "web-search": expect.any(Function),
-      "web-fetch": expect.any(Function),
+      thinking: ["none", "low", "medium", "high", "xhigh", "max"],
+      tools: { "web-search": { function: expect.any(Function) }, "web-fetch": { function: expect.any(Function) } },
     });
   });
 
@@ -80,33 +86,49 @@ describe("anthropic provider: construction and metadata", () => {
     expect(minimax.url).toBe("https://api.minimax.io/anthropic");
   });
 
-  test("detectEndpoints: ANTHROPIC_API_KEY (x-api-key) or ANTHROPIC_AUTH_TOKEN (bearer), base URL overridable", async () => {
+  test("detect: ANTHROPIC_API_KEY (x-api-key) or ANTHROPIC_AUTH_TOKEN (bearer), base URL overridable", async () => {
     for (const k of ENV_KEYS) delete process.env[k];
-    expect(await Protocol.detectEndpoints({ endpoints: {} })).toEqual({});
+    expect(await Protocol.detect({ endpoints: {} })).toEqual({});
     process.env.ANTHROPIC_AUTH_TOKEN = "oat-1";
-    let found = await Protocol.detectEndpoints({ endpoints: {} });
-    expect(found.anthropic).toEqual({
+    let found = await Protocol.detect({ endpoints: {} });
+    expect(found.anthropic).toMatchObject({
       provider: "anthropic", url: URL, dynamic: true, auth: { type: "bearer", token: "oat-1" },
+      models: expect.any(Object),
     });
     process.env.ANTHROPIC_API_KEY = "sk-ant-key"; // the key wins over the bearer (the SDK's order)
     process.env.ANTHROPIC_BASE_URL = "https://proxy.example/v1";
-    found = await Protocol.detectEndpoints({ endpoints: {} });
-    expect(found.anthropic).toEqual({
+    found = await Protocol.detect({ endpoints: {} });
+    expect(found.anthropic).toMatchObject({
       provider: "anthropic", url: "https://proxy.example/v1", dynamic: true, auth: { type: "api_key", token: "sk-ant-key" },
+      models: expect.any(Object),
     });
     // an already-configured endpoint is never overridden
-    found = await Protocol.detectEndpoints({ endpoints: { anthropic: { provider: "anthropic", url: "x" } } });
+    found = await Protocol.detect({ endpoints: { anthropic: { provider: "anthropic", url: "x" } } });
     expect(found.anthropic).toBeUndefined();
   });
 
-  test("login stores an API key", async () => {
-    const writes = [];
-    const connection = new Protocol(URL, aiio({ settings: {}, authSet: (data) => writes.push(data) }));
-    expect(await connection.login({ token: "sk-ant-api03-x" })).toEqual({ type: "api_key", token: "sk-ant-api03-x" });
-    expect(writes).toHaveLength(1);
-    await expect(connection.login({ token: "sk-ant-oat01-test" })).rejects.toThrow(/claude provider/);
-    expect(writes).toHaveLength(1);
-    await expect(connection.login({})).rejects.toThrow(/API key/);
+  test("detection is network-free, reads workspace configuration, and returns static models", async () => {
+    for (const k of ENV_KEYS) delete process.env[k];
+    process.env.ANTHROPIC_API_KEY = "sk-ant-key";
+    process.env.ANTHROPIC_WORKSPACE_ID = "wrkspc_team";
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => { calls += 1; throw new Error("must not fetch"); };
+    try {
+      const found = await Protocol.detect({ endpoints: {} });
+      expect(calls).toBe(0);
+      expect(found.anthropic.auth.workspaceId).toBe("wrkspc_team");
+      expect(found.anthropic.models).toBe(Protocol.knownEndpoints.find((e) => e.name === "anthropic").models);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("login shapes an API-key auth record", () => {
+    expect(Protocol.login({ token: "sk-ant-api03-x", workspaceId: "wrkspc_team" }, { settings: {} })).toEqual({
+      type: "api_key", token: "sk-ant-api03-x", workspaceId: "wrkspc_team",
+    });
+    expect(() => Protocol.login({ token: "sk-ant-api03-x", workspaceId: "default" })).toThrow(/wrkspc_/);
+    expect(() => Protocol.login({ token: "sk-ant-oat01-test" })).toThrow(/claude provider/);
+    expect(() => Protocol.login({}, { settings: {} })).toThrow(/API key/);
   });
 });
 
@@ -196,13 +218,13 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
   test("max_tokens follows a smaller known model cap; unknown models get the default", () => {
     // a known model's cap comes from the preset itself — never restated as a literal
     const presetEntry = Protocol.knownEndpoints.find((e) => e.url === "https://api.deepseek.com/anthropic").models["deepseek-chat"];
-    const small = new Protocol("https://api.deepseek.com/anthropic", aiio({ currentModel: "deepseek-chat" }));
+    const small = new Protocol("https://api.deepseek.com/anthropic", aiio({ modelCurrent: "deepseek-chat" }));
     expect(small.context2msg([user("x")])[1].max_tokens).toBe(presetEntry.maxTokens); // the preset's static cap
     const cached = new Protocol(URL, aiio({
-      currentModel: "claude-x", settings: { auth: { token: "t" }, models: { "claude-x": { maxTokens: 4096 } } },
+      modelCurrent: "claude-x", settings: { auth: { token: "t" }, models: { "claude-x": { maxTokens: 4096 } } },
     }));
     expect(cached.context2msg([user("x")])[1].max_tokens).toBe(4096); // the cached catalog wins
-    const unknown = new Protocol(URL, aiio({ currentModel: "mystery" }));
+    const unknown = new Protocol(URL, aiio({ modelCurrent: "mystery" }));
     expect(unknown.context2msg([user("x")])[1].max_tokens).toBe(64000);
   });
 
@@ -212,6 +234,15 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
     expect(headers.authorization).toBe("Bearer external");
     expect(headers["anthropic-beta"]).toBeUndefined();
     expect(headers["x-app"]).toBeUndefined();
+  });
+
+  test("a configured real workspace ID scopes ordinary model choices", () => {
+    const connection = new Protocol(URL, aiio({ settings: {
+      auth: { token: "t", workspaceId: "wrkspc_team" },
+    } }));
+    const [headers, body] = connection.context2msg([user("hi")]);
+    expect(headers["anthropic-workspace-id"]).toBe("wrkspc_team");
+    expect(body.model).toBe("claude-opus-5");
   });
 
   test("an API key sends no client identity (the subscription attestation is OAuth-only)", () => {
@@ -227,21 +258,16 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
     expect(at({ token: "t" }, [user("q")])).toBeUndefined();
   });
 
-  test("thinking levels: false disables, true adapts, a level also sets the effort", () => {
-    const at = (think, models) => new Protocol(URL, aiio({ settings: { auth: { token: "t" }, think, models, model: "m" } }))
-      .context2msg([user("q")], aiio({ settings: { auth: { token: "t" }, think, models }, currentModel: "m" }))[1];
-    expect(at(false).thinking).toEqual({ type: "disabled" });
-    expect(at(true)).toMatchObject({ thinking: { type: "adaptive", display: "summarized" } });
-    expect(at(true).output_config).toBeUndefined();
-    expect(at("none")).toMatchObject({ thinking: { type: "disabled" } });
+  test("native thinking modes: none disables, an effort adapts at that effort, undefined omits", () => {
+    const at = (think) => new Protocol(URL, aiio())
+      .context2msg([user("q")], aiio({ settings: { auth: { token: "t" }, think }, modelCurrent: "m" }))[1];
+    expect(at(undefined).thinking).toBeUndefined();
+    expect(at("none").thinking).toEqual({ type: "disabled" });
     expect(at("none").output_config).toBeUndefined();
     expect(at("xhigh")).toMatchObject({
       thinking: { type: "adaptive", display: "summarized" },
       output_config: { effort: "xhigh" },
     });
-    // a level the model lacks maps to its nearest registry level
-    expect(at("xhigh", { m: { reasoningLevels: ["low", "medium", "high", "max"] } }).output_config).toEqual({ effort: "max" });
-    expect(at("xhigh", { m: { reasoningLevels: ["low", "medium", "high"] } }).output_config).toEqual({ effort: "high" });
   });
 
   test("user images/PDF/text-like binaries ride inline; empty text is never sent", () => {
@@ -285,7 +311,7 @@ describe("anthropic provider: msg2events (SSE event translation)", () => {
   test("a full stream: thinking with signature, text, tool_use json deltas, usage, done with the mirror", () => {
     const io = aiio();
     let contextUsed;
-    io.setContextUsage = (u) => { contextUsed = u; };
+    io.contextUsageSet = (u) => { contextUsed = u; };
     const connection = new Protocol(URL, io);
     const state = {};
     const feed = (event) => connection.msg2events(event, state, io);
@@ -315,13 +341,13 @@ describe("anthropic provider: msg2events (SSE event translation)", () => {
     expect(feed({ type: "content_block_stop", index: 2 })).toEqual([{ type: "text_end", contentIndex: 1 }]);
 
     expect(feed({ type: "content_block_start", index: 3, content_block: { type: "tool_use", id: "toolu_9", name: "read", input: {} } }))
-      .toEqual([{ type: "toolcall_start", contentIndex: 2, callId: "toolu_9", name: "read", arguments: "" }]);
+      .toEqual([{ type: "tool_call_start", contentIndex: 2, callId: "toolu_9", name: "read", arguments: "" }]);
     expect(feed({ type: "content_block_delta", index: 3, delta: { type: "input_json_delta", partial_json: "{\"pa" } }))
-      .toEqual([{ type: "toolcall_delta", contentIndex: 2, arguments: "{\"pa" }]);
+      .toEqual([{ type: "tool_call_delta", contentIndex: 2, arguments: "{\"pa" }]);
     expect(feed({ type: "content_block_delta", index: 3, delta: { type: "input_json_delta", partial_json: "th\":\"a.txt\"}" } }))
-      .toEqual([{ type: "toolcall_delta", contentIndex: 2, arguments: "th\":\"a.txt\"}" }]);
+      .toEqual([{ type: "tool_call_delta", contentIndex: 2, arguments: "th\":\"a.txt\"}" }]);
     expect(feed({ type: "content_block_stop", index: 3 }))
-      .toEqual([{ type: "toolcall_end", contentIndex: 2, arguments: { path: "a.txt" } }]);
+      .toEqual([{ type: "tool_call_end", contentIndex: 2, arguments: { path: "a.txt" } }]);
 
     expect(feed({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 42 } })).toEqual([]);
     expect(feed({ type: "message_stop" })).toEqual([{
@@ -385,12 +411,52 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     return calls;
   };
 
+  // the static catalog side, called the way Env calls it
   const connection = ({ token, ...rest } = {}, url = URL) => {
-    const writes = {};
     const settings = { ...rest, ...(token !== undefined ? { auth: { token } } : {}) };
-    const io = aiio({ settings, authSet: (data) => Object.assign(writes, data) });
-    return { conn: new Protocol(url, io), writes };
+    const options = { url, auth: settings.auth, settings };
+    return { conn: { models: () => Protocol.models(options), testConnection: () => Protocol.testConnection(options) } };
   };
+  const statics = (settings, url = URL) => ({ url, auth: settings.auth, settings });
+
+  test("unscoped keys are classified in one request with an actionable error", async () => {
+    const calls = stubFetch({
+      "/v1/models": [400, { error: { message: "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace" } }],
+    });
+    const { conn } = connection({ token: "sk-ant-multi" });
+    await expect(conn.testConnection()).rejects.toThrow(/set ANTHROPIC_WORKSPACE_ID.*wrkspc_/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.headers["anthropic-workspace-id"]).toBeUndefined();
+  });
+
+  test("identity-linked wording is unscoped; configured workspace is sent on models and messages", async () => {
+    let calls = stubFetch({
+      "/v1/models": [400, { error: { message: "anthropic-workspace-id is required when authenticating with an identity-linked API key" } }],
+    });
+    const { conn } = connection({ token: "sk-ant-identity" });
+    await expect(conn.testConnection()).rejects.toThrow(/works across workspaces/);
+    expect(calls).toHaveLength(1);
+
+    calls = stubFetch({ "/v1/models": [200, { data: [{ id: "claude-opus-5" }] }] });
+    const settings = { auth: { token: "sk-ant-multi", workspaceId: "wrkspc_x" } };
+    expect(await Protocol.testConnection(statics(settings))).toEqual({ models: 1 });
+    expect(calls[0].init.headers["anthropic-workspace-id"]).toBe("wrkspc_x");
+    const configured = new Protocol(URL, aiio({ modelCurrent: "claude-opus-5", settings }));
+    expect(configured.context2msg([user("hi")])[0]["anthropic-workspace-id"]).toBe("wrkspc_x");
+  });
+
+  test("invalid workspace and auth failures stop after one request", async () => {
+    let calls = stubFetch({
+      "/v1/models": [400, { error: { message: "anthropic-workspace-id header must be a valid workspace ID" } }],
+    });
+    await expect(Protocol.testConnection(statics({ auth: { token: "sk-ant", workspaceId: "wrkspc_bad" } })))
+      .rejects.toThrow(/not a valid workspace for this key/);
+    expect(calls).toHaveLength(1);
+    calls = stubFetch({ "/v1/models": [401, { error: { message: "invalid x-api-key" } }] });
+    const { conn } = connection({ token: "bad" });
+    await expect(conn.testConnection()).rejects.toThrow(/HTTP 401/);
+    expect(calls).toHaveLength(1);
+  });
 
   test("the live Anthropic-shaped list merges with the registry; the call authenticates with x-api-key", async () => {
     const calls = stubFetch({
@@ -406,7 +472,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
         { id: "claude-plain", display_name: "Plain", capabilities: { thinking: { types: { adaptive: { supported: false } } } } },
       ] }],
     });
-    const { conn, writes } = connection({ token: "sk-ant-k" });
+    const { conn } = connection({ token: "sk-ant-k" });
     const map = await conn.models();
     const listCall = calls.find((c) => c.url.includes("/v1/models"));
     expect(listCall.url).toBe(`${URL}/models?limit=1000`);
@@ -414,11 +480,10 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     expect(listCall.init.headers["anthropic-version"]).toBe("2023-06-01");
     // the live list is authoritative for ids; its label wins over the registry's
     expect(Object.keys(map)).toEqual(["claude-opus-5", "claude-haiku-4-5", "claude-plain"]);
-    expect(map["claude-opus-5"]).toEqual({ label: "Claude Opus 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 });
-    expect(map["claude-haiku-4-5"].reasoning).toBe(true); // a supported thinking type of any kind
-    expect(map["claude-plain"]).toEqual({ label: "Plain", reasoning: false });
-    expect(writes.models["claude-opus-5"]).toBeDefined(); // the cache refreshed
-    expect(writes.registry).toBeUndefined(); // a successful live list needs no registry fetch
+    expect(map["claude-opus-5"]).toEqual({ label: "Claude Opus 5", contextWindow: 1000000, maxTokens: 128000 });
+    expect(map["claude-haiku-4-5"].thinking).toBeUndefined(); // a supported thinking type of any kind: every mode
+    expect(map["claude-plain"]).toEqual({ label: "Plain", thinking: [] });
+    expect(calls.filter((call) => call.url.includes("models.dev"))).toHaveLength(0); // a live list needs no registry
   });
 
   test("a live list never fetches the registry or includes its obsolete ids", async () => {
@@ -431,35 +496,32 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     expect(calls.filter((call) => call.url.includes("models.dev"))).toHaveLength(0);
   });
 
-  test("malformed live list falls back to the cached registry instead of wiping models", async () => {
+  test("malformed live list falls back to the static + cached catalog instead of wiping models", async () => {
     stubFetch({ "/v1/models": [200, { invalid: true }] });
-    const { conn } = connection({ registry: { fetchedAt: Date.now(), models: {
-      "claude-next": { label: "Next", reasoning: true },
-    } } });
-    expect((await conn.models())["claude-next"]).toMatchObject({ label: "Next", reasoning: true });
+    const { conn } = connection({ models: { "claude-next": { label: "Next" } } });
+    const map = await conn.models();
+    expect(map["claude-next"]).toMatchObject({ label: "Next" });
+    expect(map["claude-opus-5"]).toBeDefined();
   });
 
-  test("offline: registry snapshot (TTL) + static preset + cached map merge; no writes without fresh data", async () => {
-    stubFetch({
-      "models.dev": () => { throw new Error("registry down"); },
+  test("offline: static preset + cached map merge, with no blocking registry download", async () => {
+    const calls = stubFetch({
+      "models.dev": () => { throw new Error("registry must not be queried"); },
       "/v1/models": () => { throw new Error("offline"); },
     });
-    const { conn, writes } = connection({
+    const { conn } = connection({
       token: "t",
-      registry: { fetchedAt: Date.now(), models: { "claude-next": { label: "Claude Next", reasoning: true, contextWindow: 2000000 } } },
-      models: { "claude-old": { label: "Old", reasoning: false, contextWindow: 100000 } },
+      models: { "claude-old": { label: "Old", thinking: [], contextWindow: 100000 } },
     });
     const map = await conn.models();
     // every static-preset model merges through (the catalog itself is content)
     for (const [id, entry] of Object.entries(Protocol.knownEndpoints.find((e) => e.name === "anthropic").models)) {
       expect(map[id]?.contextWindow, id).toBe(entry.contextWindow);
     }
-    expect(map["claude-next"]).toEqual({ label: "Claude Next", reasoning: true, contextWindow: 2000000 }); // registry cache
-    expect(map["claude-old"]).toEqual({ label: "Old", reasoning: false, contextWindow: 100000 }); // cached
-    expect(writes.models).toBeDefined(); // the fresh registry cache counts as data
-    const { conn: bare, writes: none } = connection({ token: "t" });
+    expect(map["claude-old"]).toEqual({ label: "Old", thinking: [], contextWindow: 100000 }); // cached
+    expect(calls.filter((call) => call.url.includes("models.dev"))).toHaveLength(0);
+    const { conn: bare } = connection({ token: "t" });
     expect(Object.keys(await bare.models())).toEqual(Object.keys(Protocol.knownEndpoints[0].models));
-    expect(none.models).toBeUndefined(); // nothing fresh: the cache is left alone
   });
 
   test("message-verified presets never list: static catalog only, no /models fetch", async () => {
@@ -468,7 +530,8 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     const map = await conn.models();
     expect(calls).toHaveLength(0);
     expect(Object.keys(map)).toEqual(["deepseek-chat", "deepseek-reasoner"]);
-    expect(map["deepseek-reasoner"].reasoning).toBe(true);
+    expect(map["deepseek-reasoner"].thinking).toBeUndefined(); // every mode
+    expect(map["deepseek-chat"].thinking).toEqual([]); // no thinking control
   });
 
   test("testConnection: GET /models on Anthropic — a 401 THROWS with its status", async () => {
@@ -500,20 +563,21 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: the anthropic-ratelimit-* families land in the plan-usage channel", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const conn = new Protocol(URL, io);
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-requests-limit": "50",
       "anthropic-ratelimit-requests-remaining": "49",
       "anthropic-ratelimit-requests-reset": "2026-09-07T10:00:00Z",
+      "anthropic-ratelimit-tokens-limit": "48000",
+      "anthropic-ratelimit-tokens-remaining": "47000",
       "anthropic-ratelimit-input-tokens-limit": "40000",
       "anthropic-ratelimit-input-tokens-remaining": "39000",
       "anthropic-ratelimit-output-tokens-limit": "8000",
     }), io);
     expect(reported).toEqual({ quotas: {
       requests: { total: 50, remaining: 49, reset: "2026-09-07T10:00:00Z" },
-      inputTokens: { total: 40000, remaining: 39000 },
-      outputTokens: { total: 8000 },
+      tokens: { total: 48000, remaining: 47000 },
     } });
     reported = undefined;
     conn.reportPlanUsage(new Headers({ "content-type": "text/event-stream" }), io);
@@ -522,24 +586,35 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: subscription (OAuth) anthropic-ratelimit-unified-<window>-utilization lands as a {total:100, used, remaining, windowSeconds} quota per window", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const conn = new Protocol(URL, io);
+    // The unified-*-reset headers are UNPUBLISHED: observed captures are
+    // bare Unix epoch SECONDS (e.g. 1774933200), some deployments epoch
+    // ms — unlike the documented anthropic-ratelimit-*-reset family
+    // (RFC 3339, see the families test above). The provider passes the
+    // raw value through; the shared format layer (resetAtMs) normalizes
+    // the unit for display.
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-unified-5h-status": "allowed",
       "anthropic-ratelimit-unified-5h-utilization": "0.018416969696969696",
-      "anthropic-ratelimit-unified-5h-reset": "2026-09-19T21:00:00Z",
+      "anthropic-ratelimit-unified-5h-reset": "1789755600",
       "anthropic-ratelimit-unified-7d-utilization": "0.4231",
-      "anthropic-ratelimit-unified-7d-reset": "2026-09-26T00:00:00Z",
+      "anthropic-ratelimit-unified-7d-reset": "1790294400000",
     }), io);
     expect(reported).toEqual({ quotas: {
-      "5h": { total: 100, used: 2, remaining: 98, reset: "2026-09-19T21:00:00Z", windowSeconds: 18000 },
-      "7d": { total: 100, used: 42, remaining: 58, reset: "2026-09-26T00:00:00Z", windowSeconds: 604800 },
+      "5h": { total: 100, used: 2, remaining: 98, reset: "1789755600", windowSeconds: 18000 },
+      "7d": { total: 100, used: 42, remaining: 58, reset: "1790294400000", windowSeconds: 604800 },
     } });
+    // ...and both epoch shapes normalize to their moment through the
+    // shared format layer (resetAtMs) — a countdown, never a verbatim number.
+    expect(resetAtMs(reported.quotas["5h"].reset)).toBe(1789755600000); // epoch s -> ms
+    expect(resetAtMs(reported.quotas["7d"].reset)).toBe(1790294400000); // epoch ms pass-through
+    expect(resetAtMs(reported.quotas["7d"].reset)).toBe(resetAtMs(new Date(1790294400000).toISOString()));
   });
 
   test("reportPlanUsage: an OAuth response's unified windows and a request's own ratelimit-* families combine into one report", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const conn = new Protocol(URL, io);
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-unified-5h-utilization": "0.5",
@@ -552,11 +627,16 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     } });
   });
 
-  test("reportPlanUsage: a window name that isn't a clean <n><unit> shape gets no windowSeconds — never a guessed duration", () => {
+  test("reportPlanUsage: non-duration unified metadata such as overage is excluded from the two plan windows", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const conn = new Protocol(URL, io);
-    conn.reportPlanUsage(new Headers({ "anthropic-ratelimit-unified-burst-utilization": "0.1" }), io);
-    expect(reported).toEqual({ quotas: { burst: { total: 100, used: 10, remaining: 90 } } });
+    conn.reportPlanUsage(new Headers({
+      "anthropic-ratelimit-unified-5h-utilization": "0.39",
+      "anthropic-ratelimit-unified-overage-utilization": "0.0",
+    }), io);
+    expect(reported).toEqual({ quotas: {
+      "5h": { total: 100, used: 39, remaining: 61, windowSeconds: 18000 },
+    } });
   });
 });

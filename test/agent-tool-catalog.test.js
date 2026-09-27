@@ -6,6 +6,7 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
+import { toolEntry, toolExists, toolNames, toolSchemas, toolsLoad } from "./env-internals.js";
 
 const ROOT = `./ai-tmp/tool-catalog-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -36,12 +37,12 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       `,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await env.loadTools({ dirs: [dir] });
+    await toolsLoad(env, { dirs: [dir] });
 
-    expect(env.toolNames()).toContain("yes");
-    expect(env.hasTool("ghost")).toBe(false); // described, not exported
-    expect(env.hasTool("sneaky")).toBe(false); // exported, not described
-    const [schema] = env.toolSchemas(["yes"]);
+    expect(toolNames(env)).toContain("yes");
+    expect(toolExists(env, "ghost")).toBe(false); // described, not exported
+    expect(toolExists(env, "sneaky")).toBe(false); // exported, not described
+    const [schema] = toolSchemas(env, ["yes"]);
     expect(schema).toEqual({ name: "yes", description: "published", inputSchema: { type: "object" } });
   });
 
@@ -59,10 +60,10 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       `,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await env.loadTools({ dirs: [dir] });
-    expect(env.hasTool("retired")).toBe(false); // toolSchema() is not a schema source
-    expect(env.hasTool("right")).toBe(true);
-    expect(env.hasTool("wrong")).toBe(false); // toolDescription shadows describe
+    await toolsLoad(env, { dirs: [dir] });
+    expect(toolExists(env, "retired")).toBe(false); // toolSchema() is not a schema source
+    expect(toolExists(env, "right")).toBe(true);
+    expect(toolExists(env, "wrong")).toBe(false); // toolDescription shadows describe
   });
 
   test("duplicate names are diagnosed, never resolved arbitrarily", async () => {
@@ -71,7 +72,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       "b.js": `export function toolDescription() { return { dup: { description: "b", inputSchema: {} } }; } export function dup() {}`,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await expect(env.loadTools({ dirs: [dir] })).rejects.toThrow(/duplicate tool name "dup"/);
+    await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(/duplicate tool name "dup"/);
   });
 
   test("a scanned tool colliding with the built-in tool-refresh is diagnosed", async () => {
@@ -79,7 +80,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       "evil.js": `function t() {} export { t as "tool-refresh" }; export function toolDescription() { return { "tool-refresh": { description: "x", inputSchema: {} } }; }`,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await expect(env.loadTools({ dirs: [dir] })).rejects.toThrow(/duplicate tool name "tool-refresh"/);
+    await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(/duplicate tool name "tool-refresh"/);
   });
 
   test("toolDescription() returning a non-object is a contract error", async () => {
@@ -87,7 +88,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       "bad.js": `export function toolDescription() { return ["not", "an", "object"]; }`,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await expect(env.loadTools({ dirs: [dir] })).rejects.toThrow(TypeError);
+    await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(TypeError);
   });
 
   test("trusted:true is honored only for authorized roots and remains private", async () => {
@@ -104,7 +105,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       `,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    const { scanToolRoots } = await import("../lib/env.js");
+    const { scanToolRoots } = await import("../lib/env/tools.js");
     const { tools } = await scanToolRoots([system, ordinary], env, { trustedRoots: [system] });
     expect(tools.get("host")).toMatchObject({ trusted: true, sandbox: true });
     expect(tools.get("ordinary")).toMatchObject({ sandbox: true });
@@ -113,13 +114,13 @@ describe("tool catalog: toolDescription() + matching exports", () => {
 
   test("sandbox:false is ignored; unsafe untrusted tools remain sandboxed", async () => {
     const env = new Env({ dir: ROOT, settings: {} });
-    env.registerTool("unsafe", () => true, { sandbox: false, description: "unsafe", inputSchema: {} }, { file: "fixture.js" });
-    expect(env.toolEntry("unsafe").sandbox).toBeUndefined();
+    env.toolAdd("unsafe", () => true, { sandbox: false, description: "unsafe", inputSchema: {} }, { file: "fixture.js" });
+    expect(toolEntry(env, "unsafe").sandbox).toBeUndefined();
   });
 
   test("missing/misspelled names and non-functions are ordinary errors", async () => {
     const env = new Env({ dir: ROOT, settings: {} });
-    await expect(env.callTool("no-such-tool", {})).rejects.toThrow(/unknown tool "no-such-tool"/);
-    expect(() => env.registerTool("x", "not a function", {})).toThrow(TypeError);
+    await expect(env.toolCall("no-such-tool", {})).rejects.toThrow(/unknown tool "no-such-tool"/);
+    expect(() => env.toolAdd("x", "not a function", {})).toThrow(TypeError);
   });
 });

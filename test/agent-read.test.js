@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { Env } from "../lib/env.js";
 import { read, readDescription } from "../tools/read/read.js";
 import { resolveCwdPath } from "../tools/guard/resolve.js";
+import { toolSchemas, toolsLoad } from "./env-internals.js";
 
 const ROOT = `./ai-tmp/read-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -22,7 +23,7 @@ describe("read tool", () => {
     mkdirSync(ROOT, { recursive: true });
     writeFileSync(`${ROOT}/note.txt`, "hello π");
     expect(await read({ path: "./ai-tmp/../ai-tmp/read-" + process.pid + "/note.txt" }))
-      .toBe("hello π"); // dot-segments that stay inside cwd are fine
+      .toBe("[text/plain]\nhello π"); // dot-segments that stay inside cwd are fine
   });
 
   test("rejects '..' escapes outside the working folder — global policy, bad even if successful", async () => {
@@ -93,7 +94,7 @@ describe("read tool", () => {
     writeFileSync(`${folder}/agent.txt`, "agent");
     const context = { env: { cwd: project }, agent: { folder } };
     expect(await read({ path: "." }, context)).toContain("agent.txt");
-    expect(await read({ path: "../project.txt" }, context)).toBe("project");
+    expect(await read({ path: "../project.txt" }, context)).toBe("[text/plain]\nproject");
     await expect(read({ path: "missing.txt" }, context)).rejects.toThrow(
       "Hint: you're in `./agent`, use `../` to read files from the root project.",
     );
@@ -122,16 +123,16 @@ describe("read tool", () => {
 
   test("discovers as read through the package default root (tools/read.js wrapper)", async () => {
     const env = new Env({ settings: {} });
-    const names = await env.loadTools(); // default includes package ./tools
+    const names = await toolsLoad(env); // default includes package ./tools
     expect(names).toContain("read");
-    const [schema] = env.toolSchemas(["read"]);
+    const [schema] = toolSchemas(env, ["read"]);
     expect(schema.name).toBe("read");
-    const content = await env.callTool("read", { path: "./README.md" });
+    const content = await env.toolCall("read", { path: "./README.md" });
     expect(content).toContain("A transparent agent harness");
-    await expect(env.callTool("read", { path: "../outside" }))
+    await expect(env.toolCall("read", { path: "../outside" }))
       .rejects.toThrow(/escapes the working folder/);
     // a folder read lists entries through the same surface
-    const listing = await env.callTool("read", { path: "./tools" });
+    const listing = await env.toolCall("read", { path: "./tools" });
     expect(listing).toContain("ls ./tools:");
     expect(listing).toContain("read.js");
   });
@@ -243,7 +244,7 @@ describe("read info:true — file/query summary instead of the payload", () => {
     expect(out).toContain("lines: 3"); // "apple top\nbanana\nAPPLE caps" — 3 lines
     expect(out).toMatch(/created: \d{4}-\d{2}-\d{2}T/);
     expect(out).toMatch(/modified: \d{4}-\d{2}-\d{2}T/);
-    expect(out).toContain("the requested read would return 27 bytes (whole file)");
+    expect(out).toContain("the requested read would return 40 bytes (whole file)");
   });
 
   test("info reflects the requested narrowing (line range, search, binary)", async () => {
@@ -298,8 +299,8 @@ describe("read ranges and grep-like search", () => {
   test("a 1-based inclusive line range narrows the read, with a total-lines header", async () => {
     const rel = setup("lines.txt", numbered(30));
     const out = await read({ path: rel, startLine: 5, endLine: 25 });
-    expect(out.startsWith("[lines 5–25 of 30 total]\n")).toBe(true);
-    const body = out.split("\n").slice(1);
+    expect(out.startsWith("[text/plain]\n[lines 5–25 of 30 total]\n")).toBe(true);
+    const body = out.split("\n").slice(2);
     expect(body[0]).toBe("line-05");
     expect(body.at(-1)).toBe("line-25");
     expect(body).toHaveLength(21);
@@ -307,14 +308,21 @@ describe("read ranges and grep-like search", () => {
 
   test("open-ended line ranges default to the file start/end", async () => {
     const rel = setup("lines.txt", numbered(10));
-    expect((await read({ path: rel, startLine: 8 })).split("\n").slice(1)).toEqual(["line-08", "line-09", "line-10"]);
-    expect((await read({ path: rel, endLine: 2 })).split("\n").slice(1)).toEqual(["line-01", "line-02"]);
+    expect((await read({ path: rel, startLine: 8 })).split("\n").slice(2)).toEqual(["line-08", "line-09", "line-10"]);
+    expect((await read({ path: rel, endLine: 2 })).split("\n").slice(2)).toEqual(["line-01", "line-02"]);
+  });
+
+  test("direct reads label detected MIME types without labeling grep or folder output", async () => {
+    const markdown = setup("note.md", "# Note\n**bold**");
+    expect(await read({ path: markdown })).toBe("[text/markdown]\n# Note\n**bold**");
+    expect((await read({ path: markdown, startLine: 2 })).startsWith("[text/markdown]\n[lines 2–2 of 2 total]\n")).toBe(true);
+    expect((await read({ path: markdown, pattern: "bold" })).startsWith(`grep ${markdown}`)).toBe(true);
   });
 
   test("a character range slices UTF-8 characters (code points), endChar exclusive", async () => {
     const rel = setup("chars.txt", "hello π world"); // π is ONE character
     const out = await read({ path: rel, startChar: 0, endChar: 7 });
-    expect(out).toBe("[characters 0–6 of 13 total]\nhello π");
+    expect(out).toBe("[text/plain]\n[characters 0–6 of 13 total]\nhello π");
   });
 
   test("binary + base64 returns the byte range as base64 TEXT with a byte header", async () => {
@@ -369,7 +377,7 @@ describe("read ranges and grep-like search", () => {
     // "up to 5 lines, but no more than 10 characters": the line range
     // selects first, the character range caps the selection
     const out = await read({ path: rel, startLine: 1, endLine: 5, endChar: 10 });
-    expect(out).toBe("[lines 1–5 of 30 total]\n[characters 0–9 of 39 in the line range]\nline-01\nli");
+    expect(out).toBe("[text/plain]\n[lines 1–5 of 30 total]\n[characters 0–9 of 39 in the line range]\nline-01\nli");
     // a search inside both keeps the line range's original numbers
     const found = await read({ path: rel, startLine: 2, endLine: 4, endChar: 20, pattern: "line" });
     expect(found).toContain("2: line-02");
@@ -493,7 +501,7 @@ describe("read: system files and .ignore mark project-irrelevant content", () =>
     expect(await read({ path: rel("."), recursive: true })).not.toContain("Thumbs");
     expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("DS_Store");
     // relevance, not an access wall: a direct read answers
-    expect(await read({ path: rel(".DS_Store") })).toBe("junk apple");
+    expect(await read({ path: rel(".DS_Store") })).toBe("[application/octet-stream]\njunk apple");
     expect(await read({ path: rel("sub/Thumbs.db"), info: true })).toContain("type: file");
   });
 
@@ -511,8 +519,8 @@ describe("read: system files and .ignore mark project-irrelevant content", () =>
     expect(await read({ path: rel(".git/config"), pattern: "apple" }))
       .toBe(`grep: no matches for /apple/ in ${rel(".git/config")}`);
     // but the content is never REFUSED
-    expect(await read({ path: rel(".git/config") })).toBe("apple git internals");
-    expect(await read({ path: rel("sub/.git/config") })).toBe("apple nested git");
+    expect(await read({ path: rel(".git/config") })).toBe("[application/octet-stream]\napple git internals");
+    expect(await read({ path: rel("sub/.git/config") })).toBe("[application/octet-stream]\napple nested git");
   });
 
   test("a .ignore file hides matching files and folders from listings and searches", async () => {
@@ -536,7 +544,7 @@ describe("read: system files and .ignore mark project-irrelevant content", () =>
     writeFileSync(`${ROOT}/.ignore`, "secret.txt\n");
     writeFileSync(`${ROOT}/secret.txt`, "apple secret");
     // by name, info and data always answer
-    expect(await read({ path: rel("secret.txt") })).toBe("apple secret");
+    expect(await read({ path: rel("secret.txt") })).toBe("[text/plain]\napple secret");
     const i = await read({ path: rel("secret.txt"), info: true });
     expect(i).toContain("type: file");
     expect(i).toContain("size: 12 bytes");

@@ -30,27 +30,25 @@
  *
  * Transport: custom non-HTTP connect/send/read/close (send primes the
  * turn's frames, read pops one block descriptor per call, msg2events
- * translates it to normalized events). models() is a fixed local
+ * translates it to normalized events). Static models() is a fixed local
  * list; login() a no-auth marker (neither touches disk or network).
  */
 
 import { readFileSync } from "node:fs";
 import { NAMES } from "../lib/namespace.js";
 import { fileURLToPath } from "node:url";
-import Env from "../lib/env.js";
-const { ProviderError } = Env;
 
 const metadata = {
   label: "Test (scripted)",
   secret: true,
   spawn: true,
-  capabilities: { tools: true, thinking: true, streaming: true },
+  capabilities: { tools: true, thinking: [], streaming: true },
 };
 
 const FIXED_MODELS = {
-  "test-model": { label: "Test Model", reasoning: true, input: ["text"], secret: true },
-  ui: { label: "UI demonstration", reasoning: true, input: ["text"] },
-  "ui-response": { label: "UI worker response", reasoning: true, input: ["text"] },
+  "test-model": { label: "Test Model", input: ["text"], secret: true },
+  ui: { label: "UI demonstration", input: ["text"] },
+  "ui-response": { label: "UI worker response", input: ["text"] },
 };
 const BUILTIN_SCRIPTS = {
   ui: fileURLToPath(new URL("./test/ui.json", import.meta.url)),
@@ -67,7 +65,7 @@ const cursors = new WeakMap();
  * @returns {Array<Array<object>>} array of turns (arrays of blocks)
  */
 function resolveScript(aiio) {
-  let source = aiio?.settings?.script ?? process.env[NAMES.testScriptEnv] ?? BUILTIN_SCRIPTS[aiio?.currentModel];
+  let source = aiio?.settings?.script ?? process.env[NAMES.testScriptEnv] ?? BUILTIN_SCRIPTS[aiio?.modelCurrent];
   if (typeof source === "string") {
     const trimmed = source.trim();
     if (trimmed !== "" && !trimmed.startsWith("[")) {
@@ -79,10 +77,9 @@ function resolveScript(aiio) {
     !Array.isArray(source) || source.length === 0 ||
     !source.every((turn) => Array.isArray(turn))
   ) {
-    throw new ProviderError(
-      "provider",
+    throw Object.assign(new Error(
       `test provider: no script (set settings.script or ${NAMES.testScriptEnv} to an array of turns, JSON, or a JSON file path)`,
-    );
+    ), { kind: "provider" });
   }
   return source;
 }
@@ -91,7 +88,7 @@ function resolveScript(aiio) {
 
 /** The full context rides along untouched for test introspection. */
 function context2msg(context, aiio) {
-  return [{}, { model: aiio?.currentModel, messages: context }];
+  return [{}, { model: aiio?.modelCurrent, messages: context }];
 }
 
 /** Claim the next turn's blocks into the connection's frame queue. */
@@ -152,13 +149,13 @@ function msg2events(block, state = {}) {
     const args = call.arguments ?? {};
     return [
       {
-        type: "toolcall_start",
+        type: "tool_call_start",
         contentIndex: index,
         callId,
         name: call.name,
         arguments: args,
       },
-      { type: "toolcall_end", contentIndex: index, arguments: args },
+      { type: "tool_call_end", contentIndex: index, arguments: args },
     ];
   }
   if (typeof block?.error === "string") {
@@ -175,17 +172,17 @@ function msg2events(block, state = {}) {
 /* --------------------------------------- metadata surface: models/login */
 
 /** Fixed local model map — never the network, never the auth cache. */
-async function models() {
+function models() {
   return Object.fromEntries(Object.entries(FIXED_MODELS).map(([k, v]) => [k, { ...v }]));
-}
-
-async function login() {
-  return { type: "none" };
 }
 
 /** Scripted transport protocol. It is configured as a secret endpoint. */
 export default class TestProvider {
   static provider = metadata;
+
+  static async models() { return models(); }
+  static async testConnection() { return { models: Object.keys(FIXED_MODELS).length }; }
+  static login() { return { type: "none" }; }
 
   constructor(url, aiio) {
     this.url = url;
@@ -199,6 +196,4 @@ export default class TestProvider {
   async send(message) { return send(this, message); }
   async read() { return read(this); }
   async close() { return close(this); }
-  async models() { return models(); }
-  async login() { return login(); }
 }

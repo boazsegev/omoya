@@ -4,10 +4,13 @@
 // environment detection (MOONSHOT_API_KEY / KIMI_API_KEY), and the
 // OpenAI-default completion (transport, /models, login, verify).
 import { describe, expect, test, afterEach } from "bun:test";
-import { defineProvider, HttpStatusError } from "../lib/io.js";
+import { providerClass } from "./fakes.js";
 import KimiPlugin from "../providers/kimi.js";
 
-const Protocol = defineProvider(KimiPlugin, { name: "kimi" });
+const Protocol = await providerClass(KimiPlugin, "kimi");
+/** A failed HTTP response as the transport throws it (status and body ride along). */
+const httpError = (status, statusText, body) =>
+  Object.assign(new Error(`HTTP ${status} ${statusText}: ${body.slice(0, 200)}`), { status, body });
 
 const ENV_KEYS = ["MOONSHOT_API_KEY", "KIMI_API_KEY", "MOONSHOT_BASE_URL"];
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
@@ -19,7 +22,7 @@ afterEach(() => {
 });
 
 const aiio = (over = {}) => ({
-  currentModel: "kimi-k2-0905-preview",
+  modelCurrent: "kimi-k2-0905-preview",
   settings: { auth: { token: "sk-test" } },
   tools: () => [],
   ...over,
@@ -34,17 +37,19 @@ describe("kimi provider: construction and metadata", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
     expect(connection.baseUrl).toBe("https://api.moonshot.ai/v1");
     expect(connection.url).toBe("https://api.moonshot.ai/v1/chat/completions");
-    for (const method of ["send", "read", "close", "models", "login", "testConnection"]) {
-      expect(typeof connection[method], method).toBe("function"); // completed defaults
+    for (const method of ["send", "read", "close"]) {
+      expect(typeof connection[method], method).toBe("function"); // completed wire defaults
+    }
+    for (const method of ["models", "login", "testConnection"]) {
+      expect(typeof Protocol[method], method).toBe("function"); // completed catalog defaults
     }
     expect(typeof Protocol.provider.label).toBe("string"); // the label text is content
-    // flags stay boolean; the proven $web_search builtin joins the
-    // surface (Kimi documents no fetch tool)
+    // no thinking control; the direct REST web tools are its provider tools
+    // (/tools/search + /tools/fetch on the platform endpoints)
     expect(Protocol.provider.capabilities).toEqual({
-      tools: true,
-      thinking: true,
       streaming: true,
-      "web-search": expect.any(Function),
+      thinking: [],
+      tools: { "web-search": { function: expect.any(Function) }, "web-fetch": { function: expect.any(Function) } },
     });
   });
 
@@ -80,12 +85,12 @@ describe("kimi provider: construction and metadata", () => {
     expect(coding.oauth.authorizeUrl).toBeUndefined(); // not the PKCE shape
   });
 
-  test("detectEndpoints: MOONSHOT_API_KEY / KIMI_API_KEY configure dynamically, base URL overridable", async () => {
+  test("detect: MOONSHOT_API_KEY / KIMI_API_KEY configure dynamically, base URL overridable", async () => {
     for (const k of ENV_KEYS) delete process.env[k];
-    expect(await Protocol.detectEndpoints({ endpoints: {} })).toEqual({});
+    expect(await Protocol.detect({ endpoints: {} })).toEqual({});
     process.env.MOONSHOT_API_KEY = "sk-moon";
-    let found = await Protocol.detectEndpoints({ endpoints: {} });
-    expect(found.kimi).toEqual({
+    let found = await Protocol.detect({ endpoints: {} });
+    expect(found.moonshot).toEqual({
       provider: "kimi",
       url: "https://api.moonshot.ai/v1",
       dynamic: true,
@@ -93,18 +98,21 @@ describe("kimi provider: construction and metadata", () => {
     });
     process.env.MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
     process.env.KIMI_API_KEY = "sk-alt";
-    found = await Protocol.detectEndpoints({ endpoints: {} });
-    expect(found.kimi.url).toBe("https://api.moonshot.cn/v1");
-    // KIMI_API_KEY belongs to the coding subscription endpoint (pi's naming)
-    expect(found["kimi-coding"]).toEqual({
+    found = await Protocol.detect({ endpoints: {} });
+    expect(found.moonshot.url).toBe("https://api.moonshot.cn/v1");
+    // Keys issued by platform.kimi.ai use the Moonshot platform API,
+    // never the separate Kimi Code subscription relay.
+    expect(found.kimi).toEqual({
       provider: "kimi",
-      url: "https://api.kimi.com/coding/v1",
+      url: "https://api.moonshot.ai/v1",
       dynamic: true,
       auth: { type: "api_key", token: "sk-alt" },
     });
+    expect(found["kimi-coding"]).toBeUndefined();
     // an already-configured endpoint is never overridden
-    found = await Protocol.detectEndpoints({ endpoints: { kimi: { provider: "kimi", url: "x" } } });
+    found = await Protocol.detect({ endpoints: { kimi: { provider: "kimi", url: "x" } } });
     expect(found.kimi).toBeUndefined();
+    expect(found.moonshot.url).toBe("https://api.moonshot.cn/v1");
   });
 });
 
@@ -298,14 +306,10 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
     return calls;
   };
 
+  // the static catalog side, called the way Env calls it
   const connection = ({ token, ...rest } = {}, url = "https://api.moonshot.ai/v1") => {
-    const writes = {};
     const settings = { ...rest, ...(token !== undefined ? { auth: { token } } : {}) };
-    const io = aiio({
-      settings,
-      authSet: (data) => Object.assign(writes, data),
-    });
-    return { conn: new Protocol(url, io), writes };
+    return { conn: { models: () => Protocol.models({ url, auth: settings.auth, settings }) } };
   };
 
   test("live ids retain static metadata when present; unknown ids list without a registry fetch", async () => {
@@ -316,28 +320,52 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
       } } }],
       "/v1/models": [200, { data: [{ id: "kimi-k2-0905-preview" }, { id: "kimi-k3" }] }],
     });
-    const { conn, writes } = connection();
+    const { conn } = connection();
     const map = await conn.models();
     expect(map["kimi-k2-0905-preview"]).toEqual({
-      label: "Kimi K2 (0905)", reasoning: false, contextWindow: 262144, maxTokens: 262144,
+      label: "kimi-k2-0905-preview", contextWindow: 262144, maxTokens: 262144,
     });
     // kimi-k3 was never in the static list: the live list itself publishes it.
-    expect(map["kimi-k3"]).toEqual({ label: "kimi-k3", reasoning: false });
-    expect(writes.models["kimi-k3"]).toBeDefined(); // the cache refreshed
-    expect(writes.registry).toBeUndefined(); // a successful live list needs no registry fetch
+    expect(map["kimi-k3"]).toEqual({ label: "kimi-k3" });
   });
 
-  test("the registry snapshot caches (TTL); a live id missing everywhere still lists", async () => {
+  test("coding catalog displays the model ID even when the live name has spaces", async () => {
+    stubFetch({ "/v1/models": [200, { object: "list", data: [{
+      id: "kimi-for-coding", display_name: "Kimi Code Current",
+      context_length: 1048576, supports_reasoning: true,
+    }] }] });
+    const { conn } = connection({}, "https://api.kimi.com/coding/v1");
+    const map = await conn.models();
+    expect(map["kimi-for-coding"]).toMatchObject({
+      label: "kimi-for-coding", contextWindow: 1048576,
+    });
+  });
+
+  test("platform live response exposes documented context_length and supports_reasoning", async () => {
+    const calls = stubFetch({
+      "/v1/models": [200, { object: "list", data: [
+        { id: "kimi-k3", object: "model", context_length: 1048576, supports_reasoning: true },
+        { id: "kimi-k2.6", object: "model", context_length: 262144, supports_reasoning: true },
+      ] }],
+    });
+    const { conn } = connection({ token: "sk" });
+    const map = await conn.models();
+    expect(Object.keys(map)).toEqual(["kimi-k3", "kimi-k2.6"]);
+    expect(map["kimi-k3"]).toMatchObject({ contextWindow: 1048576 });
+    expect(map["kimi-k2.6"]).toMatchObject({ contextWindow: 262144 });
+    expect(calls).toEqual(["https://api.moonshot.ai/v1/models"]);
+  });
+
+  test("a live list needs no registry; a live id missing everywhere still lists", async () => {
     const calls = stubFetch({
       "models.dev": () => { throw new Error("registry down"); },
       "/v1/models": [200, { data: [{ id: "kimi-k2-thinking" }, { id: "brand-new-model" }] }],
     });
-    const cachedRegistry = { fetchedAt: Date.now(), models: { "kimi-k2-thinking": { label: "K2T", reasoning: true, contextWindow: 262144 } } };
-    const { conn } = connection({ token: "sk", registry: cachedRegistry });
+    const { conn } = connection({ token: "sk" });
     const map = await conn.models();
     expect(calls.filter((u) => u.includes("models.dev"))).toHaveLength(0); // live list needs no registry
-    expect(map["kimi-k2-thinking"]).toEqual({ label: "Kimi K2 Thinking", reasoning: true, contextWindow: 262144, maxTokens: 262144 });
-    expect(map["brand-new-model"]).toEqual({ label: "brand-new-model", reasoning: false }); // bare but listed
+    expect(map["kimi-k2-thinking"]).toEqual({ label: "kimi-k2-thinking", contextWindow: 262144, maxTokens: 262144 });
+    expect(map["brand-new-model"]).toEqual({ label: "brand-new-model" }); // bare but listed
   });
 
   test("a live list never fetches the registry, even when its cached snapshot contains obsolete ids", async () => {
@@ -345,7 +373,7 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
       "models.dev": () => { throw new Error("registry must not be queried"); },
       "/v1/models": [200, { data: [{ id: "brand-new-model" }] }],
     });
-    const { conn } = connection({ registry: { fetchedAt: Date.now(), models: { "old-model": { label: "Old" } } } });
+    const { conn } = connection();
     expect(Object.keys(await conn.models())).toEqual(["brand-new-model"]);
     expect(calls.filter((url) => url.includes("models.dev"))).toHaveLength(0);
   });
@@ -358,7 +386,7 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
       "/v1/models": [200, { data: [{ id: "brand-new-model", name: "Current name", reasoning: true, context_window: 5000 }] }],
     });
     const { conn } = connection();
-    expect((await conn.models())["brand-new-model"]).toMatchObject({ label: "Current name", reasoning: true, contextWindow: 5000 });
+    expect((await conn.models())["brand-new-model"]).toMatchObject({ label: "brand-new-model", contextWindow: 5000 });
   });
 
   test("fully offline: the static preset list is the fallback (coding endpoint)", async () => {
@@ -371,7 +399,8 @@ describe("kimi provider: models() — live list + registry auto-detection", () =
     // every static-preset model merges through (the catalog itself is content)
     const preset = Protocol.knownEndpoints.find((e) => e.name === "kimi-coding");
     for (const [id, entry] of Object.entries(preset.models)) {
-      expect(map[id]?.reasoning ?? false, id).toBe(entry.reasoning === true);
+      expect(map[id]?.contextWindow, id).toBe(entry.contextWindow);
+      expect(map[id]?.label).toBe(id);
     }
   });
 });
@@ -396,14 +425,14 @@ describe("kimi provider: msg2events (chunk translation)", () => {
     ] } }] });
     expect(callEvents).toEqual([
       { type: "text_end", contentIndex: 1 },
-      { type: "toolcall_start", contentIndex: 2, callId: "call_1", name: "read", arguments: "" },
-      { type: "toolcall_delta", contentIndex: 2, arguments: "{\"pa" },
+      { type: "tool_call_start", contentIndex: 2, callId: "call_1", name: "read", arguments: "" },
+      { type: "tool_call_delta", contentIndex: 2, arguments: "{\"pa" },
     ]);
     expect(flat(feed({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "th\":\"a.txt\"}" } }] } }] })))
-      .toEqual(["toolcall_deltath\":\"a.txt\"}"]);
+      .toEqual(["tool_call_deltath\":\"a.txt\"}"]);
     // finish closes the open call; the usage chunk terminates with tokens
     expect(flat(feed({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })))
-      .toEqual(["toolcall_end"]);
+      .toEqual(["tool_call_end"]);
     const io = aiio();
     const usageEvents = connection.msg2events(
       { id: "chatcmpl-1", model: "kimi-k2-0905-preview", choices: [], usage: { prompt_tokens: 321, completion_tokens: 42 } },
@@ -426,7 +455,7 @@ describe("kimi provider: msg2events (chunk translation)", () => {
   test("setContextUsage receives the endpoint-measured input tokens", () => {
     const io = aiio();
     let reported;
-    io.setContextUsage = (u) => { reported = u; };
+    io.contextUsageSet = (u) => { reported = u; };
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.msg2events({ choices: [], usage: { prompt_tokens: 99, completion_tokens: 1 } }, {}, io);
     expect(reported).toEqual({ used: 99 });
@@ -436,7 +465,7 @@ describe("kimi provider: msg2events (chunk translation)", () => {
 describe("kimi provider: classifyError (403 usage-limit vs a dead credential)", () => {
   test("a 403 with no credential-shaped body classifies \"provider\", NOT \"auth\" — never forces a re-login", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
-    const err = new HttpStatusError(403, "Forbidden", JSON.stringify({ error: { message: "rate limit exceeded, try again later" } }));
+    const err = httpError(403, "Forbidden", JSON.stringify({ error: { message: "rate limit exceeded, try again later" } }));
     const classified = connection.classifyError(err);
     expect(classified.kind).toBe("provider");
     expect(classified.message).toContain("temporary usage/rate limit");
@@ -444,19 +473,19 @@ describe("kimi provider: classifyError (403 usage-limit vs a dead credential)", 
 
   test("a 403 whose body names the credential itself still classifies \"auth\"", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
-    const err = new HttpStatusError(403, "Forbidden", JSON.stringify({ error: { message: "invalid api key" } }));
+    const err = httpError(403, "Forbidden", JSON.stringify({ error: { message: "invalid api key" } }));
     expect(connection.classifyError(err).kind).toBe("auth");
   });
 
   test("a 401 is always \"auth\" regardless of body (unambiguous)", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
-    const err = new HttpStatusError(401, "Unauthorized", JSON.stringify({ error: { message: "rate limit" } }));
+    const err = httpError(401, "Unauthorized", JSON.stringify({ error: { message: "rate limit" } }));
     expect(connection.classifyError(err).kind).toBe("auth");
   });
 
   test("every other error kind still routes through the shared taxonomy unchanged", () => {
     const connection = new Protocol("https://api.moonshot.ai/v1", aiio());
-    const err = new HttpStatusError(500, "Internal Server Error", "boom");
+    const err = httpError(500, "Internal Server Error", "boom");
     expect(connection.classifyError(err).kind).toBe("provider");
   });
 });
@@ -464,7 +493,7 @@ describe("kimi provider: classifyError (403 usage-limit vs a dead credential)", 
 describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* dialect)", () => {
   test("the bare X-RateLimit-Limit/-Remaining/-Reset family lands as a \"requests\" quota (no requests/tokens split, unlike OpenAI)", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.reportPlanUsage(new Headers({
       "X-RateLimit-Limit": "300",
@@ -478,7 +507,7 @@ describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* di
 
   test("an OpenAI-suffixed response (a compatible proxy) is honored too, and wins over the bare family when both are present", () => {
     let reported;
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
+    const io = aiio({ planUsageSet: (u) => { reported = u; } });
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.reportPlanUsage(new Headers({
       "x-ratelimit-limit-requests": "50",
@@ -494,12 +523,49 @@ describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* di
     } });
   });
 
-  test("nothing published on a dialect with no balance fallback (the coding subscription endpoint), nothing reported", () => {
-    let reported = "untouched";
-    const io = aiio({ setPlanUsage: (u) => { reported = u; } });
-    const connection = new Protocol("https://api.kimi.com/coding/v1", io);
-    connection.reportPlanUsage(new Headers({ "content-type": "text/event-stream" }), io);
-    expect(reported).toBe("untouched"); // setPlanUsage never called; no fetch attempted either
+  test("the coding subscription endpoint fetches its /usages allowances when headers publish nothing", async () => {
+    let requested;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      requested = { url: String(url), authorization: init.headers.authorization };
+      return Response.json({
+        usage: { limit: "100", used: "11", remaining: "89", resetTime: "2026-10-03T17:00:54Z" },
+        limits: [{ window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" }, detail: {
+          limit: "100", used: "14", remaining: "86", resetTime: "2026-09-28T10:00:54Z",
+        } }],
+        // This monetary ledger is deliberately not a plan quota.
+        booster_wallet: { balance: { amount: "6000000000" } },
+      });
+    };
+    try {
+      let reported;
+      const io = aiio({ planUsageSet: (u) => { reported = u; } });
+      const connection = new Protocol("https://api.kimi.com/coding/v1", io);
+      await connection.reportPlanUsage(new Headers({ "content-type": "text/event-stream" }), io);
+      expect(requested).toEqual({ url: "https://api.kimi.com/coding/v1/usages", authorization: "Bearer sk-test" });
+      expect(reported).toEqual({ quotas: {
+        "7d": { total: 100, used: 11, remaining: 89, reset: "2026-10-03T17:00:54Z" },
+        "5h": { total: 100, used: 14, remaining: 86, reset: "2026-09-28T10:00:54Z" },
+      } });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("caches the coding subscription usage snapshot and leaves malformed data unpublished", async () => {
+    let fetches = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetches += 1;
+      return Response.json({ usage: { limit: "not-a-number" }, limits: [{}] });
+    };
+    try {
+      let reported = false;
+      const io = aiio({ planUsageSet: () => { reported = true; } });
+      const connection = new Protocol("https://api.kimi.com/coding/v1", io);
+      await connection.reportPlanUsage(new Headers(), io);
+      await connection.reportPlanUsage(new Headers(), io);
+      expect(fetches).toBe(1);
+      expect(reported).toBeFalse();
+    } finally { globalThis.fetch = originalFetch; }
   });
 });
 
@@ -514,7 +580,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
       }), { status: 200 });
     };
     try {
-      const io = aiio({ setPlanUsage: (u) => { io.reports = [...(io.reports ?? []), u]; } });
+      const io = aiio({ planUsageSet: (u) => { io.reports = [...(io.reports ?? []), u]; } });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       expect(requested).toEqual({ url: "https://api.moonshot.ai/v1/users/me/balance", authorization: "Bearer sk-test" });
@@ -526,7 +592,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response(JSON.stringify({ data: { available_balance: 120.5 } }), { status: 200 });
     try {
-      const io = aiio({ setPlanUsage: (u) => { io.reports = [...(io.reports ?? []), u]; } });
+      const io = aiio({ planUsageSet: (u) => { io.reports = [...(io.reports ?? []), u]; } });
       const connection = new Protocol("https://api.moonshot.cn/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       expect(io.reports).toEqual([{ quotas: { balance: { remaining: 120.5, unit: "cny" } } }]);
@@ -538,7 +604,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => { fetches += 1; return new Response("{}", { status: 200 }); };
     try {
-      const io = aiio({ setPlanUsage: () => {} });
+      const io = aiio({ planUsageSet: () => {} });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers({ "X-RateLimit-Limit": "300", "X-RateLimit-Remaining": "297" }), io);
       expect(fetches).toBe(0);
@@ -550,7 +616,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => { fetches += 1; return new Response(JSON.stringify({ data: { available_balance: 1 } }), { status: 200 }); };
     try {
-      const io = aiio({ setPlanUsage: () => {} });
+      const io = aiio({ planUsageSet: () => {} });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       await connection.reportPlanUsage(new Headers(), io);
@@ -561,17 +627,17 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
   test("no token, a failed fetch, or a non-2xx/malformed response never throw and never report", async () => {
     const originalFetch = globalThis.fetch;
     try {
-      const noToken = aiio({ settings: { auth: {} }, setPlanUsage: () => { throw new Error("must not be called"); } });
+      const noToken = aiio({ settings: { auth: {} }, planUsageSet: () => { throw new Error("must not be called"); } });
       const conn1 = new Protocol("https://api.moonshot.ai/v1", noToken);
       await conn1.reportPlanUsage(new Headers(), noToken);
 
       globalThis.fetch = async () => { throw new Error("network down"); };
-      const netErr = aiio({ setPlanUsage: () => { throw new Error("must not be called"); } });
+      const netErr = aiio({ planUsageSet: () => { throw new Error("must not be called"); } });
       const conn2 = new Protocol("https://api.moonshot.ai/v1", netErr);
       await expect(conn2.reportPlanUsage(new Headers(), netErr)).resolves.toBeUndefined();
 
       globalThis.fetch = async () => new Response("nope", { status: 500 });
-      const bad = aiio({ setPlanUsage: () => { throw new Error("must not be called"); } });
+      const bad = aiio({ planUsageSet: () => { throw new Error("must not be called"); } });
       const conn3 = new Protocol("https://api.moonshot.ai/v1", bad);
       await conn3.reportPlanUsage(new Headers(), bad);
     } finally { globalThis.fetch = originalFetch; }

@@ -1,17 +1,19 @@
 // test/agent-cancel.test.js — proof for cancellation + session:
-// aiio.kill() emits a terminal partial, Agent persists it (synced
+// aiio.close() emits a terminal partial, Agent persists it (synced
 // onDone), resume restores it — the Agent-side half of the pattern
 // proven for stores in test/test-wiki-store.test.js.
 import { NAMES } from "../lib/namespace.js";
+import { resolve } from "node:path";
 import { describe, expect, test, afterEach } from "bun:test";
 import { rmSync, readFileSync } from "node:fs";
 import { cli } from "./bin-names.js";
 import { Agent } from "../lib/agent.js";
-import { SessionStore, findSessionFile } from "../lib/agent.js";
-import { normalizeCallbacks, dispatch } from "../lib/context.js";
+import { Context } from "../lib/context.js";
+import { callbacksNormalize, eventDispatch } from "../lib/context.js";
 import { fakeIO, scriptedIO, testEnv, USER, TOOLCALL, TEXT } from "./fakes.js";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { Env } from "../lib/env.js";
+import { toolEntry, toolsLoad } from "./env-internals.js";
 
 // spawned children get a THROWAWAY user settings folder (dynamic writes
 // — last-model.json, auth — never touch the shared suite layer)
@@ -23,12 +25,16 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 const lines = (file) => readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
   .filter((record) => record?.type !== "session-metadata"); // the first, origin line
 
-/** A fake IO that streams a partial then blocks until kill(). */
+/** A fake IO that streams a partial then blocks until kill();
+ *  `streaming` resolves once the partial is out (cancel after that). */
 function hangingIO(partialText) {
-  return fakeIO(async (io, callbacks) => {
-    const set = normalizeCallbacks(callbacks, {});
-    dispatch(set, { type: "text_start", contentIndex: 0 });
-    dispatch(set, { type: "text_delta", contentIndex: 0, text: partialText });
+  let started;
+  const streaming = new Promise((resolve) => { started = resolve; });
+  const io = fakeIO(async (io, callbacks) => {
+    const set = callbacksNormalize(callbacks, {});
+    eventDispatch(set, { type: "text_start", contentIndex: 0 });
+    eventDispatch(set, { type: "text_delta", contentIndex: 0, text: partialText });
+    started();
     return new Promise((resolve) => {
       io._onKill = () => resolve({
         type: "error",
@@ -39,19 +45,20 @@ function hangingIO(partialText) {
       });
     });
   });
+  io.streaming = streaming;
+  return io;
 }
 
 describe("Agent cancellation: kill → partial persisted → resume restores", () => {
   test("partial assistant message lands in the session log and replays", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io = hangingIO("partial ans");
     const agent = new Agent({
-      env, model: "p/m", session: "cancel", sessionDir: ROOT,
-      context: [USER("long question")], createIO: () => io,
+      env, model: "p/m", contextId: "cancel", context: [USER("long question")], createIO: () => io,
     });
 
     const runPromise = agent.run();
-    await Bun.sleep(10); // let the write start streaming
+    await io.streaming;
     await agent.cancel();
     const terminal = await runPromise;
 
@@ -59,15 +66,15 @@ describe("Agent cancellation: kill → partial persisted → resume restores", (
     expect(io.state).toBe("closed"); // killed IO is permanently closed
 
     // persisted WITHOUT manual flush (Agent syncs on the terminal)
-    const file = agent.session.file;
+    const file = agent.context.file;
     expect(lines(file)).toEqual([
       USER("long question"),
       { type: 3, content: [{ type: "text", text: "partial ans" }] },
     ]);
 
     // resume restores the partial exactly
-    const resumed = SessionStore.resume({ id: "cancel", dir: ROOT });
-    expect(resumed.context.at(-1)).toEqual({
+    const resumed = Context.resume({ id: "cancel", dir: ROOT });
+    expect(resumed.at(-1)).toEqual({
       type: 3,
       content: [{ type: "text", text: "partial ans" }],
     });
@@ -77,22 +84,27 @@ describe("Agent cancellation: kill → partial persisted → resume restores", (
     const env = await testEnv();
     let made = 0;
     const ios = [];
+    let onMade;
+    const nextIO = () => new Promise((resolve) => { onMade = resolve; });
     const agent = new Agent({
       env, model: "p/m", context: [USER("q")],
       createIO: () => {
         made++;
         const io = hangingIO(`part ${made}`);
         ios.push(io);
+        onMade?.(io);
         return io;
       },
     });
+    const firstIO = nextIO();
     const first = agent.run();
-    await Bun.sleep(10);
+    await (await firstIO).streaming;
     await agent.cancel();
     await first;
     // second run: new instance (kill closed the first) — cancel it too
+    const secondIO = nextIO();
     const second = agent.run();
-    await Bun.sleep(10);
+    await (await secondIO).streaming;
     await agent.cancel();
     await second;
     expect(made).toBe(2);
@@ -110,7 +122,7 @@ describe("CLI-level: SIGINT persists the partial into --session", () => {
   test("kill → partial on disk → resume continues", async () => {
     const sessionId = `cancel-cli-${process.pid}`;
     const dir = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-    const stale = findSessionFile(dir, sessionId);
+    const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
     server = Bun.serve({
@@ -151,10 +163,10 @@ describe("CLI-level: SIGINT persists the partial into --session", () => {
     expect(last.message.content).toEqual([{ type: "text", text: "par" }]);
 
     // the partial was persisted before exit — resume restores it
-    const file = findSessionFile(dir, sessionId);
+    const file = Context.fileOf({ dir: dir, id: sessionId });
     expect(lines(file).at(-1)).toEqual({ type: 3, content: [{ type: "text", text: "par" }] });
-    const resumed = SessionStore.resume({ id: sessionId, dir });
-    expect(resumed.context.at(-1).content).toEqual([{ type: "text", text: "par" }]);
+    const resumed = Context.resume({ id: sessionId, dir });
+    expect(resumed.at(-1).content).toEqual([{ type: "text", text: "par" }]);
     rmSync(file, { force: true });
   }, 15000);
 });
@@ -163,10 +175,10 @@ describe("Agent cancellation: in-flight TOOL children", () => {
   const FIXTURES = "./test/tool-fixtures";
   const fixtureEnv = async () => {
     const env = new Env({ dir: mkdtempSync("./ai-tmp/cancel-tool-"), settings: { providers: { p: { provider: "test", url: "test://script" } } } });
-    await env.loadTools({ dirs: [FIXTURES] });
+    await toolsLoad(env, { dirs: [FIXTURES] });
     return env;
   };
-  const toolResults = (agent) => agent.context.filter((m) => m.type === 4);
+  const toolResults = (agent) => agent.context.messages().filter((m) => m.type === 4);
 
   test("cancel during a tool call ends the turn cancelled — no further provider request", async () => {
     const env = await fixtureEnv();
@@ -226,8 +238,8 @@ describe("Agent cancellation: in-flight TOOL children", () => {
 
   test("cancel kills the sandboxed bash process group before it can stream again", async () => {
     const env = new Env({ dir: mkdtempSync("./ai-tmp/cancel-bash-"), settings: { providers: { p: { provider: "test", url: "test://script" } } } });
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.toolEntry("bash")).toMatchObject({ sandbox: true });
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolEntry(env, "bash")).toMatchObject({ sandbox: true });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "bash", { command: "printf 'first\\n'; sleep 2; printf 'late\\n'" }), { type: "done" }]]);
     const chunks = [];
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });

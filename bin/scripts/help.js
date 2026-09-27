@@ -35,10 +35,10 @@ stdin:   interactive lines, one user message per line (piped) or one
            /context-rollback <i>      remove every message at index >= i
            /context-pop               remove the last message
            /session-new [session-id]  start a new, empty session (the old
-                                    file stays on disk; 0/false = anonymous)
+                                    file stays on disk; 0/false = not logged)
            /new [session-id]          flat alias of /session-new
            /anon                      flat alias of /session-new false
-                                    (a new anonymous, unpersisted session)
+                                    (a new session that is not logged)
            /session-resume [id|latest]  resume a session (an explicit id
                                     resumes anywhere: the cwd becomes the
                                     session's own folder)
@@ -111,10 +111,10 @@ options:
                        (default: all discovered tools)
   --no-tool-fork      disable the tool sandbox: file tools run in-process
                        (default: forked — a crashing tool can't kill ${PROGRAM})
-  --tool-timeout <dur> host override of Env.toolTimeout (default 120s);
+  --tool-timeout <dur> host override of settings.tools.timeout (default 120s);
                        a ms numeral or unit string ("30s", "5m"). Tools
                        may request a schema-declared timeout; Agent extracts
-                       and caps it at Env.toolTimeoutLimit (default 20m)
+                       and caps it at settings.tools.timeoutLimit (default 20m)
   --tool-async        execute one message's tool calls concurrently
   --safe              safe mode: publish and execute ONLY read-only tools
                       (schemas marked safe: true) — exploration and planning
@@ -122,7 +122,8 @@ options:
                       tool error
   --session <id>       persist the context to the sessions folder as
                        session-<id>.jsonl (default: a fresh random UUID;
-                       "0"/"false"/"anon" = anonymous, nothing written)
+                       "0"/"false"/"anon" = not logged, nothing written
+                       until logging is turned on)
   --resume <id>        replay that session log first, then continue it
                      (true / latest: the latest session in the folder; an
                      explicit id resumes ANYWHERE — the cwd becomes the
@@ -139,7 +140,7 @@ options:
                        is unknown): provider requests per turn (32)
   --max-tool-calls <n> same fallback: tool executions per turn (64)
                        (the PRIMARY guard is context usage, settings.
-                       contextGuardCap/contextGuardTurnCap — 90%/40%)
+                       context.cap/context.turn — 90%/40%)
   --login              configure an endpoint with the interactive wizard, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
   --init               write a fresh ${NAMES.projectSettings} into the project

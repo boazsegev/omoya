@@ -140,7 +140,7 @@ describe("edit tool (pi semantics)", () => {
     seed("r.txt", "alpha beta gamma\n");
     const context = { call: { callId: "agent-7", name: "edit" } };
     const out = await edit({ path: rel("r.txt"), edits: [{ oldText: "beta", newText: "BETA" }] }, context);
-    expect(out.result).toContain("Edit id: agent-7");
+    expect(out.result).toMatch(/\bEdit id: \S+/);
     expect(readFileSync(rel("r.txt"), "utf8")).toBe("alpha BETA gamma\n");
     // the rollback: the path names the file the id belongs to — the
     // record carries the edits

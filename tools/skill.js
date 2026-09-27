@@ -1,13 +1,11 @@
 /**
  * tools/skill.js — the `skill` tool: load domain skills into the
  * conversation from Env's accumulated package/settings/configured/
- * environment/project skill roots — see
- * Env.defaultSkillRoots / lib/env/registry.js). Self-contained: a
- * tool receives no live Env instance (only the `args` it's called
- * with — see lib/env.js callTool), so it builds its own throwaway one
- * purely to read settings.json and resolve roots; roots are re-scanned
- * from disk on every call (no caching), so a skill added mid-session
- * shows up without a restart.
+ * environment/project skill roots — env.skills(), lib/env/catalogs.js).
+ * The calling Env (context.env) answers; a forked worker without one
+ * builds a throwaway Env purely to read settings and resolve roots.
+ * Skills are re-scanned from disk on every call (no caching), so a
+ * skill added mid-session shows up without a restart.
  *
  * The answer stays BRIEF by design: loading returns "Loaded skills:
  * <names>." (naming any requested names still unavailable, or
@@ -22,6 +20,7 @@
  */
 
 import Env from "../lib/env.js";
+import Agent from "../lib/agent.js";
 
 /**
  * Load skills into the conversation, or list the catalog.
@@ -29,13 +28,15 @@ import Env from "../lib/env.js";
  * @param {string[]} [args.names] - skills to load; omitted/empty lists the catalog
  * @returns {Promise<string|{result: string, system: string[]}>}
  */
-export async function skill({ names } = {}) {
-  const env = new Env(); // cheap: settings scan only, no providers/tools load
+export async function skill({ names } = {}, context) {
+  const env = context?.env ?? new Env(); // cheap: settings scan only, no providers/tools load
+  const skills = env.skills();
   const list = Array.isArray(names) ? names.map(String).filter((n) => n.trim() !== "") : [];
   if (list.length === 0) {
-    return env.skillCatalog().trimEnd(); // the skill list IS the answer
+    return Agent.skillCatalog(skills).trimEnd(); // the skill list IS the answer
   }
-  const { bodies, unknown } = env.skillBodies(list);
+  const unknown = list.filter((name) => !skills.has(name));
+  const bodies = list.filter((name) => skills.has(name)).map((name) => Agent.skillSection(skills.get(name)));
   if (bodies.length === 0) return "No requested skills are available. Call skill with no names to list available skills, then try again.";
   const loaded = list.filter((n) => !unknown.includes(n));
   const result = unknown.length > 0
@@ -43,7 +44,7 @@ export async function skill({ names } = {}) {
     : `Loaded skills: ${loaded.join(", ")}.`;
   // Each skill payload joins the conversation as its own system
   // message; the answer itself stays one line.
-  return { result, system: bodies.map((body) => body.trimEnd()) };
+  return { result, system: bodies };
 }
 
 export function toolDescription() {

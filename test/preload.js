@@ -40,6 +40,9 @@ globalThis.fetch = (url, ...args) => {
   if (target.includes(":11434") || target.includes(":1234")) {
     throw new Error(`live model server fetch forbidden in tests: ${target}`);
   }
+  // the models.dev context-window registry (lib/env/model-windows.js):
+  // hosts start its download at launch; tests stub it explicitly
+  if (target.includes("models.dev")) return Promise.reject(new Error(`registry fetch forbidden in tests: ${target}`));
   return original(url, ...args);
 };
 

@@ -27,6 +27,24 @@ describe("GTUI themes", () => {
     expect(theme.resolve("md.link link.hover")).toMatchObject({ fg: 6, bg: 4, attrs: 4 });
   });
 
+  test("shared roles accept per-mode partial overrides including cursor, animation and decoration", () => {
+    const tokens = {
+      text: { fg: "#123456", bold: true },
+      cursor: { shape: "underline", blinkMs: 700 },
+      accent: { fg: "#112233", animation: "wave", decoration: { left: { glyph: "▌", role: "text" } } },
+      light: { text: { bg: "#ffffff" }, cursor: { fg: "#334455" }, accent: { fg: "#223344" } },
+      dark: { text: { bg: "#000000" }, cursor: { fg: "#ddeeff" }, accent: { fg: "#aabbcc" } },
+    };
+    const light = createTheme(tokens, { dark: false });
+    const dark = createTheme(tokens, { dark: true });
+    expect(light.resolve("text")).toMatchObject({ fg: "#123456", bg: "#ffffff", attrs: 1 });
+    expect(dark.resolve("text")).toMatchObject({ fg: "#123456", bg: "#000000", attrs: 1 });
+    expect(light.cursor).toEqual({ color: "#334455", shape: "underline", blinkMs: 700 });
+    expect(dark.cursor.color).toBe("#ddeeff");
+    expect(light.animation("accent")).toEqual({ type: "wave" });
+    expect(light.decoration("accent")?.left.glyph).toBe("▌");
+  });
+
   test("detects COLORFGBG correctly and composes base plus inline roles", () => {
     const theme = createTheme({
       text: {},

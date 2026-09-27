@@ -106,12 +106,6 @@ async function main() {
       return;
     }
   }
-  // Startup model-cache renewal: every endpoint reports its available
-  // models in the BACKGROUND (failures keep the stale/static list) —
-  // startup never waits on a slow or busy endpoint; selection paths
-  // that need a live list refresh it themselves (endpointOnly, login).
-  env.refreshModels().catch(() => {});
-
   // Resolve the --model combo AFTER providers load (needs the registry
   // and known model lists): explicit combo, cached model match,
   // provider-only (first available model), or bare model name.
@@ -152,7 +146,7 @@ async function main() {
   const disarm = armCancelSignals({
     onCancel: (signal) => {
       log(`${signal} received; cancelling`);
-      aiio.kill().finally(() => process.exit(EXIT.cancelled));
+      aiio.close().finally(() => process.exit(EXIT.cancelled));
     },
   });
 

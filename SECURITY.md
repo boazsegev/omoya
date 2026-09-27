@@ -8,6 +8,10 @@
 
 Do not run the agent in a working tree containing untrusted symlinks, and do not treat `bash` as suitable for handling secrets outside that tree. A future safe shell would require kernel-enforced read confinement or descriptor-relative/no-follow filesystem primitives; neither is supplied by the current macOS seatbelt/Linux bubblewrap write-sandbox configuration.
 
+## Tool configuration trust
+
+Tool code loads from installed/package and user-settings roots, plus trusted `tools.folders` arrays. Every project-scanned settings/auth file removes `tools.folders`; only `tools.timeout`, `tools.timeoutLimit`, and `tools.concurrency` survive. Non-object project `tools` values cannot replace the trusted object. Settings merging rejects prototype-control keys so inherited values cannot bypass folder sanitization. Constructor settings are trusted host configuration.
+
 ## Jobs filesystem boundary
 
 Jobs checks that its layout directories are real directories and rejects observed

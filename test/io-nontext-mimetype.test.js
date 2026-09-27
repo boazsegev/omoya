@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import Context from "../lib/context.js";
-import { context2msg as openaiContext2msg } from "../lib/env/openai.js";
+import { editBlock } from "../lib/context/edit.js";
+import { context2msg as openaiContext2msg } from "../lib/io/openai.js";
 import KimiProvider from "../providers/kimi.js";
 import AnthropicProvider from "../providers/anthropic.js";
 import OllamaProvider from "../providers/ollama.js";
@@ -9,14 +10,14 @@ const binary = (mimetype, content = "QUJD") => ({
   type: Context.ContentType.Binary, mimetype, content,
 });
 const user = (block) => ({ type: Context.MessageType.User, content: [block] });
-const io = { currentModel: "model", settings: {}, tools: () => [] };
+const io = { modelCurrent: "model", settings: {}, tools: () => [] };
 
 describe("non-text context mimetype contract", () => {
   test("mimetype is a public content field and survives context edits", () => {
     const block = binary("image/webp");
-    expect(Context.mimetypeOf(block)).toBe("image/webp");
+    expect(Context.mimeOf(block)).toBe("image/webp");
     const context = [user(block)];
-    Context.editBlock(context, 0, 0, block);
+    editBlock(context, 0, 0, block);
     expect(context[0].content[0]).toEqual(block);
   });
 

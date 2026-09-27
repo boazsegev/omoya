@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createCommands as createAppCommands } from "../lib/app/tui/commands.js";
 import { Agent } from "../lib/agent.js";
+import { toolsLoad } from "./env-internals.js";
 
 const createCommands = (options) => createAppCommands({ copy: () => false, ...options });
 import { testEnv } from "./fakes.js";
@@ -17,7 +18,7 @@ async function setup(files) {
   const dir = mkdtempSync("./ai-tmp/commands-tools-");
   for (const [name, code] of Object.entries(files)) writeFileSync(join(dir, name), code);
   const env = await testEnv();
-  await env.loadTools({ dirs: [dir] });
+  await toolsLoad(env, { dirs: [dir] });
   const lines = [];
   const agent = new Agent({ env, model: "fake/m", context: [] });
   const commands = createCommands({ agent, log: (l) => lines.push(l) });

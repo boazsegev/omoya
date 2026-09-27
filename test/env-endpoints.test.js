@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { Env } from "../lib/env.js";
 import OllamaPlugin from "../providers/ollama.js";
 import OpenAIPlugin from "../providers/openai.js";
+import AnthropicPlugin from "../providers/anthropic.js";
 import { listEndpointModels, listModelCandidates, loginEndpoint, resolveModelCombo } from "../lib/cli.js";
+import { authSetOf, batch, detect, dynamic, endpointOf, lastPair, mergeInMemory, modelsOf, namesOf, providerAdd, providerNamesOf, providerOf, providersLoad, refresh, registered, remember, reread, settingsOf, toolNames } from "./env-internals.js";
 
 let dir;
 const savedSettingsDir = process.env[NAMES.settingsEnv];
@@ -27,7 +29,7 @@ function protocolSource(name, detected = {}) {
   return `
 export default class ${name}Protocol {
   static provider = { label: "${name}", capabilities: {} };
-  static async detectEndpoints({ settings }) {
+  static async detect({ settings }) {
     if (settings.loadedBeforeProviders !== true) throw new Error("settings loaded too late");
     return ${JSON.stringify(detected)};
   }
@@ -40,9 +42,9 @@ describe("Env protocol classes and endpoint settings", () => {
     const env = await Env.create({ dir, cwd: dir, settings: {
       providers: { "openai-codex": { provider: "openai", url: "https://chatgpt.com/backend-api/codex" } },
     } }, { detect: false });
-    expect(env.provider("openai")).toBeDefined();
-    expect(env.endpoint("openai-codex")?.provider).toBe("openai");
-    expect(env.toolNames().length).toBeGreaterThan(1);
+    expect(providerOf(env, "openai")).toBeDefined();
+    expect(endpointOf(env, "openai-codex")?.provider).toBe("openai");
+    expect(toolNames(env).length).toBeGreaterThan(1);
   });
 
   test("loads basename-keyed classes from package and configured roots after settings (NEVER the project folder)", async () => {
@@ -67,11 +69,11 @@ describe("Env protocol classes and endpoint settings", () => {
 
     const env = new Env({ dir, cwd });
     expect(env.settings.loadedBeforeProviders).toBe(true);
-    await env.loadProviders();
+    await providersLoad(env);
 
-    expect(env.providerNames()).toEqual(expect.arrayContaining(["alpha", "gamma", "openai"])); // beta: project root, never scanned
-    expect(env.providers.alpha.name).toBe("AlphaProtocol");
-    expect(env.endpoints).toEqual({
+    expect(providerNamesOf(env)).toEqual(expect.arrayContaining(["alpha", "gamma", "openai"])); // beta: project root, never scanned
+    expect(env._providers.alpha.name).toBe("AlphaProtocol");
+    expect(env._endpoints).toEqual({
       alphaLocal: { provider: "alpha", url: "http://explicit" },
       alphaRemote: { provider: "alpha", url: "http://remote" },
     });
@@ -80,9 +82,9 @@ describe("Env protocol classes and endpoint settings", () => {
   test("the default class endpoint detector does no work", async () => {
     class QuietProtocol {}
     const env = new Env({ dir, cwd: dir, settings: { providers: {} } });
-    env.registerProvider("quiet", QuietProtocol);
-    await env.detectEndpoints();
-    expect(env.endpoints).toEqual({});
+    providerAdd(env, "quiet", QuietProtocol);
+    await detect(env);
+    expect(env._endpoints).toEqual({});
   });
 
   test("Ollama and OpenAI protocol classes detect only their known local endpoints", async () => {
@@ -94,10 +96,10 @@ describe("Env protocol classes and endpoint settings", () => {
     };
     try {
       const env = new Env({ dir, cwd: dir });
-      env.registerProvider("ollama", OllamaPlugin);
-      env.registerProvider("openai", OpenAIPlugin);
-      await env.detectEndpoints();
-      expect(env.endpoints).toEqual({
+      providerAdd(env, "ollama", OllamaPlugin);
+      providerAdd(env, "openai", OpenAIPlugin);
+      await detect(env);
+      expect(env._endpoints).toEqual({
         ollama: { provider: "ollama", url: "http://localhost:11434", local: true },
         "lm-studio": { provider: "openai", url: "http://localhost:1234/v1" },
       });
@@ -107,40 +109,29 @@ describe("Env protocol classes and endpoint settings", () => {
     }
   });
 
-  test("new Ollama endpoints are local unless explicitly remote", () => {
-    const env = new Env({ dir, cwd: dir });
-    env.saveEndpoint("default-ollama", { provider: "ollama", url: "http://host" });
-    env.saveEndpoint("remote-ollama", { provider: "ollama", url: "https://host", remote: true });
-    expect(env.endpoint("default-ollama")).toMatchObject({ local: true });
-    expect(env.endpointLocal("default-ollama")).toBe(true);
-    expect(env.endpoint("remote-ollama").local).toBeUndefined();
-    expect(env.endpointLocal("remote-ollama")).toBe(false);
-  });
-
   test("Ollama login marks a new endpoint local unless its prior configuration is remote", async () => {
     class OllamaLogin {
-      async login() { return { type: "none" }; }
-      async testConnection() { return {}; }
-      async models() { return {}; }
-      async close() {}
+      static login() { return { type: "none" }; }
+      static async testConnection() { return {}; }
+      static async models() { return {}; }
     }
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("ollama", OllamaLogin);
+    providerAdd(env, "ollama", OllamaLogin);
     await loginEndpoint(env, { name: "new-ollama", provider: "ollama", url: "http://host" });
-    expect(env.endpoint("new-ollama")).toMatchObject({ local: true });
-    env.saveEndpoint("remote-ollama", { provider: "ollama", url: "https://host", remote: true });
+    expect(endpointOf(env, "new-ollama")).toMatchObject({ local: true });
+    env.settings.providers["remote-ollama"] = { provider: "ollama", url: "https://host", remote: true };
     await loginEndpoint(env, { name: "remote-ollama", provider: "ollama", url: "https://host" });
-    expect(env.endpoint("remote-ollama")).toMatchObject({ remote: true });
-    expect(env.endpoint("remote-ollama").local).toBeUndefined();
+    expect(endpointOf(env, "remote-ollama")).toMatchObject({ remote: true });
+    expect(endpointOf(env, "remote-ollama").local).toBeUndefined();
   });
 
   test("explicit endpoint settings always beat automatic detection", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { ollama: { provider: "ollama", url: "https://remote.example" } },
     } });
-    env.registerProvider("ollama", OllamaPlugin);
-    await env.detectEndpoints();
-    expect(env.endpoint("ollama")).toEqual({ provider: "ollama", url: "https://remote.example" });
+    providerAdd(env, "ollama", OllamaPlugin);
+    await detect(env);
+    expect(endpointOf(env, "ollama")).toEqual({ provider: "ollama", url: "https://remote.example" });
   });
 
   test("endpoint auth and model cache persist under the endpoint name", () => {
@@ -149,15 +140,15 @@ describe("Env protocol classes and endpoint settings", () => {
       cwd: dir,
       settings: { providers: { remote: { provider: "ollama", url: "https://host" } } },
     });
-    env.authSet("remote", { token: "secret", models: { m: null } });
-    expect(env.endpointSettings("remote")).toEqual({
+    authSetOf(env, "remote", { token: "secret", models: { m: null } });
+    expect(settingsOf(env, "remote")).toEqual({
       provider: "ollama",
       url: "https://host",
       auth: { token: "secret" },
       models: { m: null },
     });
     expect(JSON.parse(readFileSync(join(dir, "auth-remote.json"), "utf8"))).toEqual({
-      remote: { provider: "ollama", url: "https://host", auth: { token: "secret" }, models: { m: null } },
+      remote: { auth: { token: "secret" }, models: { m: null } },
     });
   });
 });
@@ -165,57 +156,83 @@ describe("Env protocol classes and endpoint settings", () => {
 describe("ambient API-key endpoint detection", () => {
   test("OPENAI_API_KEY configures a DYNAMIC openai endpoint — in memory only, never persisted", async () => {
     const env = new Env({ dir, cwd: dir });
-    await env.loadProviders({ dirs: [join(dir, "none")], detect: false });
-    env.registerProvider("openai", OpenAIPlugin);
+    await providersLoad(env, { dirs: [join(dir, "none")], detect: false });
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-ambient";
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).toContain("openai"); // lm-studio may co-detect when it runs locally
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
     }
-    expect(env.endpoint("openai")).toEqual({ provider: "openai", url: "https://api.openai.com/v1" });
+    expect(endpointOf(env, "openai")).toEqual({ provider: "openai", url: "https://api.openai.com/v1" });
     // the key never lands in the endpoint config — it lives in the auth namespace
-    expect(env.endpointSettings("openai").auth.token).toBe("sk-ambient");
+    expect(settingsOf(env, "openai").auth.token).toBe("sk-ambient");
     // environment-defined: dynamic, and NOTHING is written to disk
-    expect(env.isDynamic("openai")).toBe(true);
+    expect(dynamic(env, "openai")).toBe(true);
     expect(existsSync(join(dir, "auth-openai.json"))).toBe(false);
+  });
+
+  test("an auto-detected Anthropic key and workspace are process-only and leave no residue", async () => {
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    const savedWorkspace = process.env.ANTHROPIC_WORKSPACE_ID;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-multi";
+    process.env.ANTHROPIC_WORKSPACE_ID = "wrkspc_team";
+    try {
+      const env = new Env({ dir, cwd: dir });
+      providerAdd(env, "anthropic", AnthropicPlugin);
+      await detect(env);
+      expect(listModelCandidates(env)).toContain("anthropic/claude-opus-5");
+      expect(settingsOf(env, "anthropic").auth.workspaceId).toBe("wrkspc_team");
+      expect(existsSync(join(dir, "auth-anthropic.json"))).toBe(false);
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_WORKSPACE_ID;
+      await detect(env);
+      expect(env._endpoints.anthropic).toBeUndefined();
+      expect(env._settings.anthropic).toBeUndefined();
+      expect(existsSync(join(dir, "auth-anthropic.json"))).toBe(false);
+    } finally {
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+      if (savedWorkspace === undefined) delete process.env.ANTHROPIC_WORKSPACE_ID;
+      else process.env.ANTHROPIC_WORKSPACE_ID = savedWorkspace;
+    }
   });
 
   test("XAI_API_KEY configures a dynamic xai endpoint (pi's environment naming)", async () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.XAI_API_KEY;
     process.env.XAI_API_KEY = "xai-ambient";
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).toContain("xai");
     } finally {
       if (saved === undefined) delete process.env.XAI_API_KEY;
       else process.env.XAI_API_KEY = saved;
     }
-    expect(env.endpoint("xai")).toEqual({ provider: "openai", url: "https://api.x.ai/v1" });
-    expect(env.endpointSettings("xai").auth.token).toBe("xai-ambient");
-    expect(env.isDynamic("xai")).toBe(true);
+    expect(endpointOf(env, "xai")).toEqual({ provider: "openai", url: "https://api.x.ai/v1" });
+    expect(settingsOf(env, "xai").auth.token).toBe("xai-ambient");
+    expect(dynamic(env, "xai")).toBe(true);
     expect(existsSync(join(dir, "auth-xai.json"))).toBe(false);
   });
 
   test("AZURE_OPENAI_API_KEY needs AZURE_OPENAI_BASE_URL to configure azure-openai", async () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const savedKey = process.env.AZURE_OPENAI_API_KEY;
     const savedUrl = process.env.AZURE_OPENAI_BASE_URL;
     process.env.AZURE_OPENAI_API_KEY = "az-key";
     delete process.env.AZURE_OPENAI_BASE_URL;
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).not.toContain("azure-openai"); // no base URL: no endpoint
       process.env.AZURE_OPENAI_BASE_URL = "https://res.openai.azure.com/openai/v1";
-      const added2 = await env.detectEndpoints();
+      const added2 = await detect(env);
       expect(added2).toContain("azure-openai");
-      expect(env.endpoint("azure-openai").url).toBe("https://res.openai.azure.com/openai/v1");
+      expect(endpointOf(env, "azure-openai").url).toBe("https://res.openai.azure.com/openai/v1");
     } finally {
       if (savedKey === undefined) delete process.env.AZURE_OPENAI_API_KEY;
       else process.env.AZURE_OPENAI_API_KEY = savedKey;
@@ -229,17 +246,17 @@ describe("ambient API-key endpoint detection", () => {
       dir, cwd: dir,
       settings: { providers: { openai: { provider: "openai", url: "https://custom/v1" } } },
     });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-ambient";
     try {
-      await env.detectEndpoints();
+      await detect(env);
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
     }
-    expect(env.endpoint("openai").url).toBe("https://custom/v1");
-    expect(env.endpointSettings("openai").token).toBeUndefined();
+    expect(endpointOf(env, "openai").url).toBe("https://custom/v1");
+    expect(settingsOf(env, "openai").token).toBeUndefined();
   });
 });
 
@@ -258,11 +275,9 @@ describe("endpointModels / refreshModels (startup model-cache renewal)", () => {
     });
     class Wire {
       static provider = {};
-      constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-      async models() { return behavior(this); }
-      async close() {}
+      static async models({ url }) { return behavior({ url }); }
     }
-    env.registerProvider("wire", Wire);
+    providerAdd(env, "wire", Wire);
     return env;
   };
 
@@ -271,16 +286,14 @@ describe("endpointModels / refreshModels (startup model-cache renewal)", () => {
     const env = wireEnv((self) => {
       seen.push(self.url);
       if (self.url === "http://dead") throw new Error("unreachable");
-      const models = { [`m@${self.url}`]: null };
-      self.aiio.authSet({ models });
-      return models;
+      return { [`m@${self.url}`]: null };
     });
-    const answered = await env.refreshModels();
+    const answered = await refresh(env);
     expect(seen.sort()).toEqual(["http://dead", "http://live", "http://manual"]);
     expect(answered.sort()).toEqual(["dead", "live", "manual"]); // fallbacks count as answered
-    expect(env.endpointSettings("live").models).toEqual({ "m@http://live": null });
+    expect(settingsOf(env, "live").models).toEqual({ "m@http://live": null });
     // the manual endpoint's fetched map merged over its static config list
-    expect(env.endpointSettings("manual").models).toEqual({
+    expect(settingsOf(env, "manual").models).toEqual({
       fixed: { label: "Fixed" },
       "m@http://manual": null,
     });
@@ -288,18 +301,46 @@ describe("endpointModels / refreshModels (startup model-cache renewal)", () => {
 
   test("a failing endpoint keeps its stale cached list", async () => {
     const env = wireEnv(() => { throw new Error("down"); });
-    env.authSet("dead", { models: { stale: { label: "Stale" } } });
-    await env.refreshModels();
-    expect(env.endpointSettings("dead").models).toEqual({ stale: { label: "Stale" } });
+    authSetOf(env, "dead", { models: { stale: { label: "Stale" } } });
+    await refresh(env);
+    expect(settingsOf(env, "dead").models).toEqual({ stale: { label: "Stale" } });
   });
 
   test("endpointModels without refresh reads cache + static config only", async () => {
     let queried = 0;
     const env = wireEnv(() => { queried++; return { live: null }; });
-    const models = await env.endpointModels("manual");
+    const models = await modelsOf(env, "manual");
     expect(queried).toBe(0);
     expect(models).toEqual({ fixed: { label: "Fixed" } });
-    expect(await env.endpointModels("nowhere")).toEqual({});
+    expect(await modelsOf(env, "nowhere")).toEqual({});
+  });
+
+  test("a preferences placeholder rides the ADOPTED environment connection (endpoint() is the effective connection view)", async () => {
+    // The rule: a providers entry with neither `url` nor `provider` is
+    // not an endpoint — it is a user PREFERENCE for the endpoint a
+    // later detection adopts. Env decides the merge ONCE (endpoint()):
+    // the adopted connection's protocol/URL show through while the
+    // preference's own fields win. Reading the placeholder raw fell
+    // back to the OpenAI default at no URL — "no models" for an
+    // env-key anthropic.
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { cloud: { filter: "^keep" } },
+    } });
+    providerAdd(env, "wire", class Wire {
+      static provider = {};
+      static async models() { return { "keep-1": null, drop: { label: "Drop" } }; }
+    });
+    env._dynamicEndpoints.add("cloud");
+    env._dynamicConnections.set("cloud", { provider: "wire", url: "http://adopted" });
+    expect(endpointOf(env, "cloud")).toEqual({ provider: "wire", url: "http://adopted", filter: "^keep" });
+    const models = await modelsOf(env, "cloud", { refresh: true });
+    expect(models).toEqual({ "keep-1": null, drop: { label: "Drop", secret: true } }); // the preference's filter applies
+    expect(settingsOf(env, "cloud").models["keep-1"]).toBeNull(); // the cache refreshed in memory (dynamic: no file)
+    expect(existsSync(join(dir, "auth-cloud.json"))).toBe(false);
+    // the placeholder alone still resolves NOTHING (it is not an endpoint)
+    const bare = new Env({ dir, cwd: dir, settings: { providers: { cloud: { filter: "^keep" } } } });
+    expect(endpointOf(bare, "cloud")).toEqual({ filter: "^keep" });
+    expect(namesOf(bare)).toEqual([]);
   });
 });
 
@@ -313,7 +354,7 @@ describe("secret endpoints and models", () => {
         test: { models: { "test-model": { label: "Test Model", secret: true } } },
       },
     });
-    env.registerProvider("test", class TestProtocol {});
+    providerAdd(env, "test", class TestProtocol {});
 
     expect(listModelCandidates(env)).toEqual([]);
     expect(listEndpointModels(env)).toEqual([]);
@@ -333,20 +374,23 @@ describe("endpoint model filter (providers.<name>.filter)", () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { codex: { provider: "openai", url: "http://x", filter: "(luna|sol|astra)", models: MODELS } },
     } });
-    const { models } = env.endpointSettings("codex");
+    const { models } = settingsOf(env, "codex");
     expect(models["gpt-6-sol"]).toEqual({ label: "Sol" });
     expect(models["gpt-6-astra"]).toEqual({ label: "Astra" });
     expect(models["gpt-5.6-luna"]).toBeNull();
     expect(models["gpt-5-pro"]).toEqual({ label: "Pro", secret: true });
-    // the raw stored config is untouched — the filter is a view
-    expect(env.endpoint("codex").models["gpt-5-pro"]).toEqual({ label: "Pro" });
+    // the stored config is untouched — the filter is a view
+    expect(env._endpoints.codex.models["gpt-5-pro"]).toEqual({ label: "Pro" });
+    // endpoint() is the effective CONNECTION view: settings-cache
+    // fields (models) live on endpointSettings only
+    expect(endpointOf(env, "codex")).toEqual({ provider: "openai", url: "http://x", filter: "(luna|sol|astra)" });
   });
 
   test("menus/completions/combo-resolution hide filtered-out models through the secret path", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { codex: { provider: "openai", url: "http://x", filter: "(luna|sol|astra)", models: MODELS } },
     } });
-    env.registerProvider("openai", class OpenAIProtocol {});
+    providerAdd(env, "openai", class OpenAIProtocol {});
     expect(listEndpointModels(env)).toEqual([{ name: "codex", models: ["gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna"] }]);
     const candidates = listModelCandidates(env);
     expect(candidates).toContain("codex/gpt-6-sol");
@@ -364,27 +408,21 @@ describe("endpoint model filter (providers.<name>.filter)", () => {
     } });
     class Wire {
       static provider = {};
-      constructor(url, aiio) { this.aiio = aiio; }
-      async models() {
-        const models = { "keep-me": null, drop: { label: "Drop" } };
-        this.aiio.authSet({ models });
-        return models;
-      }
-      async close() {}
+      static async models() { return { "keep-me": null, drop: { label: "Drop" } }; }
     }
-    env.registerProvider("wire", Wire);
-    const models = await env.endpointModels("live", { refresh: true });
+    providerAdd(env, "wire", Wire);
+    const models = await modelsOf(env, "live", { refresh: true });
     expect(models).toEqual({ "keep-me": null, drop: { label: "Drop", secret: true } });
     // the persisted cache stores the FULL list; only the view is filtered
     expect(JSON.parse(readFileSync(join(dir, "auth-live.json"), "utf8")).live.models).toEqual({ "keep-me": null, drop: { label: "Drop" } });
-    expect(env.endpointSettings("live").models.drop).toEqual({ label: "Drop", secret: true });
+    expect(settingsOf(env, "live").models.drop).toEqual({ label: "Drop", secret: true });
   });
 
   test("an invalid filter regex is a no-op, never a broken endpoint", () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { codex: { provider: "openai", url: "http://x", filter: "([", models: MODELS } },
     } });
-    expect(env.endpointSettings("codex").models).toEqual(MODELS);
+    expect(settingsOf(env, "codex").models).toEqual(MODELS);
   });
 
   test("the last-model memory rejects a now-filtered-out selection", () => {
@@ -392,115 +430,129 @@ describe("endpoint model filter (providers.<name>.filter)", () => {
       providers: { codex: { provider: "openai", url: "http://x", filter: "astra$", models: MODELS } },
     } });
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-5-pro" }));
-    expect(env.lastModel()).toBeNull();
+    expect(lastPair(env)).toBeNull();
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-6-astra" }));
-    expect(env.lastModel()).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
+    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
   });
 });
 
 describe("partial providers entries (endpoint preferences placeholders)", () => {
+  test("unknown settings keys do not create endpoints without a url or provider", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: {
+        "kimi-coding2": { fetch: false }, kimi2: { fetch: false }, ollama: { maxActive: 2 },
+        pending: { cmd: "future" }, real: { provider: "openai" }, custom: { url: "https://example.test" },
+      },
+    } });
+    expect(namesOf(env)).toEqual(["real", "custom"]);
+    expect(registered(env, "kimi2")).toBe(false);
+    expect(endpointOf(env, "kimi2")).toEqual({ fetch: false });
+  });
+
   test("a bare preferences entry is not a registered endpoint — and never shadows detection", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { ollama: { maxActive: 2 }, future: { filter: "x" } },
     } });
-    env.registerProvider("ollama", OllamaPlugin);
+    providerAdd(env, "ollama", OllamaPlugin);
     // no URL anywhere: nothing registers, menus stay empty
-    expect(env.endpointNames()).toEqual([]);
+    expect(namesOf(env)).toEqual([]);
     expect(listEndpointModels(env)).toEqual([]);
     expect(await resolveModelCombo("future/some-model", env)).toEqual({ model: "future/some-model" });
     // detection ADOPTS the preferences instead of being shadowed
-    const added = await env.detectEndpoints();
+    const added = await detect(env);
     if (added.includes("ollama")) { // a local server is running
-      expect(env.isDynamic("ollama")).toBe(true);
-      expect(env.endpointSettings("ollama")).toMatchObject({
+      expect(dynamic(env, "ollama")).toBe(true);
+      expect(settingsOf(env, "ollama")).toMatchObject({
         provider: "ollama", url: "http://localhost:11434", maxActive: 2,
       });
-      expect(env.endpointNames()).toContain("ollama");
+      expect(namesOf(env)).toContain("ollama");
       // the preferences entry itself never mutated
-      expect(env.endpoint("ollama")).toEqual({ maxActive: 2 });
+      expect(endpointOf(env, "ollama")).toEqual({ maxActive: 2 });
     }
-    expect(env.endpointNames()).not.toContain("future"); // still a placeholder
+    expect(namesOf(env)).not.toContain("future"); // still a placeholder
   });
 
   test("an ambient-key endpoint adopts the same-named preferences entry", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { xai: { filter: "^grok-4" } },
     } });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.XAI_API_KEY;
     process.env.XAI_API_KEY = "xai-ambient";
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).not.toContain("xai"); // adopted, not added
     } finally {
       if (saved === undefined) delete process.env.XAI_API_KEY;
       else process.env.XAI_API_KEY = saved;
     }
-    expect(env.isDynamic("xai")).toBe(true);
-    expect(env.endpointNames()).toContain("xai");
-    expect(env.endpointSettings("xai")).toMatchObject({
+    expect(dynamic(env, "xai")).toBe(true);
+    expect(namesOf(env)).toContain("xai");
+    expect(settingsOf(env, "xai")).toMatchObject({
       provider: "openai", url: "https://api.x.ai/v1", filter: "^grok-4",
     });
-    expect(env.endpointSettings("xai").auth.token).toBe("xai-ambient");
+    expect(settingsOf(env, "xai").auth.token).toBe("xai-ambient");
     // nothing persisted: neither the connection nor the key
     expect(existsSync(join(dir, "auth-xai.json"))).toBe(false);
     // the key gone: the environment connection drops, the preferences stay
-    await env.detectEndpoints();
-    expect(env.endpointNames()).not.toContain("xai");
-    expect(env.endpoint("xai")).toEqual({ filter: "^grok-4" });
+    await detect(env);
+    expect(namesOf(env)).not.toContain("xai");
+    expect(endpointOf(env, "xai")).toEqual({ filter: "^grok-4" });
   });
 
   test("a full configured entry adopts its environment twin, own connection fields winning", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { ollama: { provider: "ollama", url: "https://remote.example", maxActive: 2 } },
     } });
-    env.registerProvider("ollama", OllamaPlugin);
-    await env.detectEndpoints();
+    providerAdd(env, "ollama", OllamaPlugin);
+    await detect(env);
     // unchanged by detection when the local server is absent; when it
     // answers, the entry's own URL keeps winning over the environment's
-    expect(env.endpointSettings("ollama").url).toBe("https://remote.example");
-    expect(env.endpointSettings("ollama").maxActive).toBe(2);
+    expect(settingsOf(env, "ollama").url).toBe("https://remote.example");
+    expect(settingsOf(env, "ollama").maxActive).toBe(2);
   });
 
   test("a preferences entry merges over the auth-file record of a logged-in endpoint", () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { codex: { filter: "(luna|sol|astra)" } },
     } });
-    env.authSet("codex", {
+    authSetOf(env, "codex", {
       provider: "openai", url: "https://chatgpt.com/backend-api/codex",
       auth: { token: "tok" }, models: { "gpt-6-sol": null, "gpt-5-pro": null },
     });
-    const settings = env.endpointSettings("codex");
+    const settings = settingsOf(env, "codex");
     expect(settings).toMatchObject({
       provider: "openai", url: "https://chatgpt.com/backend-api/codex", filter: "(luna|sol|astra)",
     });
     expect(settings.auth.token).toBe("tok");
     expect(settings.models["gpt-6-sol"]).toBeNull();
     expect(settings.models["gpt-5-pro"]).toEqual({ secret: true });
-    expect(env.endpointNames()).toContain("codex"); // the auth record completes it
+    expect(namesOf(env)).toContain("codex"); // the auth record completes it
   });
 
-  test("connection data is not web-only: a provider-only or cmd entry registers too", () => {
+  test("provider-only endpoints register without a URL; command alone does not", () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: {
         claude: { provider: "claude" }, // a pipe/CLI protocol needs no URL
         localcmd: { provider: "acme", cmd: "acme --serve" },
+        cmdonly: { cmd: "acme --serve" },
         prefs: { maxActive: 1 }, // preferences only: not registered
       },
     } });
-    expect(env.endpointNames()).toEqual(["claude", "localcmd"]);
-    expect(env.endpointRegistered("prefs")).toBe(false);
-    expect(env.endpointRegistered("claude")).toBe(true);
+    expect(namesOf(env)).toEqual(["claude", "localcmd"]);
+    expect(registered(env, "prefs")).toBe(false);
+    expect(registered(env, "cmdonly")).toBe(false);
+    expect(registered(env, "claude")).toBe(true);
   });
 
   test("a url-only entry resolves the built-in OpenAI protocol fallback", async () => {
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { pipe: { url: "http://localhost:9999/v1" } },
     } });
-    expect(env.endpointNames()).toContain("pipe");
-    expect(env.endpointSettings("pipe").provider).toBeUndefined(); // fallback applies at use
-    env.registerProvider("openai", OpenAIPlugin);
-    const models = await env.endpointModels("pipe"); // no crash without a protocol fetch
+    expect(namesOf(env)).toContain("pipe");
+    expect(settingsOf(env, "pipe").provider).toBeUndefined(); // fallback applies at use
+    providerAdd(env, "openai", OpenAIPlugin);
+    const models = await modelsOf(env, "pipe"); // no crash without a protocol fetch
     expect(models).toEqual({});
   });
 
@@ -508,15 +560,15 @@ describe("partial providers entries (endpoint preferences placeholders)", () => 
     const env = new Env({ dir, cwd: dir, settings: {
       providers: { xai: { filter: "^grok" } },
     } });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "xai", model: "grok-4" }));
-    expect(env.lastModel()).toBeNull(); // placeholder: no connection, no memory
+    expect(lastPair(env)).toBeNull(); // placeholder: no connection, no memory
     const saved = process.env.XAI_API_KEY;
     process.env.XAI_API_KEY = "xai-ambient";
     try {
-      env.authSet("xai", { models: { "grok-4": null } }); // in-memory cache, dynamic-style
-      await env.detectEndpoints();
-      expect(env.lastModel()).toEqual({ endpoint: "xai", model: "grok-4" });
+      authSetOf(env, "xai", { models: { "grok-4": null } }); // in-memory cache, dynamic-style
+      await detect(env);
+      expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
     } finally {
       if (saved === undefined) delete process.env.XAI_API_KEY;
       else process.env.XAI_API_KEY = saved;
@@ -524,26 +576,27 @@ describe("partial providers entries (endpoint preferences placeholders)", () => 
   });
 });
 
-describe("Env.refreshEndpointSettings (multi-process auth rotation)", () => {
+describe("Env.endpointSettingsRefresh (multi-process auth rotation)", () => {
   test("a changed auth file merges over the stale in-memory record", () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir });
-    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
-    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
-    expect(env.endpointSettings("acme").auth.token).toBe("old-token");
+    env.settings.providers.acme = { provider: "ollama", url: "http://x" };
+    authSetOf(env, "acme", { auth: { type: "token", token: "old-token" } });
+    expect(settingsOf(env, "acme").auth.token).toBe("old-token");
     // another process rotates the token on disk (its own auth file write)
     writeFileSync(join(dir, "auth-acme.json"), JSON.stringify({
       acme: { auth: { type: "token", token: "new-token" } },
     }));
-    const section = env.refreshEndpointSettings("acme");
+    const section = reread(env, "acme");
     expect(section.auth.token).toBe("new-token");
-    expect(env.endpointSettings("acme").auth.token).toBe("new-token");
-    expect(env.endpointSettings("acme").url).toBe("http://x"); // connection config survives
+    expect(settingsOf(env, "acme").auth.token).toBe("new-token");
+    expect(settingsOf(env, "acme").url).toBe("http://x"); // connection config survives
   });
 
-  test("the settings.json providers entry's auth section is re-read too", () => {
+  test("the settings.json providers entry's auth section is re-read too", async () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir });
-    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
-    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
+    env.settings.providers.acme = { provider: "ollama", url: "http://x" };
+    await Promise.resolve(); // this process's write lands before the other process writes
+    authSetOf(env, "acme", { auth: { type: "token", token: "old-token" } });
     // another process wrote BOTH files (saveEndpoint + authSet)
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
       providers: { acme: { provider: "ollama", url: "http://x" } },
@@ -552,44 +605,44 @@ describe("Env.refreshEndpointSettings (multi-process auth rotation)", () => {
     writeFileSync(join(dir, "auth-acme.json"), JSON.stringify({
       acme: { auth: { type: "token", token: "new-token" } },
     }));
-    const section = env.refreshEndpointSettings("acme");
+    const section = reread(env, "acme");
     // the settings file's own section wins over the auth file (layer order)
     expect(section.auth.token).toBe("newer-token");
   });
 
   test("a vanished auth file is a no-op, never a settings drop", () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir });
-    env.saveEndpoint("acme", { provider: "ollama", url: "http://x" });
-    env.authSet("acme", { auth: { type: "token", token: "old-token" } });
+    env.settings.providers.acme = { provider: "ollama", url: "http://x" };
+    authSetOf(env, "acme", { auth: { type: "token", token: "old-token" } });
     rmSync(join(dir, "auth-acme.json"));
-    const section = env.refreshEndpointSettings("acme");
+    const section = reread(env, "acme");
     expect(section.auth.token).toBe("old-token"); // live settings survive
-    expect(env.endpointSettings("acme").url).toBe("http://x");
+    expect(settingsOf(env, "acme").url).toBe("http://x");
   });
 
   test("a dynamic (environment-detected) endpoint has nothing to re-read", () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir });
-    env.endpoints.dyn = { provider: "ollama", url: "http://x" };
+    env._endpoints.dyn = { provider: "ollama", url: "http://x" };
     env._dynamicEndpoints.add("dyn");
-    env._mergeAuthInMemory("dyn", { auth: { type: "token", token: "env-token" } });
-    const section = env.refreshEndpointSettings("dyn");
+    mergeInMemory(env, "dyn", { auth: { type: "token", token: "env-token" } });
+    const section = reread(env, "dyn");
     expect(section.auth.token).toBe("env-token"); // unchanged, no disk read
   });
 });
 
-describe("Env.removeEndpoint (logout)", () => {
+describe("Env.endpointRemove (logout)", () => {
   test("a configured endpoint: settings.json entry and auth file go, memory forgets", async () => {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
       providers: { acme: { provider: "ollama", url: "http://x" }, keep: { provider: "ollama", url: "http://y" } },
     }));
     const env = new Env({ dir, cwd: dir });
-    env.authSet("acme", { token: "t-1", models: { m: null } });
+    authSetOf(env, "acme", { token: "t-1", models: { m: null } });
     expect(existsSync(join(dir, "auth-acme.json"))).toBe(true);
 
-    const result = env.removeEndpoint("acme");
+    const result = env.logout("acme");
     expect(result).toEqual({ name: "acme", dynamic: false });
-    expect(env.endpoint("acme")).toBeUndefined();
-    expect(env.endpointSettings("acme")).toEqual({});
+    expect(endpointOf(env, "acme")).toBeUndefined();
+    expect(settingsOf(env, "acme")).toEqual({});
     expect(existsSync(join(dir, "auth-acme.json"))).toBe(false);
     const onDisk = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
     expect(onDisk.providers.acme).toBeUndefined();
@@ -598,13 +651,12 @@ describe("Env.removeEndpoint (logout)", () => {
     expect(existsSync(join(dir, "settings.json.tmp-" + process.pid))).toBe(false);
   });
 
-  test("saveEndpoint then removeEndpoint in one batch leaves no endpoint files or pending config", async () => {
+  test("an endpoint written and removed in one tick leaves no endpoint files or pending config", async () => {
     const env = new Env({ dir, cwd: dir });
-    await env.batch(() => {
-      env.saveEndpoint("temporary", { provider: "ollama", url: "http://temporary" });
-      env.removeEndpoint("temporary");
-    });
-    expect(env.endpoint("temporary")).toBeUndefined();
+    env.settings.providers.temporary = { provider: "ollama", url: "http://temporary" };
+    env.logout("temporary");
+    await Promise.resolve();
+    expect(endpointOf(env, "temporary")).toBeUndefined();
     expect(existsSync(join(dir, "settings.json"))).toBe(false);
     expect(existsSync(join(dir, "auth-temporary.json"))).toBe(false);
   });
@@ -617,20 +669,20 @@ describe("Env.removeEndpoint (logout)", () => {
       openai: { provider: "openai", url: "https://api.openai.com/v1", auth: { type: "api_key", token: "sk-stale" } },
     }));
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
-    expect(env.endpoint("openai")?.url).toBe("https://api.openai.com/v1"); // auto-cataloged from the file
+    providerAdd(env, "openai", OpenAIPlugin);
+    expect(endpointOf(env, "openai")?.url).toBe("https://api.openai.com/v1"); // auto-cataloged from the file
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-stale"; // unchanged since the buggy build persisted it
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).not.toContain("openai"); // the stale record kept the slot
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
     }
     expect(existsSync(join(dir, "auth-openai.json"))).toBe(false); // cleaned
-    expect(env.isDynamic("openai")).toBe(true);
-    expect(env.endpointSettings("openai").auth.token).toBe("sk-stale"); // the environment re-derives it
+    expect(dynamic(env, "openai")).toBe(true);
+    expect(settingsOf(env, "openai").auth.token).toBe("sk-stale"); // the environment re-derives it
   });
 
   test("a persisted record that DIFFERS from the environment is an explicit login — never claimed", async () => {
@@ -638,33 +690,33 @@ describe("Env.removeEndpoint (logout)", () => {
       openai: { provider: "openai", url: "https://api.openai.com/v1", auth: { type: "api_key", token: "sk-mine" } },
     }));
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-ambient";
     try {
-      const added = await env.detectEndpoints();
+      const added = await detect(env);
       expect(added).not.toContain("openai"); // the explicit record keeps the slot
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
     }
     expect(existsSync(join(dir, "auth-openai.json"))).toBe(true); // untouched
-    expect(env.isDynamic("openai")).toBe(false);
-    expect(env.endpointSettings("openai").auth.token).toBe("sk-mine"); // the user's token wins
+    expect(dynamic(env, "openai")).toBe(false);
+    expect(settingsOf(env, "openai").auth.token).toBe("sk-mine"); // the user's token wins
   });
 
   test("a dynamic endpoint drops out of the live map when the environment key is removed", async () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-ambient";
     try {
-      await env.detectEndpoints();
-      expect(env.isDynamic("openai")).toBe(true);
+      await detect(env);
+      expect(dynamic(env, "openai")).toBe(true);
       delete process.env.OPENAI_API_KEY;
-      const added = await env.detectEndpoints(); // a fresh probe without the key
+      const added = await detect(env); // a fresh probe without the key
       expect(added).not.toContain("openai");
-      expect(env.endpoint("openai")).toBeUndefined();
+      expect(endpointOf(env, "openai")).toBeUndefined();
       expect(env._settings.openai).toBeUndefined(); // no in-memory auth left behind
       expect(existsSync(join(dir, "auth-openai.json"))).toBe(false);
     } finally {
@@ -675,57 +727,53 @@ describe("Env.removeEndpoint (logout)", () => {
 
   test("authSet on a dynamic endpoint merges in memory only — no auth file ever", async () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "sk-ambient";
     try {
-      await env.detectEndpoints();
+      await detect(env);
     } finally {
       if (saved === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = saved;
     }
     const file = join(dir, "auth-openai.json");
-    expect(env.isDynamic("openai")).toBe(true);
+    expect(dynamic(env, "openai")).toBe(true);
     expect(existsSync(file)).toBe(false);
     // providers call authSet blindly: a model-catalog refresh and a
     // credential update on an env-key endpoint must stay memory-only
-    env.authSet("openai", { models: { gpt: null }, modelsProbedAt: 1 });
-    env.authSet("openai", { auth: { token: "sk-rotated" } });
-    expect(env.endpointSettings("openai").models.gpt).toBeNull();
-    expect(env.endpointSettings("openai").auth.token).toBe("sk-rotated");
+    authSetOf(env, "openai", { models: { gpt: null } });
+    authSetOf(env, "openai", { auth: { token: "sk-rotated" } });
+    expect(settingsOf(env, "openai").models.gpt).toBeNull();
+    expect(settingsOf(env, "openai").auth.token).toBe("sk-rotated");
     expect(existsSync(file)).toBe(false);
     // a write batch must not turn the update into a file either
-    await env.batch(() => env.authSet("openai", { models: { gpt2: null } }));
+    await batch(env, () => authSetOf(env, "openai", { models: { gpt2: null } }));
     expect(existsSync(file)).toBe(false);
-    // saveEndpoint promotes the endpoint out of dynamic: auth persists then
-    env.saveEndpoint("openai", { provider: "openai", url: "https://api.openai.com/v1" });
-    expect(env.isDynamic("openai")).toBe(false);
-    expect(existsSync(file)).toBe(true);
   });
 
   test("a dynamic (environment-detected) endpoint: memory-only removal, no files touched", async () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("openai", OpenAIPlugin);
+    providerAdd(env, "openai", OpenAIPlugin);
     const saved = process.env.XAI_API_KEY;
     process.env.XAI_API_KEY = "xai-key";
     try {
-      await env.detectEndpoints();
+      await detect(env);
     } finally {
       if (saved === undefined) delete process.env.XAI_API_KEY;
       else process.env.XAI_API_KEY = saved;
     }
-    expect(env.isDynamic("xai")).toBe(true);
-    const result = env.removeEndpoint("xai");
+    expect(dynamic(env, "xai")).toBe(true);
+    const result = env.logout("xai");
     expect(result.dynamic).toBe(true);
-    expect(env.endpoint("xai")).toBeUndefined();
-    expect(env.isDynamic("xai")).toBe(false);
+    expect(endpointOf(env, "xai")).toBeUndefined();
+    expect(dynamic(env, "xai")).toBe(false);
     expect(existsSync(join(dir, "settings.json"))).toBe(false);
     expect(existsSync(join(dir, "auth-xai.json"))).toBe(false);
   });
 
   test("an unknown endpoint is an ordinary error", () => {
     const env = new Env({ dir, cwd: dir });
-    expect(() => env.removeEndpoint("nope")).toThrow(/unknown endpoint "nope"/);
+    expect(() => env.logout("nope")).toThrow(/unknown endpoint "nope"/);
   });
 
   test("logoutEndpoint requires a name and routes to Env", async () => {
@@ -733,20 +781,43 @@ describe("Env.removeEndpoint (logout)", () => {
     const env = new Env({ dir, cwd: dir, settings: { providers: { acme: { provider: "ollama", url: "http://x" } } } });
     expect(() => logoutEndpoint(env, "")).toThrow(/endpoint name/);
     expect(logoutEndpoint(env, "acme").name).toBe("acme");
-    expect(env.endpoint("acme")).toBeUndefined();
+    expect(endpointOf(env, "acme")).toBeUndefined();
   });
 });
 
 describe("batched settings writes (lib/env/persist.js)", () => {
+  test("auth files contain only auth-owned updates, never copied provider preferences", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { acme: {
+        provider: "ollama", url: "http://configured", filter: "^keep", maxActive: 2,
+        models: { keep: { secret: true, label: "User label" } },
+      } },
+    } });
+    authSetOf(env, "acme", {
+      auth: { token: "t" },
+      models: { keep: { label: "Live label" } },
+    });
+    expect(JSON.parse(readFileSync(join(dir, "auth-acme.json"), "utf8"))).toEqual({
+      acme: {
+        auth: { token: "t" },
+        models: { keep: { label: "Live label" } },
+      },
+    });
+    expect(settingsOf(env, "acme")).toMatchObject({
+      provider: "ollama", url: "http://configured", filter: "^keep", maxActive: 2,
+      auth: { token: "t" }, models: { keep: { label: "User label", secret: true } },
+    });
+  });
+
   test("authSet inside a batch defers; each file lands ONCE at the batch's end", async () => {
     const env = new Env({ dir, cwd: dir });
     const file = join(dir, "auth-acme.json");
-    await env.batch(async () => {
-      env.authSet("acme", { token: "t-1" });
+    await batch(env, async () => {
+      authSetOf(env, "acme", { token: "t-1" });
       expect(existsSync(file)).toBe(false); // still in memory
-      env.authSet("acme", { token: "t-2", models: { m: null } });
+      authSetOf(env, "acme", { token: "t-2", models: { m: null } });
       expect(existsSync(file)).toBe(false);
-      expect(env.endpointSettings("acme").auth.token).toBe("t-2"); // live view updated
+      expect(settingsOf(env, "acme").auth.token).toBe("t-2"); // live view updated
     });
     expect(existsSync(file)).toBe(true);
     expect(JSON.parse(readFileSync(file, "utf8")).acme).toEqual({ auth: { token: "t-2" }, models: { m: null } });
@@ -755,9 +826,9 @@ describe("batched settings writes (lib/env/persist.js)", () => {
   test("nested batches flush at the OUTERMOST end only", async () => {
     const env = new Env({ dir, cwd: dir });
     const file = join(dir, "auth-nest.json");
-    await env.batch(async () => {
-      await env.batch(async () => {
-        env.authSet("nest", { token: "deep" });
+    await batch(env, async () => {
+      await batch(env, async () => {
+        authSetOf(env, "nest", { token: "deep" });
       });
       expect(existsSync(file)).toBe(false); // the inner batch did not flush
     });
@@ -767,10 +838,86 @@ describe("batched settings writes (lib/env/persist.js)", () => {
   test("a batch that throws still flushes the writes that landed before the error", async () => {
     const env = new Env({ dir, cwd: dir });
     const file = join(dir, "auth-err.json");
-    await expect(env.batch(async () => {
-      env.authSet("err", { token: "t" });
+    await expect(batch(env, async () => {
+      authSetOf(env, "err", { token: "t" });
       throw new Error("boom");
     })).rejects.toThrow("boom");
     expect(JSON.parse(readFileSync(file, "utf8")).err.auth.token).toBe("t");
+  });
+});
+
+describe("last-model.json history (8 newest combos)", () => {
+  const historyEnv = () => new Env({ dir, cwd: dir, settings: {
+    providers: {
+      codex: { provider: "openai", url: "http://x", models: { "gpt-5-pro": null, "gpt-6-astra": null } },
+      xai: { provider: "openai", url: "http://y", models: { "grok-4": null } },
+    },
+  } });
+  const readFile = () => JSON.parse(readFileSync(join(dir, "last-model.json"), "utf8"));
+
+  test("a legacy single-combo record migrates and keeps selecting", () => {
+    const env = historyEnv();
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-6-astra" }));
+    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
+  });
+
+  test("selection walks to the first AVAILABLE entry — removed endpoints are skipped", () => {
+    const env = historyEnv();
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify([
+      { endpoint: "gone", model: "m-1", ts: "2026-11-13T10:00:00.000Z" },
+      { endpoint: "xai", model: "grok-4", ts: "2026-11-13T09:00:00.000Z" },
+      { endpoint: "codex", model: "gpt-5-pro", ts: "2026-11-13T08:00:00.000Z" },
+    ]));
+    expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
+  });
+
+  test("a placeholder endpoint is skipped in favor of an older registered one", () => {
+    const env = new Env({ dir, cwd: dir, settings: {
+      providers: { xai: { filter: "^grok" }, codex: { provider: "openai", url: "http://x" } },
+    } });
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify([
+      { endpoint: "xai", model: "grok-4", ts: "2026-11-13T10:00:00.000Z" },
+      { endpoint: "codex", model: "gpt-5-pro", ts: "2026-11-13T09:00:00.000Z" },
+    ]));
+    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-5-pro" });
+  });
+
+  test("remembering adds, refreshes and re-sorts, and evicts the oldest past 8", async () => {
+    const env = historyEnv();
+    remember(env, { endpoint: "codex", model: "gpt-5-pro" });
+    remember(env, { endpoint: "xai", model: "grok-4" });
+    let entries = readFile();
+    expect(entries.map(({ endpoint, model }) => `${endpoint}/${model}`)).toEqual(["xai/grok-4", "codex/gpt-5-pro"]);
+    expect(entries.every(({ ts }) => typeof ts === "string" && !Number.isNaN(Date.parse(ts)))).toBe(true);
+    // re-selecting the older combo refreshes its timestamp and re-sorts
+    await new Promise((resolve) => setTimeout(resolve, 5)); // a measurable gap
+    remember(env, { endpoint: "codex", model: "gpt-5-pro" });
+    entries = readFile();
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ endpoint: "codex", model: "gpt-5-pro" });
+    expect(Date.parse(entries[0].ts)).toBeGreaterThan(Date.parse(entries[1].ts));
+    // fill past the 8-entry cap: the oldest combo is evicted
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify(
+      Array.from({ length: 8 }, (_, i) => ({
+        endpoint: "codex", model: `m-${i}`, ts: `2026-11-13T0${i}:00:00.000Z`,
+      })),
+    ));
+    remember(env, { endpoint: "xai", model: "grok-4" });
+    entries = readFile();
+    expect(entries).toHaveLength(8);
+    expect(entries[0]).toMatchObject({ endpoint: "xai", model: "grok-4" });
+    expect(entries.map(({ model }) => model)).not.toContain("m-0");
+    expect(entries.at(-1)).toMatchObject({ model: "m-1" });
+  });
+
+  test("malformed entries are dropped and the newest valid one wins", () => {
+    const env = historyEnv();
+    writeFileSync(join(dir, "last-model.json"), JSON.stringify([
+      { endpoint: "", model: "m" },
+      { model: "no-endpoint", ts: "2026-11-13T11:00:00.000Z" },
+      "garbage",
+      { endpoint: "xai", model: "grok-4", ts: "2026-11-13T09:00:00.000Z" },
+    ]));
+    expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
   });
 });

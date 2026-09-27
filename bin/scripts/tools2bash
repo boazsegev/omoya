@@ -24,10 +24,12 @@ async function main(argv) {
   }
   if (argv.length) throw new Error(`unexpected argument: ${argv[0]}`);
   // Generate wrappers from the complete, asynchronously loaded tool registry.
-  const env = await Env.create();
-  const dir = join(env.settingsDir, "tools-bin");
+  env = await Env.create(undefined, { models: false }); // never reads the model catalog
+  const settings = env.folders.find((f) => f.kind === "settings");
+  if (!settings) throw new Error("no user settings folder");
+  const dir = join(settings.path, "tools-bin");
   mkdirSync(dir, { recursive: true });
-  const names = env.toolNames().filter((name) => name === "skill" || !excluded(name)).sort();
+  const names = [...(await env.tools()).keys()].filter((name) => name === "skill" || !excluded(name)).sort();
   const wanted = new Set(names);
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isFile() || wanted.has(entry.name)) continue;
@@ -43,6 +45,7 @@ async function main(argv) {
   return 0;
 }
 
+let env; // closed on exit
 let exitCode;
 try {
   exitCode = await main(process.argv.slice(2));
@@ -50,6 +53,6 @@ try {
   console.error(`${NAME}: ${error instanceof Error ? error.message : String(error)}`);
   exitCode = 1;
 } finally {
-  CLI.close();
+  CLI.close({ env });
 }
 process.exit(exitCode);

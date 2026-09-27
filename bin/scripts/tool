@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * tool — call any registered tool directly from the terminal (a
- * thin wrapper over Env.callTool, see lib/env/tool-registry.js and
+ * thin wrapper over Env.toolCall, see lib/env/tool-registry.js and
  * the "Tool contract" section of API.md). Mainly for exercising a
  * tool ad hoc or scripting one from bash — the harness (Agent) is the
  * normal caller; this is the manual door.
@@ -65,9 +65,9 @@ sandboxed tool call.
 `;
 
 /** Print the catalog: one "- name — description" line per tool. */
-function printCatalog(env) {
-  for (const { name, description } of env.toolSchemas(undefined, { includeSecret: true })) {
-    const first = String(description ?? "").split("\n")[0];
+function printCatalog(catalog) {
+  for (const [name, { schema }] of catalog) {
+    const first = String(schema.description ?? "").split("\n")[0];
     process.stdout.write(`- ${name}${first ? ` — ${first}` : ""}\n`);
   }
 }
@@ -99,13 +99,14 @@ async function main(argv) {
     return 0;
   }
   // Direct tool calls need the complete registry, so use the async factory.
-  const env = await Env.create();
+  env = await Env.create(undefined, { models: false }); // never reads the model catalog
+  const catalog = await env.tools(); // every tool, secret ones included (the human's door)
   if (!help && (argv.includes("--list") || argv.length === 0)) {
-    printCatalog(env);
+    printCatalog(catalog);
     return 0;
   }
   const [name, ...rawArgs] = help ? positional : argv;
-  const entry = env.toolEntry(name);
+  const entry = catalog.get(name);
   if (!entry) {
     console.error(`${NAME}: unknown tool "${name}" (see \`${NAME} --list\`)`);
     return 1;
@@ -123,7 +124,7 @@ async function main(argv) {
   }
   let value;
   try {
-    value = await env.callTool(name, args, { question: null, env, call: undefined, agent: undefined });
+    value = await env.toolCall(name, args, { question: null, env, call: undefined, agent: undefined });
   } catch (err) {
     console.error(`${NAME}: ${name} failed: ${err.message}`);
     return 2;
@@ -138,6 +139,7 @@ async function main(argv) {
   return 0;
 }
 
+let env; // closed on exit (MCP servers, held settings writes)
 let exitCode;
 try {
   exitCode = await main(process.argv.slice(2));
@@ -145,6 +147,6 @@ try {
   console.error(`${NAME}: ${error instanceof Error ? error.message : String(error)}`);
   exitCode = 1;
 } finally {
-  close();
+  close({ env });
 }
 process.exit(exitCode);

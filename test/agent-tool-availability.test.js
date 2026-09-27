@@ -8,14 +8,15 @@ import { Env } from "../lib/env.js";
 import { IO } from "../lib/io.js";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
+import { providerAdd, toolExists, toolNames, toolSchemas } from "./env-internals.js";
 
 let env;
 afterEach(() => { env = null; });
 
 async function toolsEnv() {
   env = await testEnv();
-  env.registerTool("alpha", () => "A", { description: "a", inputSchema: { type: "object" } });
-  env.registerTool("beta", () => "B", { description: "b", inputSchema: { type: "object" } });
+  env.toolAdd("alpha", () => "A", { description: "a", inputSchema: { type: "object" } });
+  env.toolAdd("beta", () => "B", { description: "b", inputSchema: { type: "object" } });
   return env;
 }
 
@@ -23,34 +24,34 @@ describe("tool availability selection", () => {
   test("omitted and [\"*\"] expose all current tools", async () => {
     const e = await toolsEnv();
     const all = ["tool-refresh", "alpha", "beta"];
-    expect(e.toolSchemas().map((t) => t.name)).toEqual(all);
-    expect(e.toolSchemas(["*"]).map((t) => t.name)).toEqual(all);
-    expect(e.toolNames()).toEqual(all);
+    expect(toolSchemas(e).map((t) => t.name)).toEqual(all);
+    expect(toolSchemas(e, ["*"]).map((t) => t.name)).toEqual(all);
+    expect(toolNames(e)).toEqual(all);
   });
 
   test("[] exposes none", async () => {
     const e = await toolsEnv();
-    expect(e.toolSchemas([])).toEqual([]);
+    expect(toolSchemas(e, [])).toEqual([]);
   });
 
   test("explicit list exposes only recognized names", async () => {
     const e = await toolsEnv();
-    expect(e.toolSchemas(["alpha", "nope"]).map((t) => t.name)).toEqual(["alpha"]);
-    expect(e.toolSchemas(["beta"])).toEqual([{ name: "beta", description: "b", inputSchema: { type: "object" } }]);
+    expect(toolSchemas(e, ["alpha", "nope"]).map((t) => t.name)).toEqual(["alpha"]);
+    expect(toolSchemas(e, ["beta"])).toEqual([{ name: "beta", description: "b", inputSchema: { type: "object" } }]);
   });
 
   test("callTool dispatches by exact flattened lookup", async () => {
     const e = await toolsEnv();
-    expect(await e.callTool("alpha", {})).toBe("A");
-    await expect(e.callTool("alph", {})).rejects.toThrow(/unknown tool/); // misspelling
-    await expect(e.callTool("tool-refresh.x", {})).rejects.toThrow(/unknown tool/); // no path parsing
+    expect(await e.toolCall("alpha", {})).toBe("A");
+    await expect(e.toolCall("alph", {})).rejects.toThrow(/unknown tool/); // misspelling
+    await expect(e.toolCall("tool-refresh.x", {})).rejects.toThrow(/unknown tool/); // no path parsing
   });
 
   test("tool-refresh is always registered; availability decides visibility only", async () => {
     const e = await toolsEnv();
-    expect(e.hasTool("tool-refresh")).toBe(true);
-    expect(e.toolSchemas(["alpha"]).map((t) => t.name)).toEqual(["alpha"]); // hidden from model
-    const result = await e.callTool("tool-refresh", {}); // dispatch still exact
+    expect(toolExists(e, "tool-refresh")).toBe(true);
+    expect(toolSchemas(e, ["alpha"]).map((t) => t.name)).toEqual(["alpha"]); // hidden from model
+    const result = await e.toolCall("tool-refresh", {}); // dispatch still exact
     expect(result.refreshed).toBe(true);
     // refresh rebuilds from disk roots: manual registrations drop, built-ins stay
     expect(result.tools).toContain("tool-refresh");
@@ -62,11 +63,13 @@ describe("availability flows into the request (IO tools())", () => {
   test("IO applies its per-instance selection to the catalog", async () => {
     const e = await toolsEnv();
     class Protocol {}
-    e.registerProvider("x", Protocol);
-    e.endpoints.x = { provider: "x", url: "test://x" };
+    providerAdd(e, "x", Protocol);
+    e._endpoints.x = { provider: "x", url: "test://x" };
     const all = new IO({ env: e, model: "x/m" });
     const none = new IO({ env: e, model: "x/m", tools: [] });
     const some = new IO({ env: e, model: "x/m", tools: ["alpha"] });
+    // each request snapshots Env.tools() once (lib/io/request.js)
+    for (const io of [all, none, some]) io._toolCatalog = await e.tools();
     expect(all.tools().map((t) => t.name)).toEqual(["tool-refresh", "alpha", "beta"]);
     expect(none.tools()).toEqual([]);
     expect(some.tools().map((t) => t.name)).toEqual(["alpha"]);
@@ -95,6 +98,6 @@ describe("availability flows into the request (IO tools())", () => {
       createIO: () => io,
     });
     await agent.run();
-    expect(agent.context[2]).toMatchObject({ type: 4, name: "beta", content: [{ type: "text", text: "B" }] });
+    expect(agent.context.at(2)).toMatchObject({ type: 4, name: "beta", content: [{ type: "text", text: "B" }] });
   });
 });

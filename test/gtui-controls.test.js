@@ -396,6 +396,65 @@ describe("GTUI controlled input", () => {
     await running;
   });
 
+  for (const { name, anchor, offset, from, to } of [
+    { name: "anchor above the viewport", anchor: "start", offset: 8, from: 14, to: 1 },
+    { name: "anchor below the viewport", anchor: "start", offset: 0, from: 1, to: 14 },
+    { name: "end-anchored transcript", anchor: "end", offset: 8, from: 1, to: 14 },
+  ]) test(`copies every source row when the ${name} scrolls off screen`, async () => {
+    let model = { offset };
+    let copied = "";
+    const memory = GTUI.host.memory({ width: 12, height: 8 });
+    const ui = new GTUI({ host: memory });
+    const running = ui.run({
+      init: () => ({ model, effects: [] }),
+      update: (current, message) => {
+        if (message.type === "scroll.change") model = { offset: message.offset };
+        if (message.type === "selection.change") copied = message.text;
+        return { model, effects: [] };
+      },
+      view: (current) => GTUI.view.scroll({ id: "history", anchor, offset: current.offset }, [GTUI.view.column({},
+        Array.from({ length: 16 }, (_, index) => GTUI.view.text({ margin: 0, selectionKey: `m${index}`, sourceText: `row${index}` }, [
+          { text: `row${index}`, source: { start: 0, end: `row${index}`.length } },
+        ])),
+      )]),
+    });
+    const visible = memory.snapshot().lines;
+    const fromY = visible.findIndex((line) => line.startsWith(`row${from}`));
+    expect(fromY).toBeGreaterThanOrEqual(0);
+    memory.send(GTUI.event.pointer({ kind: "press", control: "text", target: `m${from}`, index: 0, sourceText: `row${from}`, button: 0, x: 0, y: fromY }));
+    const direction = to < from ? -1 : 1;
+    for (let index = from + direction; index !== to + direction; index += direction) {
+      const lines = memory.snapshot().lines;
+      let y = lines.findIndex((line) => line.startsWith(`row${index}`));
+      if (y < 0) y = direction < 0 ? 1 : 6;
+      memory.send(GTUI.event.pointer({ kind: "drag", control: "text", target: `m${index}`, button: 0, x: 3, y }));
+      await tick();
+    }
+    const targetY = memory.snapshot().lines.findIndex((line) => line.startsWith(`row${to}`));
+    expect(targetY).toBeGreaterThanOrEqual(0);
+    memory.send(GTUI.event.pointer({ kind: "release", control: "text", target: `m${to}`, button: 0, x: `row${to}`.length - 1, y: targetY }));
+    const start = Math.min(from, to);
+    const end = Math.max(from, to);
+    expect(copied).toBe(Array.from({ length: end - start + 1 }, (_, index) => `row${start + index}`).join("\n"));
+    ui.stop();
+    await running;
+  });
+
+  test("a blank row cannot borrow a source anchor from another row", async () => {
+    const fixture = controlled({}, () => GTUI.view.column({}, [
+      GTUI.view.text({ margin: 0, selectionKey: "first", sourceText: "alpha" }, [{ text: "alpha", source: { start: 0, end: 5 } }]),
+      GTUI.view.text({ margin: 0 }, ""),
+      GTUI.view.text({ margin: 0, selectionKey: "last", sourceText: "bravo" }, [{ text: "bravo", source: { start: 0, end: 5 } }]),
+    ]));
+    fixture.memory.send(GTUI.event.pointer({ kind: "press", control: "text", target: "first", button: 0, x: 0, y: 1 }));
+    fixture.memory.send(GTUI.event.pointer({ kind: "drag", control: "text", target: "last", button: 0, x: 4, y: 2 }));
+    fixture.memory.send(GTUI.event.pointer({ kind: "release", control: "text", target: "last", button: 0, x: 4, y: 2 }));
+    fixture.memory.send(GTUI.event.key({ key: "copy" }));
+    expect(fixture.events.some((event) => event.type === "selection.copy")).toBe(false);
+    fixture.ui.stop();
+    await fixture.running;
+  });
+
   test("a text selection stays attached to source offsets when its scroll viewport moves", async () => {
     let model = { offset: 0 };
     const memory = GTUI.host.memory({ width: 12, height: 2 });
@@ -613,6 +672,29 @@ describe("GTUI menu, scroll, and overlay", () => {
     await fixture.running;
   });
 
+  test("a long input scrolls under the wheel without moving its caret or scrolling the transcript", () => {
+    const events = [];
+    const controls = createControls((event) => events.push(event));
+    const value = Array.from({ length: 18 }, (_, i) => `row ${i}`).join("\n");
+    const root = GTUI.view.column({}, [
+      GTUI.view.scroll({ id: "history", anchor: "end", keyboard: true, priority: 0 }, [
+        GTUI.view.column({}, Array.from({ length: 40 }, (_, i) => GTUI.view.text({ margin: 0 }, `history ${i}`))),
+      ]),
+      GTUI.view.input({ id: "draft", value, caret: value.length, focus: true, priority: 10, maxRows: 4 }),
+    ]);
+    const paint = () => layoutView(root, { width: 30, height: 24, controls }).canvas;
+    const rows = (canvas) => canvas.cells.map((row) => row.map((cell) => cell?.char ?? cell?.text ?? "").join(""));
+    const before = rows(paint());
+    controls.handle({ type: "pointer", kind: "wheel", target: "draft", direction: "up", amount: 2 });
+    const after = rows(paint());
+    expect(after).not.toEqual(before);
+    expect(after.some((row) => row.includes("row 14"))).toBe(true);
+    expect(events.filter((event) => event.type === "scroll.change")).toEqual([]);
+    expect(events.filter((event) => event.type === "input.change")).toEqual([]);
+    controls.handle({ type: "pointer", kind: "wheel", target: "draft", direction: "down", amount: 2 });
+    expect(rows(paint())).toEqual(before);
+  });
+
   test("wheel over a focused input scrolls the keyboard transcript", () => {
     const events = [];
     const controls = createControls((event) => events.push(event));
@@ -655,10 +737,9 @@ describe("GTUI menu, scroll, and overlay", () => {
     expect(events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1 });
   });
 
-  test("wheel over an input scrollbar region still scrolls the transcript", () => {
-    // A wheel whose resolved target is the input's scrollbar control id
-    // (control "scroll", target = the input id) must still fall back to the
-    // keyboard transcript — the input is not a scroll container.
+  test("wheel over a fitting input scrollbar region still scrolls the transcript", () => {
+    // A stale scroll-control id targeting a fitting input falls back to
+    // the keyboard transcript; the input has no visible scrollbar.
     const events = [];
     const controls = createControls((event) => events.push(event));
     layoutView(GTUI.view.column({}, [

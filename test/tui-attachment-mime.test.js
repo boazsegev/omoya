@@ -3,13 +3,13 @@ import Context from "../lib/context.js";
 import { contextBlocks } from "../lib/app/tui/context-blocks.js";
 import { createStreamRenderer } from "../lib/app/tui/stream.js";
 
-// A binary block carries `mimetype` (Context.binaryContent); the display
+// A binary block carries `mimetype` (Context.contentBinary); the display
 // placeholders must render it, never fall back to "unknown".
-const PDF = Context.binaryContent("quote.pdf", new TextEncoder().encode("%PDF-1.7"));
+const PDF = Context.contentBinary("quote.pdf", new TextEncoder().encode("%PDF-1.7"));
 
 describe("binary attachment display mimetype", () => {
   test("the transcript viewer labels a binary block with its mimetype", () => {
-    const blocks = contextBlocks([Context.userMessage([PDF])]);
+    const blocks = contextBlocks([Context.messageUser([PDF])]);
     expect(blocks).toHaveLength(1);
     expect(blocks[0].text).toContain("application/pdf");
     expect(blocks[0].text).not.toContain("unknown");

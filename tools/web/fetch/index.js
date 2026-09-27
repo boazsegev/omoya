@@ -1,36 +1,34 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { BROWSER_HEADERS, fetchWithConnectTimeout, webRateSettings, webBudgetMs, __resetWebRateForTests, rateEnter } from "../shared.js";
 
 const DEFAULT_LIMITS = Object.freeze({
   timeout: 20_000,
+  connectTimeout: 3_000,
   maxRedirects: 8,
   maxBytes: 5_000_000,
   maxCharacters: 50_000,
   cacheSeconds: 300,
   cacheMaxEntries: 32,
-  concurrency: 4,
-  burstCalls: 8,
-  burstWindowMs: 30_000,
-  rollingCalls: 60,
-  rollingWindowMs: 300_000,
 });
 
 const HARD_LIMITS = Object.freeze({
   timeout: 20_000,
+  connectTimeout: 3_000,
   maxRedirects: 8,
   maxBytes: 5_000_000,
   maxCharacters: 50_000,
   cacheSeconds: 3_600,
   cacheMaxEntries: 256,
-  concurrency: 16,
 });
 
 const JSON_TYPES = new Set(["application/json", "application/ld+json", "text/json"]);
 const TEXT_TYPES = new Set(["text/plain", "text/markdown", "text/csv", "application/xml", "text/xml"]);
 const HTML_TYPES = new Set(["text/html", "application/xhtml+xml"]);
+const MIN_CHALLENGE_MARKDOWN_CHARACTERS = 500;
+const CHALLENGE_CONTENT_WARNING = "Warning: The response matched a possible anti-bot or challenge page. The extracted Markdown is substantial enough to return, but may be incomplete or access-restricted.";
 const CACHE = new Map();
-const RATE_STATE = { active: 0, calls: [] };
 let readabilityProbe;
 
 /** Start the one-time optional dependency probe during tool loading. */
@@ -43,8 +41,7 @@ export function initializeReadability(isEnabled = true, options = {}) {
 
 export function __resetPackageFetchForTests() {
   CACHE.clear();
-  RATE_STATE.active = 0;
-  RATE_STATE.calls = [];
+  __resetWebRateForTests();
   readabilityProbe = undefined;
 }
 
@@ -66,12 +63,16 @@ export async function packageFetch(args, context = {}, options = {}) {
   const requestUrl = validateUrl(args?.url, "url");
   const isReadabilityEnabled = readReadabilitySetting(context.env?.settings?.web);
   const cacheKey = `${isReadabilityEnabled ? "readability" : "builtin"}:${requestUrl.href}`;
-  await enterRateLimit(limits, clock);
+  // The rate ledger counts the ATTEMPT (the network work), not cache hits;
+  // successful calls pause per the shared graded throttle — never an error.
+  // The remaining deadline bounds any capacity wait / pause to half of it.
+  const budgetMs = webBudgetMs(context);
+  const cached = readCache(cacheKey, clock, limits);
+  if (cached) return renderEnvelope(cached, limits.maxCharacters);
+  const rate = webRateSettings(context.env?.settings?.web);
+  const leave = await rateEnter(rate, clock, context.signal, options.sleep, budgetMs, "web-fetch");
+  let successful = false;
   try {
-    const cached = readCache(cacheKey, clock, limits);
-    if (cached) {
-      return renderEnvelope(cached, limits.maxCharacters);
-    }
     if (isReadabilityEnabled) await resolveReadability(options);
 
     const signal = makeSignal(context.signal, limits.timeout);
@@ -82,12 +83,16 @@ export async function packageFetch(args, context = {}, options = {}) {
       const entry = makeEntry(requestUrl.href, fetched.finalUrl.href, fetched.response, rendered, clock);
       const output = renderEnvelope(entry, limits.maxCharacters);
       writeCache(cacheKey, entry, fetched.response, clock, limits);
+      successful = true;
       return output;
+    } catch (error) {
+      if (isTimeoutError(error)) throw actionableError(`web-fetch timed out after ${limits.timeout} ms`, "timeout");
+      throw error;
     } finally {
       signal.dispose();
     }
   } finally {
-    RATE_STATE.active -= 1;
+    await leave(successful);
   }
 }
 
@@ -103,16 +108,12 @@ function readLimits(settings = {}, overrides = {}) {
   const merged = { ...DEFAULT_LIMITS, ...settings, ...overrides };
   return {
     timeout: finiteInt("fetch.timeout", merged.timeout, 1, HARD_LIMITS.timeout),
+    connectTimeout: finiteInt("fetch.connectTimeout", merged.connectTimeout, 0, HARD_LIMITS.connectTimeout),
     maxRedirects: finiteInt("fetch.maxRedirects", merged.maxRedirects, 0, HARD_LIMITS.maxRedirects),
     maxBytes: finiteInt("fetch.maxBytes", merged.maxBytes, 1, HARD_LIMITS.maxBytes),
     maxCharacters: finiteInt("fetch.maxCharacters", merged.maxCharacters, 1, HARD_LIMITS.maxCharacters),
     cacheSeconds: finiteInt("fetch.cacheSeconds", merged.cacheSeconds, 0, HARD_LIMITS.cacheSeconds),
     cacheMaxEntries: finiteInt("fetch.cacheMaxEntries", merged.cacheMaxEntries, 1, HARD_LIMITS.cacheMaxEntries),
-    concurrency: finiteInt("fetch.concurrency", merged.concurrency, 1, HARD_LIMITS.concurrency),
-    burstCalls: finiteInt("fetch.burstCalls", merged.burstCalls, 1, 1_000),
-    burstWindowMs: finiteInt("fetch.burstWindowMs", merged.burstWindowMs, 1, 3_600_000),
-    rollingCalls: finiteInt("fetch.rollingCalls", merged.rollingCalls, 1, 10_000),
-    rollingWindowMs: finiteInt("fetch.rollingWindowMs", merged.rollingWindowMs, 1, 3_600_000),
   };
 }
 
@@ -146,28 +147,6 @@ function validateHopUrl(url) {
   }
 }
 
-async function enterRateLimit(limits, clock) {
-  const now = clockTime(clock);
-  RATE_STATE.calls = RATE_STATE.calls.filter((time) => now - time < limits.rollingWindowMs);
-  const burstCount = RATE_STATE.calls.filter((time) => now - time < limits.burstWindowMs).length;
-  if (RATE_STATE.active >= limits.concurrency) {
-    throw retryableError("web-fetch concurrency limit reached; retry later", 1_000);
-  }
-  if (burstCount >= limits.burstCalls) {
-    throw retryableError("web-fetch burst rate limit reached; retry later", nextRetry(RATE_STATE.calls, now, limits.burstWindowMs));
-  }
-  if (RATE_STATE.calls.length >= limits.rollingCalls) {
-    throw retryableError("web-fetch rolling rate limit reached; retry later", nextRetry(RATE_STATE.calls, now, limits.rollingWindowMs));
-  }
-  RATE_STATE.active += 1;
-  RATE_STATE.calls.push(now);
-}
-
-function nextRetry(calls, now, windowMs) {
-  const oldest = Math.min(...calls);
-  return Math.max(1, oldest + windowMs - now);
-}
-
 function clockTime(clock) {
   const value = clock();
   return value instanceof Date ? value.getTime() : Number(value);
@@ -191,16 +170,17 @@ function makeSignal(parent, timeoutMs) {
 async function fetchWithRedirects(initialUrl, fetchImpl, signal, limits) {
   let current = initialUrl;
   for (let hop = 0; hop <= limits.maxRedirects; hop += 1) {
-    const response = await fetchImpl(current.href, {
+    const response = await fetchWithConnectTimeout(fetchImpl, current.href, {
       method: "GET",
       redirect: "manual",
       credentials: "omit",
       signal,
       headers: {
+        ...BROWSER_HEADERS,
+        // web-fetch keeps its own accept: it prefers JSON/plain text over image formats
         accept: "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.1",
-        "user-agent": "omoya-web-fetch/1",
       },
-    });
+    }, { connectTimeoutMs: limits.connectTimeout, message: `web-fetch could not connect to ${current.origin} within ${limits.connectTimeout} ms` });
     if (!isRedirect(response.status)) {
       if (response.status < 200 || response.status >= 300) {
         throw actionableError(`web-fetch HTTP ${response.status} from ${current.href}`, "http");
@@ -244,7 +224,8 @@ async function readBoundedBytes(response, maxBytes, signal) {
   try {
     while (true) {
       if (signal.aborted) throw signal.reason ?? new Error("web-fetch cancelled");
-      const { done, value } = await reader.read();
+      // reader.read() cannot observe the abort signal: race it so a stalled stream still fails at the deadline
+      const { done, value } = await abortableRead(reader, signal);
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
@@ -264,6 +245,27 @@ async function readBoundedBytes(response, maxBytes, signal) {
   return out;
 }
 
+function abortableRead(reader, signal) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    const fail = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("web-fetch cancelled"));
+    };
+    const pollMs = 50; // fallback: synthetic AbortSignals need polling; real signals fire the listener
+    const poll = () => {
+      if (signal.aborted) return fail();
+      timer = setTimeout(poll, pollMs);
+    };
+    signal.addEventListener?.("abort", fail, { once: true });
+    poll();
+    reader.read().then(
+      (result) => { clearTimeout(timer); signal.removeEventListener?.("abort", fail); resolve(result); },
+      (error) => { clearTimeout(timer); signal.removeEventListener?.("abort", fail); reject(error); },
+    );
+  });
+}
+
 function detectCharset(contentType) {
   const match = /charset\s*=\s*([^;]+)/i.exec(contentType ?? "");
   const charset = match?.[1]?.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
@@ -279,7 +281,7 @@ async function renderBody(body, finalUrl, options) {
     return renderJson(body.text);
   }
   if (HTML_TYPES.has(body.mediaType)) {
-    return { kind: "html", text: await renderHtml(body.text, finalUrl, options) };
+    return { kind: "html", ...await renderHtml(body.text, finalUrl, options) };
   }
   if (TEXT_TYPES.has(body.mediaType) || body.mediaType.startsWith("text/")) {
     return { kind: "text", text: body.text };
@@ -296,24 +298,34 @@ function renderJson(text) {
 }
 
 async function renderHtml(html, finalUrl, options) {
-  if (isChallengePage(html)) {
-    throw actionableError("web-fetch cannot retrieve challenge, CAPTCHA, or anti-bot pages", "challenge");
-  }
+  const hasChallengeSignature = isChallengePage(html);
   if (isScriptShell(html)) {
     throw actionableError("web-fetch cannot read empty JavaScript-rendered pages without server HTML", "challenge");
   }
   const readable = await extractWithReadability(html, finalUrl, options);
   const source = readable ?? extractRelevantHtml(html);
   const baseUrl = htmlBaseUrl(html, finalUrl);
-  const markdown = htmlToMarkdown(source, baseUrl).trim();
-  if (markdown === "") {
+  const text = htmlToMarkdown(source, baseUrl).trim();
+  if (text === "") {
     throw actionableError("web-fetch found no readable HTML content", "media");
   }
-  return markdown;
+  if (hasChallengeSignature && Array.from(text).length < MIN_CHALLENGE_MARKDOWN_CHARACTERS) {
+    throw actionableError("web-fetch cannot retrieve challenge, CAPTCHA, or anti-bot pages", "challenge");
+  }
+  return { text, ...(hasChallengeSignature ? { warning: CHALLENGE_CONTENT_WARNING } : {}) };
 }
 
 function isChallengePage(html) {
-  return /captcha|cloudflare|cf-browser-verification|checking your browser|access denied|are you a human/i.test(html);
+  const visible = html
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const title = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "";
+  return /cf-browser-verification|cf-chl-(?:captcha|managed-challenge|widget)/i.test(html)
+    || /checking (?:your )?browser|verify you (?:are|['’]re) human|complete (?:the )?(?:security|captcha) check/i.test(visible)
+    || /just a moment|access denied|attention required/i.test(title);
 }
 
 function isScriptShell(html) {
@@ -499,6 +511,7 @@ function makeEntry(sourceUrl, finalUrl, response, rendered, clock) {
     retrieved: isoTime(clock),
     kind: rendered.kind,
     body: rendered.text,
+    warning: rendered.warning,
     cacheControl: response.headers?.get?.("cache-control") ?? "",
   };
 }
@@ -513,6 +526,7 @@ function renderEnvelope(entry, maxCharacters) {
   const lines = [`Source: ${entry.sourceUrl}`];
   if (entry.finalUrl !== entry.sourceUrl) lines.push(`Final URL: ${entry.finalUrl}`);
   lines.push(`Retrieved: ${entry.retrieved}`);
+  if (entry.warning) lines.push(entry.warning);
   if (truncated.wasTruncated) {
     const suffix = entry.kind === "json" ? "; incomplete JSON" : "";
     lines.push(`Truncated: yes (${truncated.kept} of ${truncated.total} characters${suffix})`);
@@ -558,15 +572,12 @@ function cacheTtlSeconds(cacheControl, defaultTtl) {
   return defaultTtl;
 }
 
+function isTimeoutError(error) {
+  return error instanceof Error && error.message === "web-fetch timed out";
+}
+
 function actionableError(message, code) {
   const error = new Error(message);
   error.code = code;
-  return error;
-}
-
-function retryableError(message, retryAfterMs) {
-  const error = actionableError(`${message} (retry after ${retryAfterMs} ms)`, "rate_limit");
-  error.retryable = true;
-  error.retryAfterMs = retryAfterMs;
   return error;
 }

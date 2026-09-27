@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { existsSync, mkdtempSync } from "node:fs";
-import { Agent, SessionStore } from "../lib/agent.js";
+import { Agent } from "../lib/agent.js";
 import IO, { Context, Env } from "../lib/io.js";
 import { NAMES } from "../lib/namespace.js";
 import { USER, testEnv } from "./fakes.js";
@@ -14,14 +15,14 @@ describe("Agent construction", () => {
     expect(Agent.Env).toBe(Env);
     expect(Agent.Context).toBe(Context);
     expect(Agent.IO).toBe(IO);
-    expect(Env.NAMES).toBe(NAMES);
-    expect(Agent.NAMES).toBe(Env.NAMES);
+    expect(Env.NAMES).toBeUndefined(); // the namespace foundation owns it
+    expect(Agent.NAMES).toBe(NAMES);
   });
 
-  test("Env.createAgent constructs an Agent over its receiver Env", async () => {
+  test("Env.agentCreate constructs an Agent over its receiver Env", async () => {
     const env = await testEnv();
     const other = await testEnv();
-    const agent = env.createAgent({ env: other, model: model(env), context: [] });
+    const agent = env.agentCreate({ env: other, model: model(env), context: [] });
     expect(agent).toBeInstanceOf(Agent);
     expect(agent.env).toBe(env);
     expect(env.agents()).toEqual([agent]);
@@ -37,7 +38,7 @@ describe("Agent construction", () => {
 
   test("rejects malformed, unknown-endpoint, and unknown-model selectors before registration", async () => {
     const env = await testEnv();
-    env.endpoints.p.models = { known: {} };
+    env._endpoints.p.models = { known: {} };
     for (const value of ["p", "/m", "p/"]) {
       expect(() => new Agent({ env, model: value })).toThrow(/model selector/);
     }
@@ -48,27 +49,27 @@ describe("Agent construction", () => {
 
   test("refuses an invalid later selection without changing the active model", async () => {
     const env = await testEnv();
-    env.endpoints.p.models = { known: {} };
+    env._endpoints.p.models = { known: {} };
     const agent = new Agent({ env, model: "p/known" });
-    expect(() => agent.setModel("p/missing")).toThrow(/unknown model/);
+    expect(() => agent.modelSet("p/missing")).toThrow(/unknown model/);
     expect(`${agent.endpoint}/${agent.model}`).toBe("p/known");
   });
 
   test("a string session resumes an existing id and otherwise creates it", async () => {
-    const env = await testEnv();
     const dir = mkdtempSync("./ai-tmp/agent-constructor-");
-    const first = new Agent({ env, model: model(env), session: "same", sessionDir: dir, context: [USER("first")] });
-    first.session.flush();
-    const resumed = new Agent({ env, model: model(env), session: "same", sessionDir: dir, context: [USER("second")] });
-    expect(resumed.context).toEqual([USER("first\n\nsecond")]);
-    expect(resumed.session.id).toBe("same");
-    expect(existsSync(resumed.session.file)).toBe(true);
+    const env = await testEnv({ sessions: resolve(dir) });
+    const first = new Agent({ env, model: model(env), contextId: "same", context: [USER("first")] });
+    first.context.flush();
+    const resumed = new Agent({ env, model: model(env), contextId: "same", context: [USER("second")] });
+    expect(resumed.context.messages()).toEqual([USER("first\n\nsecond")]);
+    expect(resumed.context.id).toBe("same");
+    expect(existsSync(resumed.context.file)).toBe(true);
   });
 
-  test("an injected session store remains supported", async () => {
+  test("a ready Context is used as the agent's context", async () => {
     const env = await testEnv();
-    const store = new SessionStore({ id: "injected", dir: mkdtempSync("./ai-tmp/agent-store-") });
-    const agent = new Agent({ env, model: model(env), session: store });
-    expect(agent.session).toBe(store);
+    const store = new Context({ id: "injected", dir: mkdtempSync("./ai-tmp/agent-store-") });
+    const agent = new Agent({ env, model: model(env), context: store });
+    expect(agent.context).toBe(store);
   });
 });

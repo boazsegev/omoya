@@ -14,7 +14,7 @@ afterEach(() => {
   server?.stop(true);
 });
 
-// The spawned CLIs get ONE ATTEMPT (maxAttempts: 1 — the retry
+// The spawned CLIs get ONE ATTEMPT (retry.attempts: 1 — the retry
 // policy's waits would stretch every failure-class assertion past its
 // timeout; the retries have their own proof in agent-retry.test.js)
 mkdirSync("./ai-tmp/io-cli-exit", { recursive: true });
@@ -30,7 +30,7 @@ async function runCli({ input = "", args = [], signal } = {}) {
   // LIVE local server's model list (a dev machine's ollama) that the next
   // CLI's synthetic "ollama/m" then fails validation against.
   const settingsDir = mkdtempSync(resolve("./ai-tmp/io-cli-exit/settings-") + "");
-  writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ maxAttempts: 1 }));
+  writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ retry: { attempts: 1 } }));
   const proc = Bun.spawn(["bun", cli.io, ...args], {
     stdin: "pipe",
     stdout: "pipe",
@@ -51,7 +51,7 @@ async function runCli({ input = "", args = [], signal } = {}) {
 }
 
 const OK = () =>
-  new Response(JSON.stringify({ message: { role: "assistant", content: "" }, done: true }) + "\n");
+  new Response(JSON.stringify({ message: { role: "assistant", content: "ok" }, done: true }) + "\n");
 
 describe("io CLI exit codes", () => {
   test("0 on success", async () => {

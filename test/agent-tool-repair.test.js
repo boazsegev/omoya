@@ -17,7 +17,7 @@ const CANCELLED = { type: "error", error: "cancelled", kind: "cancelled" };
 /** The Moonshot wire view of a context: every tool_call id answered? */
 function kimiWire(context) {
   const provider = new KimiProvider("https://api.kimi.com/coding/v1", {
-    currentModel: "kimi-for-coding",
+    modelCurrent: "kimi-for-coding",
     settings: {},
     tools: () => [],
   });
@@ -39,7 +39,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     const first = await agent.run({});
     expect(first.type).toBe("error"); // the cancelled turn
     // the partial assistant message with the unanswered call is kept
-    const orphan = agent.context.find((m) =>
+    const orphan = agent.context.messages().find((m) =>
       (m.content ?? []).some((b) => b.type === "toolCall" && b.callId === "bash:1"));
     expect(orphan).toBeDefined();
 
@@ -125,15 +125,15 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     // block the caller seeded stays id-less; the context's replacement
     // carries the fresh linkage id
     expect(block.callId).toBeUndefined();
-    const storedBlock = agent.context.flatMap((m) => m.content ?? []).find((b) => b?.type === "toolCall");
+    const storedBlock = agent.context.messages().flatMap((m) => m.content ?? []).find((b) => b?.type === "toolCall");
     expect(typeof storedBlock.callId).toBe("string");
     const result = sent.find((m) => m.type === 4 && m.callId === storedBlock.callId);
     expect(result?.error).toBe(true);
     expect(kimiWire(sent).orphans).toEqual([]);
 
-    const before = agent.context.filter((m) => m.type === 4).length;
+    const before = agent.context.messages().filter((m) => m.type === 4).length;
     await agent.run({}); // nothing left to repair
-    expect(agent.context.filter((m) => m.type === 4).length).toBe(before);
+    expect(agent.context.messages().filter((m) => m.type === 4).length).toBe(before);
   });
 
   test("repair never mutates a stored message (deep-frozen context survives)", async () => {
@@ -154,7 +154,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     const agent = new Agent({ env, model: "p/m", context: [freezeDeep(USER("q")), orphan, freezeDeep(USER("next"))], createIO: () => io });
     await agent.run({});
 
-    const storedBlock = agent.context.flatMap((m) => m.content ?? []).find((b) => b?.type === "toolCall");
+    const storedBlock = agent.context.messages().flatMap((m) => m.content ?? []).find((b) => b?.type === "toolCall");
     expect(typeof storedBlock.callId).toBe("string"); // the replacement carries the id
     expect(Object.isFrozen(storedBlock)).toBe(false); // on a REPLACEMENT, not the frozen original
     expect(kimiWire(io.writes[0].context).orphans).toEqual([]); // the wire is still valid

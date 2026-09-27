@@ -43,11 +43,19 @@ describe("web-app commands: TUI parity", () => {
 
   test("/<prompt> fills the composer for editing instead of submitting", async () => {
     const env = await testEnv();
-    env.promptBody = (name) => (name === "greet" ? "Say hello." : null);
+    env.prompts = () => new Map([["greet", { name: "greet", body: "Say hello." }]]);
     const agent = new Agent({ env, model: "p/m", context: [] });
     expect(await runCommand(agent, "/greet")).toEqual({ fill: "Say hello." });
     expect(await runCommand(agent, "//greet to Bo\nthanks")).toEqual({ fill: "Say hello.\nto Bo\nthanks" });
-    expect(agent.context).toEqual([]);
+    expect(agent.context.messages()).toEqual([]);
+  });
+
+  test("/compact forwards multiline focus to Agent and remains discoverable", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [{ type: 2, content: [{ type: "text", text: "q" }] }] });
+    agent.compact = async (focus) => ({ ok: focus === "prioritize code\nthen tests", before: 1 });
+    expect(await runCommand(agent, "/compact prioritize code\nthen tests")).toEqual({ text: "compacted 1 messages", renew: true });
+    expect(catalog(agent).commands).toContain("/compact");
   });
 
   test("dialog-backed commands open client views", async () => {

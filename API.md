@@ -1,46 +1,26 @@
-# API (2026-09-27)
+# API (2026-10-02)
 
 ## Agent
-
-### `Agent._resetFinish()`
-
-Test-only reset: forget cleanups and arming state.
-
-### `Agent.append(message)`
-
-Append a caller-built message (e.g.
 
 ### `Agent.get busy()`
 
 Whether an agent run is currently in progress.
 
-### `Agent.callProviderCapability(name, args, options)`
-
-Provider-owned capability hook.
-
-### `Agent.canCallTool(name)`
-
-Whether this Agent's effective catalog authorizes a named tool.
-
 ### `Agent.cancel()`
 
-Cancel the in-flight request (IO kill → terminal partial).
+Cancel active IO and every pending tool dispatch; queued calls never start.
 
-### `Agent.childAdd(child)`
+### `Agent.childCreate(options = {…})`
 
-Register one direct child Agent.
-
-### `Agent.childRemove(child)`
-
-Remove one direct child Agent.
+Construct one direct child through the environment factory.
 
 ### `Agent.get children()`
 
-Snapshot of direct child Agents.
+Snapshot of directly owned workers.
 
 ### `Agent.close()`
 
-Refuse new messages now and close after the current turn, or immediately when idle.
+Refuse new messages immediately; finish the current turn before releasing resources, or release them now when idle.
 
 ### `Agent.get closed()`
 
@@ -50,97 +30,69 @@ Whether close cleanup has completed.
 
 Whether close has been requested, including while a turn finishes.
 
-### `Agent.compact()`
+### `Agent.compact(focus = "")`
 
-/context-compact: ask the model to summarize the conversation (a structured, self-contained prompt), then replace the context with the surviving SYSTEM messages plus one ASSISTANT message holding the marked summary (lib/agent/compact.js).
+Compact: ask the model to summarize the conversation (a structured, self-contained prompt), then replace the context with the surviving SYSTEM messages plus one ASSISTANT message holding the marked summary (lib/agent/compact.js).
 
-### `Agent.constructor({ env, model, url, timeout, settings, context, tools, parent, name, description, session, sessionDir, sessionSave = true, createIO, toolCall, safe, spawnPermission, question, } = {…})`
+### `Agent.constructor({ env, model, url, timeout, settings, context, tools, parent, name, description, contextId, contextSave = true, createIO, toolCall, safe, spawnPermission, question, } = {…})`
 
 Build an agent over an environment; wires the session store (a named file session, a resumed one, an injected store, or none) and takes ownership of the seed context — a NEW (non-resumed) context starts with the seeded system prompt as its FIRST message(s).
+
+### `Agent.contextFork(id)`
+
+Fork the context into a NEW context id: the conversation continues in a fresh Context (flushed immediately when logged); the old file stays behind as a snapshot.
+
+### `Agent.contextNew(id)`
+
+Start a NEW, EMPTY context (re-seeded with the system prompt): the old one is closed (its flushed content stays on disk — contextFork() first to keep a snapshot).
+
+### `Agent.contextResume(id)`
+
+Resume a LOGGED context by id (from env.settings.sessions): it replaces the current one, which is closed (its flushed content stays on disk); its recorded settings and origin folder apply (lib/agent/context-lifecycle.js).
 
 ### `Agent.get contextUsage()`
 
 The context-window readout for the status surface (most exact first: the provider's own report, the last provider-reported envelope, the word-count estimate marked `approximate`).
 
-### `Agent.createChild(options = {…})`
-
-Construct one direct child through the environment factory.
-
 ### `Agent.get description()`
 
 Human-friendly Agent description; an empty string is valid.
 
-### `Agent.set description(value)`
+### `Agent.descriptionSet(value)`
 
-Set the human-friendly Agent description.
-
-### `Agent.detectToolMessages()`
-
-Re-detect tool-provided display information from the current context.
-
-### `Agent.drainPending()`
-
-Remove EVERY pending message, returning them (the TUI's Option+↑ recall: the queued messages go back into the input area, merged, for editing).
-
-### `Agent.edit(i, message)`
-
-Replace context[i] (Context edit semantics: rebuilt from recognized fields, stale provider identifiers dropped), mirrored to the session store when one is wired.
-
-### `Agent.editBlock(i, j, block)`
-
-Replace context[i].content[j] (the containing message is rebuilt).
-
-### `Agent.get endRequested()`
-
-Whether this agent asked to end after its current turn settles.
-
-### `Agent.enqueue(message)`
-
-Deliver a user message: while a request is in flight it is queued for the next request; while idle it is appended and starts a request immediately.
-
-### `Agent.enqueueFile(fileName)`
-
-Read an existing file as a binary user message and deliver it.
+Describe the agent (recorded into a logged context's settings).
 
 ### `Agent.EVENT`
 
-The numeric event vocabulary for Agent.onEvent: START, TEXT_START, TEXT_DELTA, TEXT_END, THINKING_START, THINKING_DELTA, THINKING_END, TOOLCALL_START, TOOLCALL_DELTA, TOOLCALL_END, DONE, ERROR, MESSAGE_COMMITTED, LOG, TOOL_EXECUTE, TOOL_DATA, TOOL_RESULT, CLOSE_MARKED, CLOSED, SENT_MESSAGE — see Agent.onEvent's documentation for each value's meaning and payload.
+The numeric event vocabulary for Agent.onEvent — events about THIS agent only (Env reports membership: AGENT_ADDED/AGENT_REMOVED): REQUEST_START, TEXT_START, TEXT_DELTA, TEXT_END, THINKING_START, THINKING_DELTA, THINKING_END, TOOL_CALL_START, TOOL_CALL_DELTA, TOOL_CALL_END, REQUEST_DONE, REQUEST_ERROR, MESSAGE_COMMITTED, LOG, TOOL_EXECUTE, TOOL_DATA, TOOL_RESULT, CLOSE_MARKED, CLOSED, SENT_MESSAGE — see Agent.onEvent's documentation for each value's meaning and payload.
+
+### `Agent.EVENT_CALLBACKS`
+
+The [responseCallbackName, Agent.EVENT] pairs: every EVENT value's corresponding option-callback name ("onTextDelta" for Agent.EVENT.TEXT_DELTA, …), for hosts that prefer per-event callbacks over one onEvent listener.
 
 ### `Agent.get folder()`
 
 The agent-local root used for file tools and their OS sandbox.
 
-### `Agent.fork(id)`
+### `Agent.folderSet(folder)`
 
-Fork the current session into a NEW session id: the live context continues under a fresh store (flushed immediately); the old file stays behind as a snapshot.
+Narrow this agent's tool working folder to an existing folder inside its environment project.
 
 ### `Agent.get ioState()`
 
 The connection/work state for the TUI's status indicator: "working" (a run is in flight), "disconnected" (the last turn failed connection-class), "idle" (otherwise).
 
-### `Agent.latestSessionId()`
+### `Agent.modelSet(selector)`
 
-the latest session's id (undefined: no sessions)
-
-### `Agent.listSessions()`
-
-Every session in the store's folder, latest first, each with a first-user-message preview (the ^X menu's Resume sub-menu, /resume's Tab completion).
-
-### `Agent.listSessionsAsync()`
-
-Nonblocking counterpart of listSessions().
+Select an exact, configured endpoint/model pair for subsequent turns.
 
 ### `Agent.get name()`
 
 Human-friendly Agent name.
 
-### `Agent.set name(value)`
+### `Agent.nameSet(value)`
 
-Set the human-friendly Agent name.
-
-### `Agent.newSession(id)`
-
-Start a NEW session with an EMPTY context (re-seeded with the system prompt): the old session file is closed (its flushed content stays on disk — fork() first to keep a snapshot).
+Rename the agent (recorded into a logged context's settings).
 
 ### `Agent.offEvent(handle)`
 
@@ -160,39 +112,27 @@ Inspect a path using the Agent's file-security boundary.
 
 ### `Agent.get pending()`
 
-the pending queue (a copy — drainPending to remove)
+Unsent messages queued while busy (array copy; message objects are shared).
+
+### `Agent.pendingPop()`
+
+Remove ALL unsent pending messages, returning them (the TUI's Option+↑ recall: the queued messages go back into the input area, merged, for editing).
 
 ### `Agent.get planUsage()`
 
 The provider-reported PLAN/QUOTA readout of the current endpoint (`{label?, quotas}`; in-memory, last-known).
 
-### `Agent.pop()`
+### `Agent.get policy()`
 
-Remove and return the last message (undefined on an empty context).
+The settings this Agent runs by, resolved from env.settings when it was created, re-resolved only when it selects another model (lib/agent/policy.js): context {cap, turn, autocompact} (the runaway guard and the auto-compaction threshold; global, then endpoint, then model overrides), retry {attempts, base, max}, tools {timeout, timeoutLimit, concurrency}.
 
-### `Agent.removeMessages(indexes)`
+### `Agent.promptCatalog(prompts, options)`
 
-Remove selected context messages.
+The `# Prompt Catalog` text of env.prompts().
 
-### `Agent.renameSession(name)`
+### `Agent.questionSet(callbacks)`
 
-Rename the current session: the session file takes the proper name (`session-<name>.jsonl`; the old name's file is gone) — /session-name.
-
-### `Agent.requestEnd()`
-
-Ask to END this agent (its job is done): the current turn finishes first; the run loop then closes the agent instead of idling forever.
-
-### `Agent.RESPONSE_CALLBACK_EVENTS`
-
-The [responseCallbackName, Agent.EVENT] pairs: every EVENT value's corresponding option-callback name ("onTextDelta" for Agent.EVENT.TEXT_DELTA, …), for hosts that prefer per-event callbacks over one onEvent listener.
-
-### `Agent.resumeSession(id)`
-
-Resume an EXISTING session: the live context is replaced with the session's stored context under its store; the old session file is closed (its flushed content stays on disk).
-
-### `Agent.rollback(i)`
-
-Remove every message at index >= i (RangeError when i is not an existing index).
+Set (or replace) the QUESTION BRIDGE at runtime — the binding's rendering engine wires it once its overlays exist (the TUI hands its questionnaire overlay to the Agent after construction; see the constructor's `question` option for the contract).
 
 ### `Agent.run(options = {…})`
 
@@ -202,53 +142,65 @@ Run the tool loop until done/error (lib/agent/run.js).
 
 safe mode: only read-only (`safe`) tools publish and execute
 
-### `Agent.get sessionSave()`
-
-whether the current SessionStore saves to disk
-
-### `Agent.sessionSaveSet(value)`
-
-Enable or disable saving for the current SessionStore.
-
-### `Agent.setFolder(folder)`
-
-Narrow this agent's tool working folder to an existing folder inside its environment project.
-
-### `Agent.setModel(selector)`
-
-Select an exact, configured endpoint/model pair for subsequent turns.
-
-### `Agent.setQuestion(callbacks)`
-
-Set (or replace) the QUESTION BRIDGE at runtime — the binding's rendering engine wires it once its overlays exist (the TUI hands its questionnaire overlay to the Agent after construction; see the constructor's `question` option for the contract).
-
-### `Agent.setSafe(value)`
+### `Agent.safeSet(value)`
 
 Switch safe mode at runtime (the /safe command, the ^X menu).
 
-### `Agent.setSpawnPermission(value)`
+### `Agent.send(message)`
 
-Set generic delegation permission; non-booleans restore tool-owned asking.
+Submit a user message: while a request is in flight it is queued for the next request; while idle it is appended and starts a request immediately.
 
-### `Agent.setThinking(level)`
+### `Agent.sendFile(fileName)`
 
-Set the thinking level for subsequent requests (THINKING_LEVELS; each provider translates it to the nearest symbol the model accepts).
+Read an existing file as a binary user message and deliver it.
+
+### `Agent.skillCatalog(skills, options)`
+
+The `# Skill Catalog` text of env.skills() (the skill tool's answer, the skills CLI).
+
+### `Agent.skillSection(skill)`
+
+One skill's full content as the model reads it: `<skill name="...">\n<body>\n</skill>`.
 
 ### `Agent.get spawnPermission()`
 
 Generic delegation permission.
 
+### `Agent.spawnPermissionSet(value)`
+
+Set generic delegation permission; non-booleans restore tool-owned asking.
+
 ### `Agent.get thinking()`
 
 the current thinking level (undefined = provider default)
 
-### `Agent.toolContext({ question = null, env, call, agent, storage, trusted = false, resetTimeout } = {…})`
+### `Agent.thinkingSet(level)`
+
+Set the thinking level for subsequent requests (THINKING_LEVELS; each provider translates it to the nearest symbol the model accepts).
+
+### `Agent.get throttledUntil()`
+
+Epoch-ms deadline of a pending continuation, or null.
+
+### `Agent.toolCallable(name)`
+
+Whether this Agent's effective catalog authorizes a named tool: the availability selection, narrowed to read-only tools while safe.
+
+### `Agent.toolContext({ question = null, env, safe = false, selector, io, call, agent, storage, trusted = false, resetTimeout } = {…})`
 
 Construct the public tool-call context.
 
 ### `Agent.toolMessages()`
 
 tools with a live sticky message
+
+### `Agent.toolMessagesDetect()`
+
+Re-detect tool-provided display information from the current context.
+
+### `Agent.toolMessageSet(name, text)`
+
+Set (or clear) a tool's sticky MESSAGE on THIS agent — a compact live text the TUI renders above the input area (collected from the VIEWED agent; lib/agent/tool-messages.js).
 
 ### `Agent.toolStorage(toolname)`
 
@@ -258,179 +210,39 @@ Return this agent's mutable, transient storage object for one tool.
 
 Clear one tool's transient storage, or every tool store when omitted.
 
-### `Agent.updateToolMessage(name, text)`
-
-Set (or clear) a tool's sticky MESSAGE on THIS agent — a compact live text the TUI renders above the input area (collected from the VIEWED agent; lib/agent/tool-messages.js).
-
 ### `Agent.get usage()`
 
 Cumulative usage across every request THIS Agent has made — every IO terminal event's usage envelope, summed in memory.
 
-### `Agent.armFinishSignals({ process: proc = process, signals = ["SIGINT", "SIGTERM", "SIGHUP"], } = {…})`
-
-Trap termination signals: run cleanups synchronously, then re-raise the signal with our handlers removed so the process dies by the signal itself.
-
-### `Agent.callToolSandboxed({ env, name, args, timeout = DEFAULT_TOOL_TIMEOUT, sandbox = false, detached = true, cwd, spawnImpl = spawn, onChild, onData, onQuestion, questionBridge = false, })`
-
-Run one tool call in a forked child process; never throws — every failure (spawn error, crash, timeout, bad result line) resolves as {ok: false, error}.
-
-### `Agent.DEFAULT_TOOL_TIMEOUT = ENV_DEFAULT_TOOL_TIMEOUT`
-
-Default Agent-enforced tool-call duration (120 seconds).
-
-### `Agent.findSessionFile(folder, id)`
-
-Find a session file in `folder` by its STABLE `id` (a directory scan reading each file's first line — cheap even at hundreds of files; the file name does not encode `id` directly).
-
-### `Agent.isAnonymousId = (id) => id === "0" || id === "false" || id === "anon"`
-
-The anonymous-session id spellings: "0", "false", "anon" (sessions.js).
-
-### `Agent.loadMessages(data)`
-
-Parse session data (file text or an already-parsed value) into a context array.
-
-### `Agent.onFinish(fn, { process: proc = process } = {…})`
-
-Register a synchronous cleanup to run at process finish.
-
-### `async Agent.pathInfo(path, { folder = process.cwd(), requireExists = true } = {…})`
-
-Validate and inspect a path rooted at an Agent folder.
-
-### `async Agent.rejectAgentSymlinks(resolved, { folder = process.cwd() } = {…})`
-
-Reject existing symbolic links along a resolved, in-root path.
-
-### `Agent.reseatAgent(agent, { id } = {…})`
-
-Build the FRESH Agent that replaces `agent` for a new session.
-
-### `Agent.resolveAgentPath(path, { folder = process.cwd(), boundary = folder } = {…})`
-
-Resolve a relative path from `folder`, bounded by `boundary` (the project root by default).
-
-### `Agent.RESPONSE_CALLBACK_EVENTS = Object.freeze([…]`
+### `Agent.EVENT_CALLBACKS = Object.freeze([…]`
 
 IO callback property paired directly with its numeric Agent event.
 
-### `Agent.resultContent(value)`
+### `Agent.finishAdd(fn, { process: proc = process } = {…})`
 
-Normalize a tool return value into result content blocks — the full tool-answer contract.
+Register a synchronous cleanup to run at process finish.
 
-### `Agent.runFinish()`
+### `Agent.finishRun()`
 
 Run every registered cleanup.
 
-### `Agent.sameFolder(a, b)`
+### `Agent.finishSignalsArm({ process: proc = process, signals = ["SIGINT", "SIGTERM", "SIGHUP"], } = {…})`
 
-Two folder paths are the same place (realpath when it exists).
+Trap termination signals: run cleanups synchronously, then re-raise the signal with our handlers removed so the process dies by the signal itself.
 
-### `Agent.sessionDir(env)`
+### `Agent.reseat(agent, { id } = {…})`
 
-The namespace session folder under settings — outside the project tree by design (see the header).
+Build the FRESH Agent that replaces `agent` for a new session.
 
-### `Agent.SessionStore.append(message, options)`
+### `Agent.TOOL_TIMEOUT_DEFAULT = 120_000`
 
-Append a message, MERGING with the last one when possible (consecutive same-type messages / same-sub-type blocks fold — Context appendMessage).
-
-### `Agent.SessionStore.close()`
-
-Flush and detach the finish hook.
-
-### `Agent.SessionStore.constructor({ id, dir, context = [], origin, process: proc, uuid, name, settings, save = true } = {…})`
-
-Open a store for a session id (the file is created on the first flush of a non-empty context); registers the crash-safe finish hook.
-
-### `Agent.SessionStore.deleteAll({ dir } = {…})`
-
-Delete EVERY session file in the folder (the /sessions-delete-all!
-
-### `Agent.SessionStore.deleteById({ id, dir } = {…})`
-
-Permanently delete a STORED session by id: every session file whose metadata carries that id (a leftover duplicate goes with it).
-
-### `Agent.SessionStore.edit(i, message)`
-
-Replace context[i] through Context (stale identifiers dropped).
-
-### `Agent.SessionStore.editBlock(i, j, block)`
-
-Replace context[i].content[j] through Context.
-
-### `Agent.SessionStore.flush()`
-
-Synchronously make the CURRENT context durable (see _planFlush for the remove/none/append/full decision).
-
-### `Agent.SessionStore.latest({ dir, cwd } = {…})`
-
-The id of the most recently modified session in the folder (of the `cwd` origin when given), or undefined when the folder has none.
-
-### `Agent.SessionStore.list({ dir, cwd, limit = 50 } = {…})`
-
-Every session in the folder, LATEST FIRST (one entry per id), each with a small preview: the first meaningful line of the first user message (see meaningfulLine; whitespace-folded, capped) and `agent`, the stored agent name when it is not a default `agent-N` one.
-
-### `Agent.SessionStore.listAsync({ dir, cwd, limit = 50 } = {…})`
-
-Nonblocking counterpart of list().
-
-### `Agent.SessionStore.originOf({ id, dir } = {…})`
-
-The ORIGIN FOLDER recorded in a session file's metadata line (the cwd the session ran in), or undefined (no such session).
-
-### `Agent.SessionStore.pop()`
-
-Remove the last message.
-
-### `Agent.SessionStore.prepend(messages)`
-
-Insert messages at the FRONT of the context — Agent's seeded system prompt, which must always be the first message(s) of a fresh context.
-
-### `Agent.SessionStore.removeMessages(indexes)`
-
-Remove selected messages.
-
-### `Agent.SessionStore.rename(newId)`
-
-Rename the session: BOTH the stable `id` and the file's NAME segment become `newId` (the same session — the date/uuid8 prefix carries over unchanged) and the old file is gone.
-
-### `Agent.SessionStore.renameById({ id, name, dir } = {…})`
-
-Rename a STORED session by id (the sidebar/menu path for a session no store holds open — a live one renames through its store): loads it, renames it (see rename()) and closes it again.
-
-### `Agent.SessionStore.resume({ id, dir, process: proc, save = true } = {…})`
-
-Load a session file into a fresh store holding its live context.
-
-### `Agent.SessionStore.rollback(i)`
-
-Remove all messages at index >= i.
-
-### `Agent.SessionStore.get save()`
-
-whether this store writes its context to disk
-
-### `Agent.SessionStore.saveSet(value)`
-
-Enable or disable persistence without replacing the live context.
-
-### `Agent.SessionStore.get settings()`
-
-the session-owned agent settings snapshot (undefined: the session has none recorded — resume keeps the caller's configuration)
-
-### `Agent.SessionStore.set settings(value)`
-
-Record the session-owned AGENT SETTINGS snapshot (safe, thinking, endpoint/model, name, … — Agent writes it; the store only persists it; a default `agent-N` name never rides the file).
-
-### `Agent.thinkValue(level)`
-
-Map a thinking-level word to the request option value: none/false/0 → false, on/true/1 → true, positive level words pass through, undefined/"default" → undefined (the model's default).
+Default Agent-enforced cap for one tool call: two minutes.
 
 ## App
 
 ## CLI
 
-### `CLI.adoptResumeOrigin({ resume, anonymous = false } = {…})`
+### `CLI.adoptResumeOrigin({ resume, anonymous = false, dir } = {…})`
 
 Adopt an explicitly resumed session's origin folder as the cwd.
 
@@ -466,25 +278,29 @@ Map a terminal done/error event (or an error-shaped `{kind}`) to the process exi
 
 A result value as printable text: a string as-is, else pretty JSON — ALWAYS a string (JSON.stringify(undefined) is the JS value undefined, not text, so that case is coerced explicitly).
 
-### `CLI.listEndpointModels(env, { access = env.settings?.modelAccess ?? "all" } = {…})`
+### `CLI.listEndpointModels(env)`
 
-Published endpoints with published cached model ids for the menu; loginRequired flags endpoints whose credentials failed (see Agent).
+Published endpoints with their published model ids for the menu; loginRequired flags endpoints whose credentials failed (see Agent).
 
-### `CLI.listModelCandidates(env, { access = env.settings?.modelAccess ?? "all" } = {…})`
+### `CLI.listEndpoints(env)`
 
-Published endpoint/model completion candidates (cache-only).
+Every endpoint the catalog knows (secret ones included) — logout choices.
 
-### `async CLI.listModels(env, { access = env.settings?.modelAccess ?? "all", timeout } = {…})`
+### `CLI.listModelCandidates(env)`
 
-Query each published endpoint and return its currently available public model ids.
+Published endpoint/model completion candidates.
+
+### `async CLI.listModels(env)`
+
+Every published endpoint's model ids once the background collection has answered (a provider failure shows its cached/static catalogue).
 
 ### `async CLI.loginEndpoint(env, { name, provider, url, token, auth, scope = "package", } = {…})`
 
-Configure one endpoint, invoke its protocol login (or accept a pre-seeded `auth`, e.g.
+Configure one endpoint and log it in (Env.login: the provider shapes the credentials — or a pre-seeded `auth`, e.g.
 
 ### `CLI.logoutEndpoint(env, name)`
 
-Remove an endpoint (the /logout and --logout contract): its entry drops out of settings.json, its auth file is deleted, and the live Env forgets it (see Env.removeEndpoint).
+Remove an endpoint (the /logout and --logout contract — Env.logout): its configuration and auth files go; an environment-detected endpoint clears in memory only and re-detects while the environment provides it.
 
 ### `CLI.oauthPasteOnly(descriptor)`
 
@@ -504,7 +320,7 @@ Read stdin to EOF and parse it into a context array.
 
 ### `CLI.readLastCombo(env)`
 
-the last-used combo, or null when none is stored
+the newest last-used published pair, or null
 
 ### `async CLI.readStdin()`
 
@@ -522,7 +338,7 @@ Render the template text: one commented-out line per known key, sorted, its defa
 
 Resolve the tool CLI's shell-friendly non-JSON arguments.
 
-### `async CLI.resolveModelCombo(value, env, { url } = {…})`
+### `async CLI.resolveModelCombo(value, env)`
 
 Resolve `<endpoint>/<model>`, a model id, an endpoint, or a bare model.
 
@@ -554,195 +370,303 @@ Split a tool's return value into its {result, system?, display?} envelope (see t
 
 One-line human-readable usage summary (e.g.
 
-### `CLI.writeLastCombo(env, { endpoint, model } = {…})`
-
-Persist a selected endpoint/model combo (in the user settings folder).
-
 ### `CLI.writeSettingsTemplate(env, { force = false } = {…})`
 
 Write a fresh namespaced settings template into the project folder (env.cwd).
 
 ## Context
 
-### `Context.appendMessage(context, message, { merge = true } = {…})`
-
-Append a message to a caller-owned context, MERGING when possible: the message's own adjacent same-sub-type blocks fold first; when the context's last message is mergeable with it (same type, no linkage), their content concatenates (and re-folds) instead of appending a new message.
-
-### `Context.assemblyCallbacks(assembler)`
+### `Context.assemblerCallbacks(assembler)`
 
 The callback set (camelCase, matching lib/context/events.js) that assembles a response — Context "supplies the callback set".
 
-### `Context.assistantMessage(content = [])`
+### `Context.assemblerCreate()`
 
-assistant message from content blocks
+Create an assembler that consumes normalized IO response events into one assistant message.
 
-### `Context.at(context, i)`
+### `Context.callbacksNormalize(callbacks = {…}, binding = {…})`
 
-Address a message: context[i], validated (throws on a bad integer index or shape).
+Build the full callback set for a binding.
 
-### `Context.binaryContent(path, buffer)`
+### `Context.contentBinary(path, buffer)`
 
 Build a canonical base64 binary Context block without leaking its source path.
 
-### `Context.blockAt(context, i, j)`
+### `Context.contentIndexer()`
 
-Address a content block: context[i].content[j], validated (RangeError when j is out of range).
+Content-block numbering for a provider translator (msg2events) — the producer side of the `contentIndex` the assembler consumes.
 
-### `Context.callbackName(eventName)`
+### `Context.contentText(text)`
 
-Map an event name to its camelCase callback name.
+Wrap plain text in a text content block.
 
 ### `Context.ContentType = Object.freeze({…})`
 
 Content block discriminators.
 
-### `Context.createAssembler()`
+### `Context.append(message, options)`
 
-Create an assembler that consumes normalized IO response events into one assistant message.
+Append a message, MERGING with the last one when possible (consecutive same-type messages / same-sub-type blocks fold — Context.appendMessage); `{merge: false}` keeps a boundary.
 
-### `Context.detectMime({ path, buffer } = {…})`
+### `Context.at(i)`
 
-Detect a media type from a filename extension or recognized leading bytes.
+The message at index `i` (negative counts from the end).
 
-### `Context.dispatch(set, event)`
+### `Context.blockAt(i, j)`
+
+Block `j` of message `i` (RangeError when either index is out of range).
+
+### `Context.close()`
+
+Flush and close: a closed context refuses changes.
+
+### `Context.constructor({ id, dir, messages = [], origin, uuid, name, settings, save = dir !== undefined } = {…})`
+
+Create a context, optionally named and logged (the file is created on the first flush of a started conversation).
+
+### `Context.deleteAll({ dir } = {…})`
+
+Delete EVERY session file in the folder (the /sessions-delete-all!
+
+### `Context.deleteById({ id, dir } = {…})`
+
+Permanently delete a STORED session by id: every session file whose metadata carries that id (a leftover duplicate goes with it).
+
+### `Context.edit(i, message)`
+
+Replace message `i` (rebuilt from recognized fields; stale provider identifiers dropped).
+
+### `Context.editBlock(i, j, block)`
+
+Replace block `j` of message `i` (the message is rebuilt).
+
+### `Context.errorPop()`
+
+Retract a trailing FAILED RESPONSE before the context is submitted again: an assistant message carrying `error` that is still the last message was not responded to — the user continued as it stands — so it goes and the request is re-attempted.
+
+### `Context.fileOf({ id, dir } = {…})`
+
+The session file holding `id` in `dir` (a metadata-line scan), or undefined.
+
+### `Context.flush()`
+
+Synchronously make the CURRENT context durable (see _planFlush for the remove/none/append/full decision).
+
+### `Context.flushAsync()`
+
+Async counterpart for a live loop (Agent's request/tool turns); the synchronous flush() remains the crash/exit contract.
+
+### `Context.idAnonymous(id)`
+
+Does `id` spell an ANONYMOUS (memory-only, never logged) context: false, "0", "false" or "anon"?
+
+### `Context.latest({ dir, cwd } = {…})`
+
+The id of the most recently modified session in the folder (of the `cwd` origin when given), or undefined when the folder has none.
+
+### `Context.get length()`
+
+the message count
+
+### `Context.list({ dir, cwd, limit = 50 } = {…})`
+
+Every session in the folder, LATEST FIRST (one entry per id), each with a small preview: the first meaningful line of the first user message (see meaningfulLine; whitespace-folded, capped) and `agent`, the stored agent name when it is not a default `agent-N` one.
+
+### `Context.listAsync({ dir, cwd, limit = 50 } = {…})`
+
+Nonblocking counterpart of list().
+
+### `Context.messages()`
+
+a snapshot array of the messages (changing it never changes the context)
+
+### `Context.originOf({ id, dir } = {…})`
+
+The ORIGIN FOLDER recorded in a session file's metadata line (the cwd the session ran in), or undefined (no such session).
+
+### `Context.pop()`
+
+the removed last message
+
+### `Context.prepend(messages)`
+
+Insert messages at the FRONT — e.g.
+
+### `Context.remove(indexes)`
+
+Remove the messages at `indexes`.
+
+### `Context.rename(newId)`
+
+Rename the session: BOTH the stable `id` and the file's NAME segment become `newId` (the same session — the date/uuid8 prefix carries over unchanged) and the old file is gone.
+
+### `Context.renameById({ id, name, dir } = {…})`
+
+Rename a STORED session by id (the sidebar/menu path for a session no store holds open — a live one renames through its store): loads it, renames it (see rename()) and closes it again.
+
+### `Context.resume({ id, dir, save = true } = {…})`
+
+Load a session file into a fresh store holding its live context.
+
+### `Context.rollback(i)`
+
+Remove every message at index >= i (RangeError unless i is an existing index).
+
+### `Context.get save()`
+
+whether this context is logged to disk
+
+### `Context.saveSet(value)`
+
+Enable or disable persistence without replacing the live context.
+
+### `Context.get settings()`
+
+the owner's settings snapshot riding the session file (undefined: none recorded — resume keeps the caller's configuration)
+
+### `Context.settingsSet(value)`
+
+Record the owner's SETTINGS snapshot (an Agent's (safe, thinking, endpoint/model, name, … — Agent writes it; the store only persists it; a default `agent-N` name never rides the file).
+
+### `Context.get summary()`
+
+one line for status/command output: `<id> — <file>` while logging, `<id> — not logged (memory only)` otherwise
+
+### `Context.toJSON()`
+
+JSON form: the message array.
+
+### `Context.update(fn)`
+
+A batch in-place change (a repair pass): `fn` receives the live message array and returns true when it changed anything — the context then logs a full rewrite.
+
+### `Context.eventCallbackName(eventName)`
+
+Map an event name to its camelCase callback name.
+
+### `Context.eventDispatch(set, event)`
 
 Dispatch one event through a (normalized) callback set.
-
-### `Context.editBlock(context, i, j, newBlock)`
-
-Replace context[i].content[j] with an edited block.
-
-### `Context.editMessage(context, i, newMessage)`
-
-Replace context[i] with an edited message, rebuilt from recognized fields (stale provider/cache identifiers dropped).
-
-### `Context.estimateContextTokens(context = [])`
-
-Estimated token count of a whole context (the input side of a request — also the live "window consumption" readout when no provider-reported count exists yet).
-
-### `Context.estimateTokens(text)`
-
-@returns {number} estimated token count
-
-### `Context.estimateUsage(context = [], message)`
-
-Estimate usage from the request context and the assembled response.
 
 ### `Context.EventType = Object.freeze({…})`
 
 The full normalized event vocabulary.
 
-### `Context.fileMessage(path, buffer)`
-
-Wrap one local file's bytes as a canonical user message.
-
-### `Context.finalizeUsage(reported, context, message)`
-
-Normalize provider-reported usage, or fall back to estimation.
-
-### `Context.foldContent(content)`
-
-Fold ADJACENT same-sub-type text/thinking blocks within one content array (a stream with repeated indexes, or a cross-message merge, can leave runs of them — one logical block should BE one block).
-
-### `Context.hasContent(msg)`
-
-Has this message any CONTENT a provider can consume?
-
-### `Context.isContext(ctx)`
-
-Is this a context (an array of core-shaped messages and/or records)?
-
-### `Context.isMessage(msg)`
-
-Is this a core-shaped message (a numeric `type` and a `content` array)?
-
-### `Context.isRecord(msg)`
-
-Is this a metadata RECORD (a string `type`, never a numeric message type)?
-
-### `Context.isResponseEvent(event)`
+### `Context.eventValid(event)`
 
 Is this a well-formed normalized response event (a known `type`; indexed events carry a non-negative integer `contentIndex`)?
 
-### `Context.mergeableMessages(a, b)`
+### `Context.eventValidate(event)`
 
-Can two CONSECUTIVE messages merge into one?
+Validate a normalized response event (used by IO to check connector output).
+
+### `Context.FALLBACK_CONTEXT_WINDOWS = Object.freeze({…})`
+
+Curated context windows for the CURRENT OpenAI tier, from the models docs (developers.openai.com/api/docs/models, reviewed 2026-09-28 — the gpt-6 family lists 1.05M; o-series 200K).
+
+### `Context.fallbackContextWindow(model)`
+
+The curated fallback window for one model id, or null: an exact key, then the longest table prefix the id starts with ("gpt-6-sol" -> "gpt-6", "o3-2025-04-16" -> "o3").
+
+### `Context.messageAppend(context, message, { merge = true } = {…})`
+
+Append a message to a caller-owned context, MERGING when possible: the message's own adjacent same-sub-type blocks fold first; when the context's last message is mergeable with it (same type, no linkage), their content concatenates (and re-folds) instead of appending a new message.
+
+### `Context.messageAssistant(content = [])`
+
+assistant message from content blocks
+
+### `Context.messageErrorText(msg)`
+
+Presentation text of an assistant failure; tool-result boolean errors are distinct.
+
+### `Context.messageFile(path, buffer)`
+
+Wrap one local file's bytes as a canonical user message.
+
+### `Context.messageHasContent(msg)`
+
+Has this message any CONTENT a provider can consume?
+
+### `Context.messageHasError(msg)`
+
+Does this message report a FAILED RESPONSE?
+
+### `Context.messageIsRecord(msg)`
+
+Is this a metadata RECORD (a string `type`, never a numeric message type)?
+
+### `Context.messageRebuild(msg)`
+
+Rebuild a message from recognized schema fields only — the stale provider/cache identifier cleanup.
+
+### `Context.messagesParse(input)`
+
+Parse buffered CLI input into a context array per the shared grammar.
+
+### `Context.messagesValid(ctx)`
+
+Is this a context (an array of core-shaped messages and/or records)?
+
+### `Context.messagesValidate(ctx)`
+
+Validate a context array.
+
+### `Context.messageSystem(text)`
+
+system message wrapping plain text
 
 ### `Context.MessageType = Object.freeze({…})`
 
 Numeric message types.
 
+### `Context.messageUser(text, metadata = undefined)`
+
+user message wrapping text or preserving ordered blocks
+
+### `Context.messageValid(msg)`
+
+Is this a core-shaped message (a numeric `type` and a `content` array)?
+
+### `Context.messageValidate(msg, at = "message")`
+
+Validate a message's CORE SHAPE, throwing on a violation.
+
 ### `Context.MIME_BY_EXTENSION = Object.freeze({…})`
 
 Context-owned media-type map and byte detection for content blocks.
 
-### `Context.mimetypeOf(block)`
+### `Context.mimeDetect({ path, buffer } = {…})`
+
+Detect a media type from a filename extension or recognized leading bytes.
+
+### `Context.mimeOf(block)`
 
 Return a content block's canonical media type.
-
-### `Context.normalizeCallbacks(callbacks = {…}, binding = {…})`
-
-Build the full callback set for a binding.
-
-### `Context.parseContext(input)`
-
-Parse buffered CLI input into a context array per the shared grammar.
-
-### `Context.parseInput(input)`
-
-Parse a buffered input string (such as CLI input after EOF) into a context array.
-
-### `Context.pop(context)`
-
-Remove and return the last message.
-
-### `Context.rebuildBlock(block)`
-
-Rebuild one content block per the module-header field policy.
-
-### `Context.rebuildMessage(msg)`
-
-Rebuild a message from recognized schema fields only — the stale provider/cache identifier cleanup.
-
-### `Context.removeMessages(context, indexes)`
-
-Remove selected message indexes and return them in source order.
-
-### `Context.rollbackTo(context, i)`
-
-Roll back to index i: remove messages at index >= i.
-
-### `Context.systemMessage(text)`
-
-system message wrapping plain text
-
-### `Context.textContent(text)`
-
-Wrap plain text in a text content block.
 
 ### `Context.TOKENS_PER_WORD = 4 / 3`
 
 tokens ≈ words × 4/3 (token-per-word likelihood ratio)
 
+### `Context.tokensEstimate(text)`
+
+@returns {number} estimated token count
+
+### `Context.tokensEstimateMessages(context = [])`
+
+Estimated token count of a whole context (the input side of a request — also the live "window consumption" readout when no provider-reported count exists yet).
+
+### `Context.usageEstimate(context = [], message)`
+
+Estimate usage from the request context and the assembled response.
+
+### `Context.usageFinalize(reported, context, message)`
+
+Normalize provider-reported usage, or fall back to estimation.
+
 ### `Context.usageSummary(usage)`
 
 One-line human-readable usage summary (e.g.
-
-### `Context.userMessage(text, metadata = undefined)`
-
-user message wrapping text or preserving ordered blocks
-
-### `Context.validateContext(ctx)`
-
-Validate a context array.
-
-### `Context.validateMessage(msg, at = "message")`
-
-Validate a message's CORE SHAPE, throwing on a violation.
-
-### `Context.validateResponseEvent(event)`
-
-Validate a normalized response event (used by IO to check connector output).
 
 ### `Context.wordCount(text)`
 
@@ -750,225 +674,69 @@ Validate a normalized response event (used by IO to check connector output).
 
 ## Env
 
-### `Env.awaitTimeout(ms, wait)`
+### `Env.agentAdd(agent)`
 
-awaitTimeout — race a completion event against a deadline (the Promise.race pattern), resolving true for completion and false for the deadline.
+Register an active Agent (Agent construction owns this call); it stays until `Agent.close()` removes it.
 
-### `Env.classifyError(err, providerName)`
+### `Env.agentCreate(options = {…})`
 
-Classify a raw error into the stable provider taxonomy.
+Create an Agent over this env (`env` is always this env).
 
-### `Env.deepMerge(a, b)`
+### `Env.agentRemove(agent)`
 
-Objects merge recursively; arrays concatenate; scalar collisions take the later value (incidental read order — not a precedence mechanism).
-
-### `Env.DEFAULT_CONTEXT_GUARD_CAP = 0.9`
-
-The overall context-usage ceiling: 90% (always leaves /compact room).
-
-### `Env.DEFAULT_CONTEXT_GUARD_TURN_CAP = 0.4`
-
-The per-turn context-growth ceiling: 40%.
-
-### `Env.DEFAULT_THINKING = "high"`
-
-The effort used when the model advertises no default of its own.
-
-### `Env.DEFAULT_TOOL_TIMEOUT = 120_000`
-
-Default Agent-enforced cap for one tool call: two minutes.
-
-### `Env.DEFAULT_TOOL_TIMEOUT_LIMIT = 20 * 60_000`
-
-Maximum model-requested tool duration: twenty minutes.
-
-### `async Env.defaultClose(connection)`
-
-Teardown: cancel the body stream; idempotent.
-
-### `Env.defaultConnect(url, aiio)`
-
-stateless HTTP connection
-
-### `async Env.defaultRead(connection)`
-
-Blocking-await line reader: resolves the next whole line-delimited JSON message, nil at end-of-stream.
-
-### `async Env.defaultSend(connection, msg)`
-
-Default send: msg = [headers, body].
-
-### `async Env.defaultSendBody(connection, body)`
-
-Completes the request: POSTs the JSON body (nil body -> no payload) and stores the Response for defaultRead.
-
-### `async Env.defaultSendHeaders(connection, headers)`
-
-@param {object} headers plain object
-
-### `Env.defaultSessionsDir()`
-
-The namespace sessions folder under settings (created when missing).
-
-### `Env.defaultSettingsDir()`
-
-The namespace user settings folder, resolved in compatibility order: environment overrides, an existing legacy `.ai-settings` home, then the namespace home (created when missing).
-
-### `Env.defineProvider(Protocol, { name } = {…})`
-
-Complete a standalone provider class with OpenAI-compatible defaults.
-
-### `Env.depletionError(classified)`
-
-The shared TOKEN-DEPLETION predicate: exact signals only.
-
-### `Env.agentEndpointAvailable(endpoint, model)`
-
-Current unreserved active-Agent capacity; never reserves a slot.
+Remove an active Agent (`Agent.close()` owns normal use).
 
 ### `Env.agents()`
 
-Snapshot the active sessions.
+Snapshot the active Agents in registration order.
 
-### `Env.agentsAt(endpoint, model)`
+### `Env.close()`
 
-Count registered active Agents at an endpoint, optionally one model.
+Release what this Env runs in the background: pending model-list retries stop, every MCP server it started is killed, and held settings writes reach disk.
 
-### `Env.agentsEndpointLimit(endpoint, model)`
+### `Env.connection(selector, { remember = true } = {…})`
 
-Effective active-Agent cap for an endpoint/model scope.
+IO's handle on one pair: {endpoint, model, Protocol, url, settings, authSet(data), authReload(current)} (lib/env/models.js).
 
-### `Env.agentsEndpointLimitSet(options)`
-
-Persist an endpoint/model active-Agent cap.
-
-### `Env.authSet(endpoint, data, { scope } = {…})`
-
-Persist endpoint-keyed auth/model data: creates/updates `auth-<endpoint>.json` holding `{ [endpoint]: data }` (tokens + cached model list) in the endpoint's scope — the project folder ("local") or the effective user-settings folder ("package", the default; the package folder itself is used only when settingsDir is null).
-
-### `Env.batch(fn)`
-
-Run fn inside a WRITE BATCH: every settings-file write it triggers (authSet, saveEndpoint — a login performs several) is held in memory and each file lands ONCE, atomically, when the outermost batch ends.
-
-### `Env.callTool(name, args, context)`
-
-Exact flattened lookup + invoke.
-
-### `Env.constructor({ dir = PACKAGE_DIR, settingsDir, cwd = process.cwd(), settings } = {…})`
+### `Env.constructor({ dir = PACKAGE_DIR, settingsDir, cwd = process.cwd(), settings, providers, toolDirs, skillDirs, promptDirs } = {…})`
 
 Build the environment: scan and merge the layered settings (the package folder, user settings folder, and namespaced project files — see lib/env/load.js), seed the titled folder surface, register the built-in tools.
-
-### `Env.contextConsumption(context, lastUsage)`
-
-Current context consumption in tokens: the provider-reported input count of the last request when available (the exact number the provider processed), else the word-count estimate of the live context (the token-per-word likelihood ratio).
-
-### `Env.get contextGuardCap()`
-
-The Agent tool loop's runaway guard: the OVERALL context-usage ceiling, a (0,1] fraction of the model's context window (settings value > 1 reads as a percentage).
-
-### `Env.get contextGuardTurnCap()`
-
-The Agent tool loop's runaway guard: the PER-TURN context-growth ceiling, a (0,1] fraction of the model's context window — even starting near-empty, one agent turn alone cannot consume more than this before it's stopped.
-
-### `Env.contextWindow(endpoint, model)`
-
-The model's context window in tokens, WHEN KNOWN: an explicit provider-settings override (`<provider>.contextWindow`) wins over the cached model descriptor's `contextWindow` (the models() snapshot persisted in the provider's auth namespace).
 
 ### `Env.create(options, initOptions = {…})`
 
 Create a ready-to-use environment.
 
-### `Env.createAgent(options = {…})`
+### `Env.EVENT`
 
-Convenience Agent factory, creating an agent attached to this `Env` instance.
+The Env event vocabulary: Symbol constants for onEvent/offEvent.
 
-### `Env.defaultPromptRoots()`
+### `Env.extend(plugin)`
 
-Prompt roots, ACCUMULATED the same way as skill roots.
+Install a higher layer's Env members after the fact (a plugin): `methods`/`getters` land on Env.prototype and run on the env they were reached through (the safe view included); `events` add Symbol keys to Env.EVENT; `settings` add the layer's settings keys to the defaults schema.
 
-### `Env.defaultProviderRoots()`
+### `Env.get folders()`
 
-Protocol roots: installed/package providers, an optional custom package root, and configured paths (never the project folder).
+The folders that matter to a session, computed from current state (the project folder follows `cwd`): exactly one `project` and one `harness` (the package folder in use), the user `settings` folder unless disabled, then each tool root.
 
-### `Env.defaultSkillRoots()`
+### `Env.login(name, config, options)`
 
-Skill roots, accumulated from the package, settings, configured, environment, and project layers.
+Log an endpoint in — one transaction (lib/env/login.js): credentials (`auth`, else the provider shapes `token`), then with a `scope` the endpoint persists, is verified (the provider's connection test, then `verify(models)` over its new catalog entries) and its models are fetched — any failure rolls memory and files back.
 
-### `Env.defaultsSchema()`
+### `Env.loginPresets()`
 
-The DEFAULTS SCHEMA: every top-level settings key Env (or a loaded tool — see the tools.js module contract's `settingsSchema()`) understands, its default and a one-line description.
+The login presets every non-secret provider publishes ({name, label, url, provider, oauth?, note?, ...}).
 
-### `Env.defaultToolRoots()`
+### `Env.logout(name)`
 
-Tool-folder roots: the installed package and user settings folders, and explicitly configured `settings.tools` roots.
+Remove an endpoint (the /logout contract): its configuration and auth files go with every in-memory trace; an environment-detected endpoint clears in memory only.
 
-### `Env.detectEndpoints({ timeout = 300 } = {…})`
+### `Env.models(secret = false)`
 
-Run provider-owned endpoint probes and fill only absent settings entries.
+The model catalog: every known endpoint/model pair with its state already computed (lib/env/models.js ModelInfo — caps, secret, local, loginRequired, lastUsed, plugin capacity fields).
 
-### `Env.endpoint(name)`
+### `Env.get modelsReady()`
 
-one named endpoint configuration
-
-### `Env.endpointLocal(name)`
-
-Is an endpoint LOCAL (lib/env/endpoints.js endpointLocal): project- scope configuration or a record publishing `local: true` / `remote: false` — the shared predicate the model-list access policy classifies with.
-
-### `Env.endpointModels(name, { refresh = false, url, signal } = {…})`
-
-One endpoint's model MAP.
-
-### `Env.endpointNames({ includeSecret = false, access = "all" } = {…})`
-
-Endpoint names; secret entries are hidden unless explicitly requested.
-
-### `Env.endpointRegistered(name)`
-
-Is the endpoint REGISTERED — some layer completes it with connection data (provider/url/cmd/…)?
-
-### `Env.endpointScope(name)`
-
-The scope an endpoint's settings/auth live in: "local" when its configuration came from the namespaced PROJECT settings file, "package" otherwise (user settings or package files).
-
-### `Env.endpointSettings(endpoint)`
-
-Live endpoint configuration plus endpoint-keyed auth/model cache (lib/env/endpoints.js).
-
-### `Env.flushSettings()`
-
-Flush any batched settings writes now (a no-op outside a batch).
-
-### `Env.hasTool(name)`
-
-@returns {boolean}
-
-### `Env.isDynamic(name)`
-
-Is the endpoint ENVIRONMENT-DEFINED (auto-detected from the process environment)?
-
-### `Env.knownEndpoints()`
-
-Known endpoint presets offered by the login wizards (lib/env/endpoints.js).
-
-### `Env.lastModel()`
-
-Read the valid last-used endpoint/model selection.
-
-### `Env.loadProviders({ dirs, detect = true } = {…})`
-
-Load default-exported provider classes, keyed by each file basename.
-
-### `Env.loadTools({ dirs } = {…})`
-
-Tool scan-and-load: import each root's TOP-LEVEL JS modules (the scan is NOT recursive) and publish described-and-exported callables.
-
-### `Env.get local()`
-
-Are LOCAL endpoints exposed to linked-agent spawning?
-
-### `Env.get maxAttempts()`
-
-Provider-request attempts per IO turn (settings.maxAttempts, default 3): the first write plus its retries — only failure classes that can heal with time retry (Env.RETRYABLE_KINDS); the interval grows from retryBase, doubling per attempt, capped at retryMax (lib/env/reliability.js).
+Settles when the background collection's first pass has answered (one-shot hosts: list models, resolve an endpoint-only selector) — including the lists of in-memory logins, fetched now on demand.
 
 ### `Env.offEvent(handle)`
 
@@ -976,239 +744,39 @@ Remove a generic Env lifecycle listener by its opaque handle.
 
 ### `Env.onEvent(event, callback)`
 
-Subscribe to a generic Env lifecycle event (distinct from Agent.onEvent's numeric turn events — these are Symbols).
+Subscribe to an Env event (distinct from Agent.onEvent's numeric events — these are Symbols).
 
-### `Env.osSandboxAvailable()`
+### `Env.prompts()`
 
-Is OS write-sandbox ENFORCEMENT in effect for this process — our own mechanism (seatbelt on macOS, bwrap on Linux) or an OUTER jail we detected (a nested seatbelt confines us already)?
-
-### `Env.osSandboxKind()`
-
-The OS write-sandbox mechanism in effect: "seatbelt", "bwrap", "delegated" (an OUTER jail already confines this process — the wrap is a passthrough), or null (no enforcement — the Agent forces safe mode then).
-
-### `Env.osSandboxWrap(file, args, cwd)`
-
-Wrap a program invocation in the OS write sandbox: the [file, argv] to spawn (the input unchanged when no mechanism applies).
-
-### `Env.promptBody(name, { roots } = {…})`
-
-One prompt's body, verbatim (no interpolation).
-
-### `Env.promptCatalog({ debug = false, roots } = {…})`
-
-The merged prompt catalog, same shape as skillCatalog().
-
-### `Env.promptNames({ roots } = {…})`
-
-The merged prompt NAMES (sorted) — completion candidates.
-
-### `Env.promptNamesAsync({ roots } = {…})`
-
-Async prompt names, with the same roots and override semantics.
-
-### `Env.provider(name)`
-
-a communication protocol class by basename
-
-### `Env.providerNames()`
-
-registered communication protocol basenames
-
-### `Env.refreshEndpointSettings(endpoint)`
-
-Re-read one endpoint's persisted settings/auth record from disk and merge it over the live settings tree (lib/env/endpoints.js) — the multi-process refresh IO applies on an auth failure: another process may have rotated the token this process still holds.
-
-### `Env.refreshModels({ timeout = 2000 } = {…})`
-
-Query EVERY configured endpoint for its available models (parallel, each bounded by `timeout`): the startup cache renewal.
-
-### `Env.refreshToolAvailability()`
-
-Recheck dynamic tool eligibility before a model request; does not rescan modules.
-
-### `Env.refreshTools()`
-
-Rescan the tool roots and rebuild the tool/schema/callable maps.
-
-### `Env.registerAgent(agent)`
-
-Register an active Agent.
-
-### `Env.registerProvider(name, ProviderClass)`
-
-Register and internally complete a basename-keyed protocol class.
-
-### `Env.registerTool(name, fn, schema, { builtin = false, file } = {…})`
-
-Register a tool into the flattened callable lookup (lib/env/tool-registry.js — the safe/interactive schema metadata contract lives there).
-
-### `Env.get remote()`
-
-Are REMOTE (public) endpoints exposed to linked-agent spawning?
-
-### `Env.removeAgent(agent)`
-
-Remove an active Agent.
-
-### `Env.removeEndpoint(name)`
-
-Remove an endpoint — the /logout contract: its configuration drops out of the scope's settings file, its auth file is deleted, and every in-memory trace is removed.
-
-### `Env.resolveSystemPrompt()`
-
-The system-prompt text(s) for a FRESH session — read fresh from disk on EVERY call, never cached (lib/env/system-prompt.js).
-
-### `Env.retryDelay(attempt)`
-
-One retry's delay (lib/env/reliability.js): retryBase doubling per attempt, capped at retryMax, jittered against lockstep.
-
-### `Env.get safe()`
-
-The SAFE VIEW of this environment: one cached facade (a Proxy) whose TOOL surface is limited to read-only (`safe: true`) tools (lib/env/tool-registry.js).
-
-### `Env.safeToolNames()`
-
-The READ-ONLY tools: schemas published with `safe: true`.
-
-### `Env.saveEndpoint(name, endpoint, { scope = "package" } = {…})`
-
-Add/update one configured endpoint and persist it to the scope's settings file (the user settings folder or namespaced project file).
-
-### `Env.saveTheme(name)`
-
-Select and persist a named TUI theme in the effective settings file.
+The merged prompts (same layers; a later same-named prompt replaces an earlier one), read fresh from disk — same entry shape.
 
 ### `Env.get settings()`
 
-the merged settings tree (live reference)
+The LIVE settings view (lib/env/settings-view.js): reads apply the defaults schema and derived values (`settings.sessions` is the resolved sessions folder); assigning or deleting a key persists only that change, coalesced per tick, to the layer file that owns it (never the package folder).
 
-### `Env.skillBodies(names, { roots } = {…})`
+### `Env.settingsSchema()`
 
-The full bodies of the named skills, each wrapped in `<skill name="...">` tags.
+The DEFAULTS SCHEMA: every top-level settings key Env (or a loaded tool — see the tools.js module contract's `settingsSchema()`) understands, its default and a one-line description.
 
-### `Env.skillCatalog({ debug = false, roots } = {…})`
+### `Env.skills()`
 
-The merged skill catalog as `# Skill Catalog` text.
+The merged skills (package, settings, configured, environment and project layers; later layers merge into same-named skills), read fresh from disk: name -> {name, description, file, source, body}.
 
-### `Env.toolEntry(name)`
+### `Env.systemPrompt()`
 
-The registry entry for a tool ({fn, schema, builtin?, file?, safe?, interactive?, sandbox?, onTimeout?, status?}), or undefined.
+The system-prompt text(s) seeded into a FRESH context, read from disk on every call (package, user settings, then project AGENTS.md — or `settings.system`), with `{{skill}}` prefill.
 
-### `Env.toolNames()`
+### `Env.toolAdd(name, fn, schema, { builtin = false, file } = {…})`
 
-all flattened tool names
+Register a tool into the flattened callable lookup (lib/env/tool-registry.js — the safe/interactive schema metadata contract lives there).
 
-### `Env.toolSchemas(names, options)`
+### `Env.toolCall(name, args, context)`
 
-The publishable tool catalog.
+Invoke one tool (lib/env/tool-registry.js).
 
-### `Env.toolStatus()`
+### `Env.tools(safe = false, selector)`
 
-tools with a live status object
-
-### `Env.get toolTimeout()`
-
-Default Agent-enforced duration of one tool call.
-
-### `Env.get toolTimeoutLimit()`
-
-Hard ceiling for a tool's schema-declared, model-requested `timeout` argument.
-
-### `Env.toolTimestamp()`
-
-The shared tool-refresh revision: bumped on every refreshTools() scan.
-
-### `Env.updateToolStatus(name, info)`
-
-Merge a live-status object into a tool's registry entry; /status prints it, the TUI renders it below the status bar.
-
-### `Env.ENV_EVENT = Object.freeze({…})`
-
-Generic Env lifecycle events.
-
-### `Env.HttpStatusError.constructor(status, statusText, body)`
-
-Build the error from a non-2xx response (the body's first 200 characters ride in the message).
-
-### `Env.isToolModuleFile(name)`
-
-Tool-module filename filter: files named like benches, tests, or demos are NEVER imported by the tool scan — importing a module runs its top level, so a bench/test script would execute its suite and retain its datasets in the module cache for the process's lifetime.
-
-### `Env.mergeAuthUpdate(existing, data)`
-
-Merge an auth UPDATE into an existing provider section: nested plain objects merge key-by-key; scalars AND ARRAYS replace outright — no concatenation.
-
-### `Env.openaiWebCapabilities = Object.freeze({…})`
-
-The `web-search` provider capability of the built-in Responses implementation (referenced by providers/openai.js; called by Agent.callProviderCapability).
-
-### `Env.osSandboxAvailable()`
-
-Is OS write-sandbox ENFORCEMENT in effect for this process — our own mechanism (seatbelt/bwrap) or an OUTER jail we detected (a nested seatbelt confines us already)?
-
-### `Env.osSandboxKind()`
-
-The sandbox mechanism in effect: "seatbelt", "bwrap", "delegated" (an outer jail enforces writes — our wrap is a passthrough), or null (no enforcement — the Agent forces safe mode then).
-
-### `Env.osSandboxWrap(file, args = [], cwd = process.cwd(), workingDirectory = cwd)`
-
-Wrap a program invocation in the OS sandbox: the [file, argv] to spawn — the wrapper and its arguments followed by the original program — or the input unchanged when no mechanism applies.
-
-### `Env.parseDuration(value)`
-
-Parse a duration: a positive millisecond numeral or a unit string ("500ms", "20s", "5m", "1.5h").
-
-### `Env.ProviderError.constructor(kind, message, detail = {…})`
-
-Build a stable classified provider error.
-
-### `Env.registryEffortLevels(entry)`
-
-The effort symbols a models.dev registry entry declares (`reasoning_options: [{type: "effort", values}]`), or undefined.
-
-### `Env.resolveEffort(think, { levels, defaultLevel } = {…})`
-
-Translate a `think` option to one native effort symbol.
-
-### `Env.RETRYABLE_KINDS = Object.freeze(["network", "provider", "auth"])`
-
-The classified error kinds an Agent retries after a growing interval (lib/agent/run.js).
-
-### `Env.retryDelay(settings, attempt)`
-
-One attempt's delay: retryBase doubling per retry (attempt 0 is the first RETRY — the write before it already happened), bounded by retryMax, spread by up to a quarter of the base so simultaneous retries do not land in lockstep.
-
-### `async Env.scanToolRoots(roots, env, { trustedRoots = [] } = {…})`
-
-Scan tool roots into a flattened name -> { fn, schema, file, safe?
-
-### `Env.singleShot(init = {…})`
-
-Fetch init for ONE-SHOT catalog/registry calls (the /models listing, the models.dev registry): `connection: close` so the platform's keep-alive agent does NOT park the socket ESTABLISHED for reuse.
-
-### `Env.sortEfforts(levels)`
-
-Order native effort symbols weakest → strongest, dropping duplicates (unranked symbols keep their relative order at the end).
-
-### `Env.supportedValues(message)`
-
-The values an API error lists as supported ("...
-
-### `Env.THINKING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"]`
-
-Selectable thinking levels, weakest → strongest.
-
-### `Env.TOOL_ON_TIMEOUT_LIMIT = 60_000`
-
-Maximum Agent-facing onTimeout cleanup/final-response grace.
-
-### `Env.tryDuration(value)`
-
-parseDuration that never throws — invalid/empty input is undefined.
-
-### `Env.writeJsonAtomic(file, value)`
-
-Atomically write one JSON value (pretty-printed, trailing newline): temp file in the same folder + rename.
+The tool catalog: name -> ToolInfo ({name, schema, safe, trusted, sandbox, secret, interactive, builtin, file?, storage?, status?, onTimeout?, detect?} — never the callable).
 
 ## GTUI
 
@@ -1396,6 +964,10 @@ Construct a terminal host that owns input decoding and terminal rendering.
 
 Immutable constructors for renderable view nodes.
 
+### `GTUI.view.button(props = {…}, label = "")`
+
+A toolbar button (`{action, id?, icon?, pressed?, tone?, priority?}`): a click or Enter/Space emits `action.select {id, action}`.
+
 ### `GTUI.view.column(...)`
 
 Create an immutable vertical container.
@@ -1444,67 +1016,35 @@ Create an immutable table with frozen rows and cells.
 
 Create immutable text content.
 
+### `GTUI.view.toolbar(...)`
+
+A one-line row of `button`s with host-owned roving focus (`{id, focus, gap?, align?: "end"}`): while focused, ←/→ Tab/Shift+Tab Home/End move between buttons (`toolbar.change`), Enter/Space activate; other keys bubble.
+
 ## index
 
 ## IO
-
-### `IO.bodyBytes(body)`
-
-The request body's size in bytes as it would go on the wire (UTF-8 JSON, BEFORE any transport compression) — 0 for a nil body.
-
-### `IO.classifyError(err, providerName)`
-
-Classify a raw error into the stable provider taxonomy.
-
-### `IO.connectBudget(baseMs, bytes)`
-
-The connection-timeout budget for one request: the base timeout plus one millisecond per request-body byte (before compression) — larger prompts get proportionally more time to produce a first response.
 
 ### `IO.Context`
 
 The Context namespace for validating every provider-bound request.
 
-### `async IO.defaultClose(connection)`
-
-Teardown: cancel the body stream; idempotent.
-
-### `IO.defaultConnect(url, aiio)`
-
-stateless HTTP connection
-
-### `async IO.defaultRead(connection)`
-
-Blocking-await line reader: resolves the next whole line-delimited JSON message, nil at end-of-stream.
-
-### `async IO.defaultSend(connection, msg)`
-
-Default send: msg = [headers, body].
-
-### `async IO.defaultSendBody(connection, body)`
-
-Completes the request: POSTs the JSON body (nil body -> no payload) and stores the Response for defaultRead.
-
-### `async IO.defaultSendHeaders(connection, headers)`
-
-@param {object} headers plain object
-
-### `IO.defineProvider(Protocol, { name } = {…})`
-
-Complete a standalone provider class with OpenAI-compatible defaults.
-
 ### `IO.Env`
 
 The global environment constructor used by IO and provider authors.
-
-### `IO.HttpStatusError.constructor(status, statusText, body)`
-
-Build the error from a non-2xx response (the body's first 200 characters ride in the message).
 
 ### `IO.authSet(auth, options)`
 
 Route auth persistence to the endpoint's namespace and refresh the live settings view.
 
-### `IO.constructor({ env, model, url, timeout, connectTimeout, stuckTimeout, settings, tools, onData, onLog } = {…})`
+### `IO.close()`
+
+Cancel the active request (terminal partial emitted by the in-flight write), close the connection, permanently disconnect the instance.
+
+### `IO.connectionCreate({ signal, onBytes } = {…})`
+
+A fresh provider connection over this endpoint/model for a provider tool's one-off request (context2msg/send/read/close); the caller closes it.
+
+### `IO.constructor({ env, model, url, timeout, connectTimeout, stuckTimeout, settings, tools, safe = false, onData, onLog, remember = true } = {…})`
 
 Configure one provider IO session: resolve the provider module from the registered endpoint and resolve the model, endpoint URL, and three timeouts from options > provider settings > provider metadata > defaults.
 
@@ -1512,37 +1052,37 @@ Configure one provider IO session: resolve the provider module from the register
 
 The provider-reported context readout of the CURRENT/last request: `{used, total}` in tokens, each undefined when the provider hasn't reported it.
 
-### `IO.get currentModel()`
+### `IO.contextUsageSet({ used, total } = {…})`
+
+Report actual context consumption and/or the model's available context window (provider → IO channel; connectors call this from their translators/metadata surfaces).
+
+### `IO.fetch(url, init = {…}, { deadline, connectTimeout } = {…})`
+
+fetch bounded by a wall-clock deadline and a fast connect fail-fast (provider tools' plain HTTP requests).
+
+### `IO.get modelCurrent()`
 
 effective model: per-request override wins over the instance default
-
-### `IO.kill()`
-
-Cancel the active request (terminal partial emitted by the in-flight write), close the connection, permanently disconnect the instance.
 
 ### `IO.get planUsage()`
 
 The provider-reported PLAN/QUOTA readout (rate limits, subscription allowances): `{label?, quotas}` where each quota entry is `{total?, remaining?, used?, reset?}` — whatever the provider publishes, nothing invented.
 
+### `IO.planUsageSet({ label, quotas } = {…})`
+
+Report plan/quota usage (provider → IO channel; connectors call this from their reportPlanUsage hook or metadata surfaces).
+
 ### `IO.get requestSignal()`
 
 the in-flight request's abort signal (used by the HTTP backend)
 
-### `IO.setContextUsage({ used, total } = {…})`
-
-Report actual context consumption and/or the model's available context window (provider → IO channel; connectors call this from their translators/metadata surfaces).
-
-### `IO.setOption(key, value)`
-
-Set/clear a per-invocation settings override AFTER construction (e.g.
-
-### `IO.setPlanUsage({ label, quotas } = {…})`
-
-Report plan/quota usage (provider → IO channel; connectors call this from their reportPlanUsage hook or metadata surfaces).
-
 ### `IO.get settings()`
 
-live provider-namespaced settings view (explicit overrides merged over the Env namespace)
+live provider-namespaced settings view (explicit overrides merged over the Env namespace).
+
+### `IO.settingsSet(key, value)`
+
+Set/clear a per-invocation settings override AFTER construction (e.g.
 
 ### `IO.get state()`
 
@@ -1550,7 +1090,7 @@ The request state machine's current state.
 
 ### `IO.tools()`
 
-the current publishable tool catalog (availability applied)
+]: availability, safe mode, the selection, and the pair's provider tools applied; secret tools never publish)
 
 ### `IO.write(context, callbacks = {…}, options = {…})`
 
@@ -1560,199 +1100,47 @@ Run one provider request over a complete context.
 
 Build a stable classified provider error.
 
-### `IO.resolveTimeout({ env, model, timeout, settings } = {…})`
+### `IO.THINKING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"]`
+
+Selectable thinking levels, weakest -> strongest (IO maps them to native modes).
+
+### `IO.timeoutsResolve({ env, model, timeout, settings } = {…})`
 
 The effective overall request timeout without constructing a connection: explicit > endpoint settings > provider metadata > default.
 
-### `IO.sanitizeRequest(msg)`
-
-Sanitize the connector's outgoing msg into the [headers, body] convention: headers a plain object with string-valued entries (undefined/null/function entries dropped, values stringified), body JSON-serializable or nil.
-
 ## Jobs
 
-### `Jobs.admitOccurrence(state, task, now)`
+### `async Jobs.daemonRun(projectRoot, options = {…})`
 
-Admit one execution per scan, coalescing earlier eligible and excluded history.
+Run a foreground, cwd-bound best-effort daemon: one in-process scan (dispatchJobs) per wake.
 
-### `async Jobs.allocateArchive(projectRoot, localDate, sourceFilename, io = fs)`
-
-Allocate an unused date-local archival name.
-
-### `async Jobs.archiveExists(path, io = fs)`
-
-Check archive presence; absence returns false, other I/O failures throw JobsError.
-
-### `async Jobs.canonicalProjectRoot(projectRoot, io = {…})`
-
-Canonical paths are process-local inputs, never Jobs data.
-
-### `Jobs.createTaskState(task)`
-
-Create the durable, task-local occurrence ledger.
-
-### `Jobs.cycleRecord(at)`
-
-Create the location-neutral public result record for one Jobs scan.
-
-### `async Jobs.disableJobs(projectRoot, options = {…})`
+### `async Jobs.disable(projectRoot, options = {…})`
 
 Disable by renaming the active directory.
 
-### `async Jobs.dispatchJobs(projectRoot, options = {…})`
-
-Best-effort serial scan.
-
-### `async Jobs.ensureJobsLayout(projectRoot, io = fs)`
-
-Ensure the standard active layout.
-
-### `Jobs.finalizeAttempt(state, occurrenceId, attemptId, outcome, archivePresent, session = null)`
-
-Finalize the current attempt in the same dispatch cycle, without crash reconciliation.
-
-### `async Jobs.foregroundJobsDaemon(projectRoot, options = {…})`
-
-Run a foreground, cwd-bound best-effort daemon.
-
-### `async Jobs.initializeJobs(projectRoot, settings = {…}, options = {…})`
+### `async Jobs.init(projectRoot, settings = {…}, options = {…})`
 
 Enable folder-only Jobs, restoring a disabled directory without changing bytes.
 
-### `Jobs.JOBS_DATA_DIRECTORY = "ai-jobs"`
-
-Active portable Jobs directory name.
-
-### `Jobs.JOBS_DISABLED_DIRECTORY = "ai-jobs-disabled"`
-
-Disabled portable Jobs directory name.
-
-### `Jobs.JOBS_PATH_NAMES = Object.freeze({ tasks: "tasks", completed: "completed", state: "state…`
-
-Names inside the portable Jobs directory.
-
-### `Jobs.JOBS_STATE_VERSION = 2`
-
-Persisted occurrence schema version; unsupported versions are refused.
-
 ### `Jobs.JobsError.constructor(code, message, details = {…})`
 
-Construct a coded domain failure; details are caller diagnostics, not safe-to-log source.
+Construct a coded domain failure; details carry context such as the task filename or the underlying cause.
 
-### `Jobs.jobsPaths(projectRoot)`
+### `async Jobs.run(projectRoot, options = {…})`
 
-Return absolute paths derived from the caller's active project root.
+Best-effort serial scan.
 
-### `async Jobs.jobsStatus(projectRoot, options = {…})`
-
-Read-only status projection.
-
-### `async Jobs.loadAllTaskStates(projectRoot, io = fs)`
-
-Read all ledgers, including removed one-shots, for crash reconciliation.
-
-### `async Jobs.loadTasks(projectRoot, entries, io)`
-
-Parse entries purely, then durably report only all-or-nothing frontmatter fallbacks.
-
-### `async Jobs.loadTaskState(projectRoot, task, io = fs)`
-
-Read and validate a ledger, or return a fresh state when absent; does not persist.
-
-### `async Jobs.moveToArchive(source, archive, io = fs)`
-
-Atomically claim destination without overwrite, then remove source hardlink.
-
-### `Jobs.newAttemptId(occurrence, sequence = occurrence.attempts.length)`
-
-Derive an occurrence-local attempt ID; callers persist it before archival.
-
-### `Jobs.normalizeDays(value, code = "JOBS_TASK_SCHEDULE")`
-
-Normalize aliases or unique lowercase named arrays; omitted input means all days.
-
-### `Jobs.parseTask(filename, source)`
-
-Parse one task without filesystem side effects; declared bad frontmatter rejects the task.
-
-### `Jobs.parseTasks(tasks)`
-
-Parse independently so duplicate ids and empty prompts remain task-local rejections.
-
-### `async Jobs.readTaskEntries(root)`
-
-Pure filesystem snapshot: no admission, error reporting, state writes, or symlink following.
-
-### `Jobs.reconcileAttempt(state, occurrenceId, attemptId, archivePresent)`
-
-Reconciliation is visible: an interrupted archive is consumed, never due again.
-
-### `Jobs.recordAttempt(state, occurrenceId, attempt)`
-
-Persist a new attempt before any irreversible source move.
-
-### `async Jobs.reportTaskDiagnostic(projectRoot, diagnostic, io = {…})`
-
-Atomically record one frontmatter fallback without retaining source text, metadata names, values, or filenames.
-
-### `Jobs.resolveArchiveReference(projectRoot, reference)`
-
-Resolve only a previously validated relative reference against this active Jobs root.
-
-### `async Jobs.runJobAgent(task, options = {…})`
-
-One fresh, headless Agent run against a SHARED per-wake Env.
-
-### `async Jobs.saveTaskState(projectRoot, state, io = fs)`
-
-Atomic replace of one task ledger; callers own cross-file reconciliation.
-
-### `async Jobs.scheduleJobs(root, command, options = {…})`
+### `async Jobs.schedule(root, command, options = {…})`
 
 Shared task command boundary.
 
-### `async Jobs.snapshotAndArchive(source, archive, io = fs)`
+### `async Jobs.status(projectRoot, options = {…})`
 
-Snapshot source bytes before move.
+Read-only status projection.
 
-### `Jobs.statePath(projectRoot, taskId)`
-
-Resolve a task ledger path through the domain-owned safe ID mapping.
-
-### `Jobs.taskDiagnosticKey(diagnostic)`
-
-Stable SHA-256 key for a filename/failure code; contains no source text.
-
-### `Jobs.taskFilename(value)`
-
-File selectors are leaf Markdown names, not task IDs or paths.
-
-### `Jobs.taskId(filename)`
-
-Validate and return a nonempty filename-derived default task ID.
-
-### `Jobs.taskStateKey(id)`
-
-Map opaque IDs to bounded safe ledger filenames; unsafe IDs use a stable hash.
-
-### `Jobs.validateArchiveReference(value)`
-
-A durable archive location is portable project-local data, never a host path.
-
-### `async Jobs.validateJobsActivation(projectRoot, settings = {…}, options = {…})`
-
-Validate active folder state without writing or coordinating with other processes.
-
-### `async Jobs.validateJobsLayout(root)`
-
-Refuse missing/redirected durable directories; this query never repairs layout.
-
-### `async Jobs.validateJobsOperational(root, options = {…})`
+### `async Jobs.validate(root, options = {…})`
 
 Operational eligibility is checked at publication and invocation from folder state.
-
-### `Jobs.validateTaskState(value, taskId)`
-
-Validate the complete persisted v2 schema before it is used for admission.
 
 ## Markdown
 
@@ -1780,6 +1168,14 @@ Tokenize complete markdown text.
 
 Which engine whole-text rendering routes through: "marked" when the optional package resolved, "builtin" otherwise.
 
+### `Markdown.mathBlockAt(lines, start)`
+
+A complete, line-delimited display-math block, or null.
+
+### `Markdown.mathText(node)`
+
+Plain-text fallback for renderers without mathematical typesetting.
+
 ### `Markdown.parseGitDiff(text)`
 
 Parse one complete unified Git diff synchronously, with exact source-line spans.
@@ -1787,6 +1183,10 @@ Parse one complete unified Git diff synchronously, with exact source-line spans.
 ### `Markdown.parseInline(text)`
 
 Tokenize inline markdown into flat spans.
+
+### `Markdown.parseMath(source)`
+
+Parse a bounded, safe TeX subset into presentation-independent nodes.
 
 ### `Markdown.renderInline(text, renderer = {…})`
 
@@ -1803,6 +1203,32 @@ Sanitize a COMPLETE untrusted string for display.
 ### `Markdown.walkTokens(tokens, renderer = {…})`
 
 Walk block tokens through a renderer (completed internally).
+
+## Sandbox
+
+### `Sandbox.osAvailable()`
+
+Is OS write-sandbox enforcement in effect (own mechanism or a detected outer jail)?
+
+### `Sandbox.osKind()`
+
+The OS write-sandbox mechanism in effect: "seatbelt", "bwrap", "delegated" (an outer jail already confines this process; the wrap is a passthrough), or null (no enforcement; Agent forces safe mode).
+
+### `Sandbox.osWrap(file, args, cwd, workingDirectory)`
+
+Wrap a program invocation in the OS write sandbox: the [file, argv] to spawn (unchanged when no mechanism applies).
+
+### `Sandbox.processStop(child, options)`
+
+Stop a process/group and await closure; safe to call repeatedly.
+
+### `Sandbox.scope()`
+
+Create a process scope owned and closed by one tool dispatch.
+
+### `Sandbox.spawn(file, args, options)`
+
+Spawn a process using the same ownership policy as scoped calls.
 
 ## TUI
 

@@ -1,5 +1,5 @@
 // test/agent-tool-discovery.test.js — proof for tool-folder discovery:
-// configured settings.tools roots, TOP-LEVEL .js modules only (the scan
+// configured settings.tools.folders roots, TOP-LEVEL .js modules only (the scan
 // is NOT recursive — sub-folders hold a tool's private helpers), missing
 // folders scan empty, side-effect modules imported but omitted from the
 // catalog.
@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, sep } from "node:path";
 import { Env } from "../lib/env.js";
 import { NAMES } from "../lib/namespace.js";
+import { toolExists, toolNames, toolRoots, toolsLoad } from "./env-internals.js";
 
 const ROOT = `./ai-tmp/tool-discovery-${process.pid}`;
 afterEach(() => {
@@ -44,7 +45,7 @@ describe("tool-folder discovery", () => {
       "contest.js": TOOL("contest", "kept"), // contains "test" but no token boundary
     });
     const env = new Env({ dir: join(ROOT, "empty-pkg"), settings: {} });
-    const names = await env.loadTools({ dirs: [dir] });
+    const names = await toolsLoad(env, { dirs: [dir] });
 
     expect(names).toContain("real");
     expect(names).toContain("contest"); // "contest" is not a test file
@@ -73,7 +74,7 @@ ${TOOL("quiet", "ok")}`,
     let env;
     try {
       env = new Env({ dir: ROOT, settings: {} });
-      await env.loadTools({ dirs: [dir] });
+      await toolsLoad(env, { dirs: [dir] });
     } finally {
       process.stdout.write = outWrite;
       process.stderr.write = errWrite;
@@ -83,7 +84,7 @@ ${TOOL("quiet", "ok")}`,
     expect(notice).toContain("script-shaped.js");
     expect(notice).toContain("suppressed");
     expect(notice).toContain("import.meta.main");
-    expect(await env.callTool("quiet")).toBe("ok"); // the tool itself still published
+    expect(await env.toolCall("quiet")).toBe("ok"); // the tool itself still published
   });
 
   test("the scan is NOT recursive: sub-folders are private helpers, never imported", async () => {
@@ -93,13 +94,13 @@ ${TOOL("quiet", "ok")}`,
       "ns/too/deep.js": TOOL("buried", "never"),
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await env.loadTools({ dirs: [dir] });
-    expect(env.toolNames().sort()).toEqual(["hello", "tool-refresh"]);
-    expect(await env.callTool("hello")).toBe("root");
+    await toolsLoad(env, { dirs: [dir] });
+    expect(toolNames(env).sort()).toEqual(["hello", "tool-refresh"]);
+    expect(await env.toolCall("hello")).toBe("root");
     expect(globalThis.__DEEP_IMPORTED).toBeUndefined(); // never even imported
-    expect(env.hasTool("dig")).toBe(false);
-    expect(env.hasTool("ns-dig")).toBe(false); // no namespace flattening
-    expect(env.hasTool("buried")).toBe(false);
+    expect(toolExists(env, "dig")).toBe(false);
+    expect(toolExists(env, "ns-dig")).toBe(false); // no namespace flattening
+    expect(toolExists(env, "buried")).toBe(false);
   });
 
   test("modules without toolDescription()/describe() are imported (side effects) but omitted", async () => {
@@ -113,9 +114,9 @@ ${TOOL("quiet", "ok")}`,
       "real.js": TOOL("real", 1),
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await env.loadTools({ dirs: [dir] });
-    expect(env.toolNames()).toContain("real");
-    expect(env.toolNames()).not.toContain("extend");
+    await toolsLoad(env, { dirs: [dir] });
+    expect(toolNames(env)).toContain("real");
+    expect(toolNames(env)).not.toContain("extend");
     expect(await Bun.file(marker).exists()).toBe(true); // side effect ran
   });
 
@@ -149,30 +150,37 @@ ${TOOL("quiet", "ok")}`,
       `,
     });
     const env = new Env({ dir: ROOT, settings: {} });
-    await env.loadTools({ dirs: [dir] });
-    expect(await env.callTool("viaDescribe")).toBe("from describe");
-    expect(await env.callTool("preferred")).toBe("from toolDescription");
-    expect(env.hasTool("shadowed")).toBe(false); // toolDescription REPLACES describe wholesale
-    expect(env.hasTool("retired")).toBe(false); // toolSchema() is not a schema source
+    await toolsLoad(env, { dirs: [dir] });
+    expect(await env.toolCall("viaDescribe")).toBe("from describe");
+    expect(await env.toolCall("preferred")).toBe("from toolDescription");
+    expect(toolExists(env, "shadowed")).toBe(false); // toolDescription REPLACES describe wholesale
+    expect(toolExists(env, "retired")).toBe(false); // toolSchema() is not a schema source
+  });
+
+  test("tools.folders requires an array of non-empty strings", () => {
+    for (const folders of ["./tool", [null], [""], ["   "], {}]) {
+      const env = new Env({ dir: ROOT, settings: { tools: { folders } } });
+      expect(() => toolRoots(env)).toThrow("tools.folders must be an array of non-empty strings");
+    }
   });
 
   test("missing/unreadable roots scan as empty; only built-ins remain", async () => {
     const env = new Env({ dir: ROOT, settings: {} });
-    const names = await env.loadTools({ dirs: [join(ROOT, "does-not-exist")] });
+    const names = await toolsLoad(env, { dirs: [join(ROOT, "does-not-exist")] });
     expect(names).toEqual(["tool-refresh"]);
   });
 
-  test("roots ACCUMULATE in layer order: package tools, settings folder, settings.tools", async () => {
+  test("roots ACCUMULATE in layer order: package tools, settings folder, settings.tools.folders", async () => {
     const first = makeToolsDir("s", { "one.js": TOOL("one", 1) });
     const second = makeToolsDir("e", { "two.js": TOOL("two", 2) });
     // the package ./tools ships read/write/edit/question/skill/bash;
     // the settings-folder layer is the test preload's temp folder — empty
-    const env = new Env({ dir: ROOT, cwd: ROOT, settings: { tools: [first, second] } });
-    const roots = env.defaultToolRoots();
+    const env = new Env({ dir: ROOT, cwd: ROOT, settings: { tools: { folders: [first, second] } } });
+    const roots = toolRoots(env);
     expect(roots[0]).toEndWith(`${sep}tools`); // the package's own tools/ first
     expect(roots.slice(-2)).toEqual([first, second]);
     expect(new Set(roots).size).toBe(roots.length); // deduped, never twice
-    const names = await env.loadTools();
+    const names = await toolsLoad(env);
     for (const expected of ["one", "two", "read", "bash", "tool-refresh"]) {
       expect(names).toContain(expected);
     }
@@ -185,35 +193,36 @@ ${TOOL("quiet", "ok")}`,
     // come from the package and the settings folder only.
     makeToolsDir("project-tools", { "evil.js": TOOL("evil", "injected") });
     const env = new Env({ dir: ROOT, cwd: ROOT, settings: {} });
-    expect(env.defaultToolRoots().join(sep)).not.toContain("project-tools");
-    const names = await env.loadTools();
+    expect(toolRoots(env).join(sep)).not.toContain("project-tools");
+    const names = await toolsLoad(env);
     expect(names).not.toContain("evil");
     expect(names.length).toBeGreaterThan(0); // the package's own tools still load (which tools exist is content)
   });
 
-  test("a `tools` key in project settings is STRIPPED (same vector)", async () => {
+  test("a `tools.folders` key in project settings is STRIPPED (same vector)", async () => {
     // SECURITY: the project-scoped settings file is agent-writable —
     // it must never name tool roots (load.js drops the key before
-    // the merge; package/settings-scoped settings.tools still work)
+    // the merge; package/settings-scoped settings.tools.folders still work)
     const injected = makeToolsDir("injected", { "evil.js": TOOL("evil", "injected") });
     const project = join(ROOT, "project");
     mkdirSync(project, { recursive: true });
-    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ tools: [injected], other: 1 }));
+    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ tools: { folders: [injected], concurrency: 2 }, other: 1 }));
     const env = new Env({ dir: ROOT, cwd: project, settings: {} });
-    expect(env.settings.tools).toBeUndefined(); // stripped at load
+    expect(env.settings.tools.folders).toEqual([]); // stripped at load: only the default reads
+    expect(env.settings.tools.concurrency).toBe(2);
     expect(env.settings.other).toBe(1); // the rest of the file merges normally
-    expect(await env.loadTools()).not.toContain("evil");
+    expect(await toolsLoad(env)).not.toContain("evil");
   });
 
-  test("settings.tools string (single root) works; package tools/ is the fallback default", async () => {
+  test("settings.tools.folders array works; package tools/ is the fallback default", async () => {
     const dir = makeToolsDir("single", { "one.js": TOOL("one", 1) });
-    const env = new Env({ dir: ROOT, settings: { tools: dir } });
-    expect(await env.loadTools()).toContain("one");
+    const env = new Env({ dir: ROOT, settings: { tools: { folders: [dir] } } });
+    expect(await toolsLoad(env)).toContain("one");
 
-    // no settings.tools -> package ./tools (its tool set is content, not asserted)
+    // no settings.tools.folders -> package ./tools (its tool set is content, not asserted)
     const fallback = new Env({ settings: {} });
-    expect(fallback.defaultToolRoots().join("/")).toContain("tools");
-    const names = await fallback.loadTools();
+    expect(toolRoots(fallback).join("/")).toContain("tools");
+    const names = await toolsLoad(fallback);
     expect(names.length).toBeGreaterThan(0);
   });
 });

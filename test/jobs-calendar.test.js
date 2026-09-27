@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { admitOccurrence, createTaskState, validateTaskState } from "../lib/jobs.js";
+import { admitOccurrence, createTaskState, validateTaskState } from "../lib/jobs/state.js";
 import { CALENDAR_DAY_LIMIT, OCCURRENCE_ADMISSION_LIMIT } from "../lib/jobs/calendar.js";
 
 const epoch = (value) => Date.parse(value);

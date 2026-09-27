@@ -44,7 +44,7 @@ const SURFACES = [
   {
     kicker: "Providers",
     title: "Providers are plugins",
-    body: "Four provider protocols ship out of the box — OpenAI Responses, Anthropic Messages, Kimi/Moonshot, and Ollama — with ready-made endpoints for OpenAI, the ChatGPT/Codex OAuth backend, GitHub Copilot, Azure OpenAI, xAI, and LM Studio. Every provider normalizes into one context and event model, so switching models — even mid-session — changes nothing else.",
+    body: "Common built-in protocols include OpenAI API, Anthropic API, Kimi/Moonshot API, and Ollama, with ready-made endpoints for services such as Codex, GitHub Copilot, Azure OpenAI, and xAI. Every provider normalizes into one context and event model, so switching providers and models — even mid-session — changes nothing else.",
     code: "om --login\nom --list\nom --model ollama/gpt-oss:20b",
   },
   {
@@ -56,7 +56,7 @@ const SURFACES = [
   {
     kicker: "Library",
     title: "Embed the library",
-    body: "<code>omoya/agent</code> is the headless core — it publishes <code>Agent.Context</code>, <code>Agent.Env</code>, and <code>Agent.IO</code> without loading any CLI, Markdown, or UI code. Import <code>omoya/app</code> when you want those layers.",
+    body: "<code>omoya/agent</code> is the headless core — it publishes <code>Agent.Context</code>, <code>Agent.Env</code>, and <code>Agent.IO</code> without loading any CLI, Markdown, or UI code. Import <code>omoya/app</code> when you want those layers. Semantic versioning protects the embedded library; App and GTUI APIs are not semantically versioned.",
     code: 'import Agent from "omoya/agent";\n\nconst env = await Agent.Env.create();\nconst agent = new Agent({\n  env, model: "ollama/gpt-oss:20b", safe: true,\n});',
   },
   {
@@ -68,7 +68,7 @@ const SURFACES = [
   {
     kicker: "Sessions & jobs",
     title: "Sessions and jobs",
-    body: "Named sessions persist as JSONL under the user settings directory: resume, rename, edit, roll back, fork, or delete them; anonymous sessions write nothing. <code>om-jobs</code> runs scheduled, headless agent tasks defined as plain Markdown files under <code>ai-jobs/tasks/</code>; wire periodic runs into your own cron or service manager.",
+    body: "Sessions are logged as JSONL under the user settings directory: resume, rename, edit, roll back, fork, or delete them. Logging is one switch: a session kept in memory only can start logging at any time, writing the whole conversation. <code>om-jobs</code> runs scheduled, headless agent tasks defined as plain Markdown files under <code>ai-jobs/tasks/</code>; wire periodic runs into your own cron or service manager.",
     code: "om-jobs init     # create ai-jobs/ (idempotent)\nom-jobs run      # one best-effort scan, executes due tasks",
   },
 ];
@@ -84,8 +84,8 @@ const SECURITY = [
 const DETECTED = [
   ["<code>OPENAI_API_KEY</code>", "<code>openai</code>"],
   ["<code>ANTHROPIC_API_KEY</code>", "<code>anthropic</code>"],
-  ["<code>MOONSHOT_API_KEY</code>", "<code>kimi</code>"],
-  ["<code>KIMI_API_KEY</code>", "<code>kimi-coding</code>"],
+  ["<code>MOONSHOT_API_KEY</code>", "<code>moonshot</code> (Kimi Platform)"],
+  ["<code>KIMI_API_KEY</code>", "<code>kimi</code> (Kimi Platform)"],
   ["<code>XAI_API_KEY</code>", "<code>xai</code>"],
   ["<code>AZURE_OPENAI_API_KEY</code> + <code>AZURE_OPENAI_BASE_URL</code>", "<code>azure-openai</code>"],
   ["Ollama running on <code>localhost:11434</code>", "<code>ollama</code>"],
@@ -176,7 +176,7 @@ ${SECURITY.map((item) => `      <li class="reveal">${item}</li>`).join("\n")}
   <div>
     <p class="section-kicker">Providers</p>
     <h2 id="environment-heading">Auto-detected endpoints.</h2>
-    <p>Auto-detection reads the environment and probes local servers — a running Ollama or LM Studio server becomes a ready endpoint with no configuration, re-detected at every startup.</p>
+    <p>Auto-detection reads the environment and probes local servers — a running Ollama or LM Studio server becomes a ready endpoint with no configuration. Dynamic model discovery may load slowly; configure an API-key endpoint to cache the model list.</p>
     <p><code>om --login</code> walks through hosted, OAuth, token-based, and local endpoints. A provider is a single protocol module; see the <a href="./api/">API reference</a> to add your own.</p>
   </div>
   <table class="reveal">

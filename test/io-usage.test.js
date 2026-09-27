@@ -4,10 +4,10 @@ import { describe, expect, test } from "bun:test";
 import {
   TOKENS_PER_WORD,
   wordCount,
-  estimateTokens,
-  estimateContextTokens,
-  estimateUsage,
-  finalizeUsage,
+  tokensEstimate,
+  tokensEstimateMessages,
+  usageEstimate,
+  usageFinalize,
   usageSummary,
 } from "../lib/context.js";
 
@@ -22,24 +22,24 @@ describe("word count and token estimation", () => {
 
   test("compact unspaced data is not estimated as a single token", () => {
     const payload = "a".repeat(4096);
-    expect(estimateContextTokens([{ type: 4, content: [{ type: "text", text: payload }] }])).toBeGreaterThanOrEqual(1024);
+    expect(tokensEstimateMessages([{ type: 4, content: [{ type: "text", text: payload }] }])).toBeGreaterThanOrEqual(1024);
   });
 
-  test("estimateTokens applies the token-per-word likelihood ratio", () => {
+  test("tokensEstimate applies the token-per-word likelihood ratio", () => {
     expect(TOKENS_PER_WORD).toBe(4 / 3);
-    expect(estimateTokens("one two three")).toBe(Math.ceil(3 * (4 / 3))); // 4
-    expect(estimateTokens("")).toBe(0);
+    expect(tokensEstimate("one two three")).toBe(Math.ceil(3 * (4 / 3))); // 4
+    expect(tokensEstimate("")).toBe(0);
   });
 });
 
-describe("estimateUsage", () => {
+describe("usageEstimate", () => {
   test("estimates input from context, output from the assembled message", () => {
     const context = [
       { type: 2, content: [{ type: "text", text: "one two three" }] }, // 3 words
       { type: 1, content: [{ type: "text", text: "sys" }] }, // 1 word
     ];
     const message = { type: 3, content: [{ type: "text", text: "a b c d e f" }] }; // 6 words
-    const usage = estimateUsage(context, message);
+    const usage = usageEstimate(context, message);
     expect(usage.source).toBe("estimate");
     expect(usage.inputTokens).toBe(Math.ceil(4 * (4 / 3))); // 6
     expect(usage.outputTokens).toBe(Math.ceil(6 * (4 / 3))); // 8
@@ -50,16 +50,16 @@ describe("estimateUsage", () => {
       type: 3,
       content: [{ type: "toolCall", callId: "c1", name: "file-read", arguments: '{"path":"x"}' }],
     };
-    expect(estimateUsage([], message).outputTokens).toBeGreaterThan(0);
+    expect(usageEstimate([], message).outputTokens).toBeGreaterThan(0);
   });
 });
 
-describe("finalizeUsage", () => {
+describe("usageFinalize", () => {
   const context = [{ type: 2, content: [{ type: "text", text: "hello world" }] }];
   const message = { type: 3, content: [{ type: "text", text: "hi" }] };
 
   test("provider-reported numbers win, tagged as provider source", () => {
-    expect(finalizeUsage({ inputTokens: 10, outputTokens: 5 }, context, message)).toEqual({
+    expect(usageFinalize({ inputTokens: 10, outputTokens: 5 }, context, message)).toEqual({
       inputTokens: 10,
       outputTokens: 5,
       source: "provider",
@@ -67,7 +67,7 @@ describe("finalizeUsage", () => {
   });
 
   test("absent report falls back to estimation", () => {
-    const usage = finalizeUsage(null, context, message);
+    const usage = usageFinalize(null, context, message);
     expect(usage.source).toBe("estimate");
     expect(usage.inputTokens).toBeGreaterThan(0);
     expect(usage.outputTokens).toBeGreaterThan(0);
@@ -81,7 +81,7 @@ describe("finalizeUsage", () => {
       "10/5",
       42,
     ]) {
-      expect(finalizeUsage(bad, context, message).source).toBe("estimate");
+      expect(usageFinalize(bad, context, message).source).toBe("estimate");
     }
   });
 });
@@ -100,10 +100,10 @@ describe("provider-reported cost", () => {
   const message = { type: 3, content: [{ type: "text", text: "hi" }] };
 
   test("a finite reported cost rides the envelope (never estimated)", () => {
-    const usage = finalizeUsage({ inputTokens: 10, outputTokens: 5, cost: 0.0123 }, context, message);
+    const usage = usageFinalize({ inputTokens: 10, outputTokens: 5, cost: 0.0123 }, context, message);
     expect(usage).toEqual({ inputTokens: 10, outputTokens: 5, source: "provider", cost: 0.0123 });
     // estimates never invent a cost
-    expect(finalizeUsage(null, context, message).cost).toBeUndefined();
+    expect(usageFinalize(null, context, message).cost).toBeUndefined();
   });
 
   test("the summary appends the cost when present", () => {

@@ -5,15 +5,15 @@
 import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, afterEach } from "bun:test";
 import { rmSync, readFileSync, readdirSync } from "node:fs";
+import { providersLoad, toolsLoad } from "./env-internals.js";
 
 const transpiler = new Bun.Transpiler({ loader: "js" });
 import API from "../lib/index.js";
 
 const Env = API.Env;
 const Agent = API.Agent;
-const { SessionStore } = Agent;
 const Context = API.Context;
-const { MessageType, userMessage } = Context;
+const { MessageType, messageUser } = Context;
 import { readFileSync as readFs } from "node:fs";
 import { cli as cliPath } from "./bin-names.js";
 
@@ -55,20 +55,20 @@ async function libraryRun({ url, callbacks = {}, session } = {}) {
   // dir AND cwd isolated from the real repo root: resolveSystemPrompt()'s
   // package-fallback AND project-local AGENTS.md layers must not seed
   // an extra system message into these exact-context-sequence assertions.
-  const env = new Env({ dir: ROOT, cwd: ROOT });
-  await env.loadProviders({ dirs: ["./providers"], detect: false });
-  env.endpoints.ollama = { provider: "ollama", url };
-  await env.loadTools({ dirs: ["./tools"] }); // explicit root keeps the proof self-contained
+  const env = new Env({ dir: ROOT, cwd: ROOT, settings: { sessions: resolve(ROOT) } });
+  await providersLoad(env, { dirs: ["./providers"], detect: false });
+  env._endpoints.ollama = { provider: "ollama", url };
+  await toolsLoad(env, { dirs: ["./tools"] }); // explicit root keeps the proof self-contained
   const agent = new Agent({
     env, model: "ollama/m", url,
-    context: [userMessage("read it")],
+    context: [messageUser("read it")],
     ...session,
   });
   const events = [];
   const eventMap = {
-    onStart: [Agent.EVENT.START, "start"], onTextDelta: [Agent.EVENT.TEXT_DELTA, "text_delta"],
-    onToolcallStart: [Agent.EVENT.TOOLCALL_START, "toolcall_start"], onDone: [Agent.EVENT.DONE, "done"],
-    onError: [Agent.EVENT.ERROR, "error"],
+    onStart: [Agent.EVENT.REQUEST_START, "start"], onTextDelta: [Agent.EVENT.TEXT_DELTA, "text_delta"],
+    onToolCallStart: [Agent.EVENT.TOOL_CALL_START, "tool_call_start"], onDone: [Agent.EVENT.REQUEST_DONE, "done"],
+    onError: [Agent.EVENT.REQUEST_ERROR, "error"],
   };
   for (const [name, [event, type]] of Object.entries(eventMap)) {
     agent.onEvent(event, callbacks[name] ?? ((value) => events.push({ type, ...value })));
@@ -89,11 +89,11 @@ describe("library namespaces", () => {
     expect(globalThis[`${NAMES.Namespace}Env`]).toBeUndefined();
     expect(globalThis.Env).toBeUndefined();
     expect(API.IO.IO).toBeUndefined();
-    expect(typeof API.Env.parseDuration).toBe("function");
-    expect(typeof API.Context.userMessage).toBe("function");
+    expect(typeof API.Env.create).toBe("function");
+    expect(typeof API.Context.messageUser).toBe("function");
     expect(API.CLI).toBeUndefined();
     expect(API.Markdown).toBeUndefined();
-    expect(typeof API.Jobs.dispatchJobs).toBe("function");
+    expect(typeof API.Jobs.run).toBe("function");
     const core = Bun.spawnSync([process.execPath, "-e", 'import AI from "./lib/index.js"; process.stdout.write(String(AI.App))'], { cwd: process.cwd() });
     expect(core.exitCode).toBe(0);
     expect(core.stdout.toString()).toBe("undefined");
@@ -125,7 +125,7 @@ describe("library namespaces", () => {
   });
 });
 
-describe("Agent.setFolder: agent-local tool root", () => {
+describe("Agent.folderSet: agent-local tool root", () => {
   test("accepts only existing folders inside env.cwd and leaves the shared environment unchanged", () => {
     const root = mkdtempSync("./ai-tmp/agent-folder-");
     const child = `${root}/project`;
@@ -133,13 +133,13 @@ describe("Agent.setFolder: agent-local tool root", () => {
     writeFileSync(`${root}/plain-file`, "not a folder");
     const env = new Env({ dir: ROOT, cwd: root, settings: {} });
     const agent = new Agent({ env });
-    expect(agent.setFolder("project")).toBe(resolve(child));
+    expect(agent.folderSet("project")).toBe(resolve(child));
     expect(agent.folder).toBe(resolve(child));
     expect(env.cwd).toBe(root);
-    expect(() => agent.setFolder("missing")).toThrow(/does not exist/);
-    expect(() => agent.setFolder("../")).toThrow(/inside env\.cwd/);
-    expect(() => agent.setFolder("plain-file")).toThrow(/not a folder/);
-    expect(agent.setFolder()).toBe(root);
+    expect(() => agent.folderSet("missing")).toThrow(/does not exist/);
+    expect(() => agent.folderSet("../")).toThrow(/inside env\.cwd/);
+    expect(() => agent.folderSet("plain-file")).toThrow(/not a folder/);
+    expect(agent.folderSet()).toBe(root);
   });
 });
 
@@ -151,10 +151,10 @@ describe("library binding: engine over callbacks only", () => {
     expect(terminal.type).toBe("done");
     expect(terminal.message.content).toEqual([{ type: "text", text: "library finished" }]);
     expect(requests).toHaveLength(2); // tool loop ran
-    expect(events.map((e) => e.type)).toContain("toolcall_start");
+    expect(events.map((e) => e.type)).toContain("tool_call_start");
     // context held in-process, editable through the Context surface
-    expect(agent.context.map((m) => m.type)).toEqual([2, 3, 4, 3]);
-    expect(Context.at(agent.context, 2).callId).toBeDefined();
+    expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3, 4, 3]);
+    expect(agent.context.at(2).callId).toBeDefined();
   });
 
   test("parity with the CLI binding: same scenario, same terminal + context", async () => {
@@ -166,7 +166,7 @@ describe("library binding: engine over callbacks only", () => {
       ["bun", cliPath.agent, "--model", "ollama/m", "--url", cli.url],
       { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, [NAMES.settingsEnv]: SPAWN_SETTINGS } },
     );
-    proc.stdin.write(JSON.stringify([userMessage("read it")]));
+    proc.stdin.write(JSON.stringify([messageUser("read it")]));
     proc.stdin.end();
     const [stdout, exit] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
     expect(exit).toBe(0);
@@ -178,37 +178,39 @@ describe("library binding: engine over callbacks only", () => {
     expect(libRun.terminal.usage).toEqual(cliDone.usage);
     // context parity: library in-memory context == CLI's request-2 wire context
     // (excluding a leading "system" role either side may carry — the
-    // spawned CLI's env.dir is the real package folder, unlike the
+    // spawned CLI's env._dir is the real package folder, unlike the
     // library run's isolated one above, so only IT picks up a fresh
     // session's system-prompt prefill; this test is about tool-loop
     // parity, not that)
     const cliWire = cli.requests[1].messages.map((m) => m.role).filter((r) => r !== "system");
-    const libTypes = libRun.agent.context.slice(0, -1).map((m) =>
+    const libTypes = libRun.agent.context.messages().slice(0, -1).map((m) =>
       ({ 1: "system", 2: "user", 3: "assistant", 4: "tool" })[m.type]).filter((r) => r !== "system");
     expect(libTypes).toEqual(cliWire);
   });
 
-  test("injectable persistence: a duck-typed store receives the appends", async () => {
+  test("injectable context: a ready Context (here a subclass) receives the appends", async () => {
     const { url } = toolLoopServer();
     const appended = [];
-    const store = {
-      context: [userMessage("seeded")],
-      append(m) { this.context.push(m); appended.push(m); },
-      flush() { this.flushed = (this.flushed ?? 0) + 1; },
-    };
-    const { agent, terminal } = await libraryRun({ url, session: { session: store } });
+    let flushed = 0;
+    class CountingContext extends Context {
+      append(m, options) { appended.push(m); return super.append(m, options); }
+      flush() { flushed++; return super.flush(); }
+      flushAsync() { flushed++; return super.flushAsync(); }
+    }
+    const context = new CountingContext({ messages: [messageUser("seeded")] });
+    const { agent, terminal } = await libraryRun({ url, session: { context } });
     expect(terminal.type).toBe("done");
     expect(appended).toHaveLength(3); // assistant, tool result, assistant
-    expect(store.flushed).toBeGreaterThan(0); // synced onDone
-    expect(agent.context).toBe(store.context); // same live array
+    expect(flushed).toBeGreaterThan(0); // synced onDone
+    expect(agent.context).toBe(context); // the same live Context
   });
 
   test("default persistence is the file store when a sessionId is given", async () => {
     const { url } = toolLoopServer();
     const id = `lib-${process.pid}`;
-    const { agent } = await libraryRun({ url, session: { session: id, sessionDir: ROOT } });
-    expect(agent.session).toBeInstanceOf(SessionStore);
-    const records = readFileSync(agent.session.file, "utf8").trim().split("\n").map(JSON.parse)
+    const { agent } = await libraryRun({ url, session: { contextId: id } });
+    expect(agent.context).toBeInstanceOf(Context);
+    const records = readFileSync(agent.context.file, "utf8").trim().split("\n").map(JSON.parse)
     .filter((record) => record?.type !== "session-metadata");
     expect(records.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     expect(records).toHaveLength(4); // seed + 3 loop messages

@@ -5,11 +5,12 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
+import { toolEntry } from "./env-internals.js";
 
 async function loopEnv(tools = {}) {
   const env = await testEnv();
   for (const [name, fn] of Object.entries(tools)) {
-    env.registerTool(name, fn, { description: name, inputSchema: {} });
+    env.toolAdd(name, fn, { description: name, inputSchema: {} });
   }
   return env;
 }
@@ -25,9 +26,9 @@ describe("Agent tool storage", () => {
 
     expect(agent.toolStorage("alpha")).toBe(agent.toolStorage("alpha"));
     expect(agent.toolStorage("alpha")).not.toBe(agent.toolStorage("beta"));
-    await agent.env.callTool("alpha", {}, agent._toolContext({ name: "alpha", callId: "1" }));
-    await agent.env.callTool("alpha", {}, agent._toolContext({ name: "alpha", callId: "2" }));
-    await agent.env.callTool("beta", {}, agent._toolContext({ name: "beta", callId: "3" }));
+    await agent.env.toolCall("alpha", {}, agent._toolContext({ name: "alpha", callId: "1" }));
+    await agent.env.toolCall("alpha", {}, agent._toolContext({ name: "alpha", callId: "2" }));
+    await agent.env.toolCall("beta", {}, agent._toolContext({ name: "beta", callId: "3" }));
     expect(seen[0]).toBe(seen[1]);
     expect(seen[0].count).toBe(2);
     expect(seen[2]).toBe(agent.toolStorage("beta"));
@@ -57,7 +58,7 @@ describe("Agent loop: tool execution", () => {
 
     expect(terminal.type).toBe("done");
     expect(calls).toEqual([{ path: "./a" }]);
-    expect(agent.context).toEqual([
+    expect(agent.context.messages()).toEqual([
       USER("go"),
       { type: 3, content: [{ type: "toolCall", callId: "c1", name: "fake-tool", arguments: { path: "./a" } }] },
       { type: 4, callId: "c1", name: "fake-tool", content: [{ type: "text", text: "tool output" }] },
@@ -80,9 +81,102 @@ describe("Agent loop: tool execution", () => {
     await agent.run();
 
     expect(order).toEqual(["a", "b"]);
-    expect(agent.context.map((m) => m.type)).toEqual([2, 3, 4, 4]);
-    expect(agent.context[2]).toMatchObject({ callId: "c1", name: "a", content: [{ type: "text", text: "A" }] });
-    expect(agent.context[3]).toMatchObject({ callId: "c2", name: "b", content: [{ type: "text", text: "B" }] });
+    expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3, 4, 4]);
+    expect(agent.context.at(2)).toMatchObject({ callId: "c1", name: "a", content: [{ type: "text", text: "A" }] });
+    expect(agent.context.at(3)).toMatchObject({ callId: "c2", name: "b", content: [{ type: "text", text: "B" }] });
+  });
+});
+
+describe("Agent loop: read-only tool batches", () => {
+  for (const concurrency of [1, 2, 4]) {
+    test(`settings.tools.concurrency limits safe groups to ${concurrency}`, async () => {
+      const env = await testEnv({ tools: { concurrency } });
+      let active = 0;
+      let peak = 0;
+      env.toolAdd("reader", async ({ id }) => {
+        active++;
+        peak = Math.max(peak, active);
+        await Bun.sleep(5);
+        active--;
+        return id;
+      }, { description: "read", safe: true, inputSchema: {} });
+      const calls = Array.from({ length: 6 }, (_, i) => TOOLCALL(i, `c${i}`, "reader", { id: i })).flat();
+      const io = scriptedIO([[...calls, { type: "done" }], [{ type: "done" }]]);
+      const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+      await agent.run();
+      expect(peak).toBe(concurrency);
+      expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(Array.from({ length: 6 }, (_, i) => `c${i}`));
+    });
+  }
+
+  test("invalid tool concurrency rejects clearly when the Agent is created", async () => {
+    const env = await testEnv({ tools: { concurrency: 0 } });
+    expect(() => new Agent({ env, model: "p/m", context: [USER("go")] })).toThrow("tools.concurrency must be a positive integer");
+  });
+
+  test("concurrent safe calls finish together and preserve result order", async () => {
+    const env = await testEnv();
+    const started = [];
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    env.toolAdd("reader", async ({ id }) => { started.push(id); await gate; return id; },
+      { description: "read", safe: true, inputSchema: {} });
+    const io = scriptedIO([
+      [...TOOLCALL(0, "a", "reader", { id: "a" }), ...TOOLCALL(1, "b", "reader", { id: "b" }), { type: "done" }],
+      [...TEXT(0, "finished"), { type: "done" }],
+    ]);
+    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const run = agent.run();
+    try {
+      for (let i = 0; i < 100 && started.length < 2; i++) await Bun.sleep(2);
+      expect(started).toEqual(["a", "b"]);
+    } finally { release(); await run; }
+    expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "b"]);
+  });
+
+  test("unsafe calls form barriers even when async is enabled", async () => {
+    const env = await testEnv();
+    const order = [];
+    env.toolAdd("reader", async ({ id }) => { order.push(`start ${id}`); await Bun.sleep(10); order.push(`end ${id}`); return id; },
+      { description: "read", safe: true, inputSchema: {} });
+    env.toolAdd("writer", async () => { order.push("start write"); await Bun.sleep(10); order.push("end write"); return "write"; },
+      { description: "write", inputSchema: {} });
+    const io = scriptedIO([
+      [...TOOLCALL(0, "a", "reader", { id: "a" }), ...TOOLCALL(1, "w", "writer", {}),
+        ...TOOLCALL(2, "b", "reader", { id: "b" }), ...TOOLCALL(3, "c", "reader", { id: "c" }), { type: "done" }],
+      [...TEXT(0, "finished"), { type: "done" }],
+    ]);
+    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io, toolCall: { async: true } });
+    await agent.run();
+    expect(order).toEqual(["start a", "end a", "start write", "end write", "start b", "start c", "end b", "end c"]);
+    expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "w", "b", "c"]);
+  });
+
+  test("safe batches run at most 3 in parallel, preserving result order", async () => {
+    const env = await testEnv();
+    let active = 0;
+    let peak = 0;
+    const started = [];
+    env.toolAdd("reader", async ({ id }) => {
+      started.push(id);
+      active += 1;
+      peak = Math.max(peak, active);
+      await Bun.sleep(15);
+      active -= 1;
+      return id;
+    }, { description: "read", safe: true, inputSchema: {} });
+    const io = scriptedIO([
+      [...TOOLCALL(0, "a", "reader", { id: "a" }), ...TOOLCALL(1, "b", "reader", { id: "b" }),
+        ...TOOLCALL(2, "c", "reader", { id: "c" }), ...TOOLCALL(3, "d", "reader", { id: "d" }),
+        ...TOOLCALL(4, "e", "reader", { id: "e" }), ...TOOLCALL(5, "f", "reader", { id: "f" }), { type: "done" }],
+      [...TEXT(0, "finished"), { type: "done" }],
+    ]);
+    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    await agent.run();
+    expect(peak).toBeLessThanOrEqual(3); // the parallel-tool ceiling
+    expect(started.slice(0, 3)).toEqual(["a", "b", "c"]); // first window starts together
+    expect(started[3]).toBe("d"); // the fourth starts only after a slot frees
+    expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "b", "c", "d", "e", "f"]);
   });
 });
 
@@ -99,11 +193,11 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
-    const result = agent.context[2];
+    const result = agent.context.at(2);
     expect(result.type).toBe(4);
     expect(result.error).toBe(true);
     expect(result.content).toHaveLength(1);
-    expect(agent.context[3].content).toEqual([{ type: "text", text: "recovered" }]);
+    expect(agent.context.at(3).content).toEqual([{ type: "text", text: "recovered" }]);
   });
 
   test("unknown/misspelled tool name → error tool-result, not a crash", async () => {
@@ -115,16 +209,16 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
-    expect(agent.context[2]).toMatchObject({ type: 4, error: true, name: "no-such-tool" });
-    expect(agent.context[2].content).toHaveLength(1);
+    expect(agent.context.at(2)).toMatchObject({ type: 4, error: true, name: "no-such-tool" });
+    expect(agent.context.at(2).content).toHaveLength(1);
   });
 
   test("non-function published entry / unparseable arguments → error tool-result", async () => {
     const env = await loopEnv({ t: () => "ok" });
     const io = scriptedIO([
       [
-        { type: "toolcall_start", contentIndex: 0, callId: "c1", name: "t", arguments: "{oops" },
-        // no toolcall_end: arguments stay a raw unparseable string
+        { type: "tool_call_start", contentIndex: 0, callId: "c1", name: "t", arguments: "{oops" },
+        // no tool_call_end: arguments stay a raw unparseable string
         { type: "done" },
       ],
       [{ type: "done" }],
@@ -132,9 +226,9 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
-    expect(agent.context[2]).toMatchObject({ type: 4, error: true });
-    expect(agent.context[2].content).toHaveLength(1);
-    expect(env.toolEntry("t")).toBeDefined(); // malformed input never reaches the tool
+    expect(agent.context.at(2)).toMatchObject({ type: 4, error: true });
+    expect(agent.context.at(2).content).toHaveLength(1);
+    expect(toolEntry(env, "t")).toBeDefined(); // malformed input never reaches the tool
   });
 
   test("malformed streamed tool JSON is returned to the model for repair", async () => {
@@ -142,8 +236,8 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
     const raw = '{"anonymous":false,"describe":"story\\n\\n"+""}';
     const io = scriptedIO([
       [
-        { type: "toolcall_start", contentIndex: 0, callId: "c1", name: "question", arguments: raw },
-        { type: "toolcall_end", contentIndex: 0 },
+        { type: "tool_call_start", contentIndex: 0, callId: "c1", name: "question", arguments: raw },
+        { type: "tool_call_end", contentIndex: 0 },
         { type: "done" },
       ],
       [{ type: "done" }],
@@ -151,8 +245,8 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
-    expect(agent.context[2]).toMatchObject({ type: 4, error: true, callId: "c1", name: "question" });
-    expect(agent.context[2].content).toHaveLength(1);
+    expect(agent.context.at(2)).toMatchObject({ type: 4, error: true, callId: "c1", name: "question" });
+    expect(agent.context.at(2).content).toHaveLength(1);
   });
 
   test("provider error terminal ends the loop; partial message persisted", async () => {
@@ -196,7 +290,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
 
     expect(terminal.type).toBe("done");
     expect(executions).toBe(3); // every live call runs
-    const results = agent.context.filter((m) => m.type === 4);
+    const results = agent.context.messages().filter((m) => m.type === 4);
     expect(results).toHaveLength(3); // every call gets its own FRESH answer
     expect(results.map((m) => m.content)).toEqual([
       [{ type: "text", text: "done 1" }],
@@ -226,7 +320,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
 
     expect(terminal.type).toBe("done");
     expect(executions).toBe(1); // the live repeat RAN
-    const results = agent.context.filter((m) => m.type === 4);
+    const results = agent.context.messages().filter((m) => m.type === 4);
     expect(results).toHaveLength(2);
     expect(results[1].content).toEqual([{ type: "text", text: "fresh 1" }]); // NEVER the stored answer
     expect(results[1].callId).not.toBe("c1"); // id regenerated for linkage only (callId is irrelevant to execution)
@@ -252,7 +346,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
     // (lib/agent/tool-repair.js): strict dialects 400 the request over
     // an orphan tool_call, so the repair answers it — never by running
     // the tool, always with an honest error result
-    const results = agent.context.filter((m) => m.type === 4);
+    const results = agent.context.messages().filter((m) => m.type === 4);
     expect(results).toHaveLength(1);
     expect(results[0].callId).toBe("c1");
     expect(results[0].error).toBe(true);
@@ -275,9 +369,9 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
     // Edit the tool OUTPUT, then an EARLIER message, then run again —
     // the re-issued call executes (re-reading an edited file must
     // return the edits, never a cached answer).
-    agent.edit(2, { type: 4, callId: "c1", name: "mutate-state", content: [{ type: "text", text: "user-edited output" }] });
-    agent.edit(0, USER("go — edited"));
-    agent.append(USER("once more"));
+    agent.context.edit(2, { type: 4, callId: "c1", name: "mutate-state", content: [{ type: "text", text: "user-edited output" }] });
+    agent.context.edit(0, USER("go — edited"));
+    agent.context.append(USER("once more"));
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -337,9 +431,9 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     expect(io.writes).toHaveLength(0); // refused before ever connecting
   });
 
-  test("settings.contextGuardCap is settable — a lower cap trips at a usage the default would allow", async () => {
+  test("settings.context.cap is settable — a lower cap trips at a usage the default would allow", async () => {
     const env = await loopEnv({});
-    env.settings.contextGuardCap = 0.5;
+    env.settings.context = { cap: 0.5 };
     const io = scriptedIO([[...TEXT(0, "x"), { type: "done" }]]);
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     agent._contextReport = { used: 60, total: 100 }; // 60%: under the default 90%, over a configured 50%
@@ -369,10 +463,10 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     expect(io.writes).toHaveLength(1); // stopped before the second scripted request
   });
 
-  test("settings.contextGuardTurnCap is settable", async () => {
+  test("settings.context.turn is settable", async () => {
     const env = await loopEnv({ t: () => "word ".repeat(20) });
     env.settings.p = { ...env.settings.p, contextWindow: 200 };
-    env.settings.contextGuardTurnCap = 0.1; // 10%: trips on far less growth
+    env.settings.context = { turn: 0.1 }; // 10%: trips on far less growth
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
       [...TOOLCALL(0, "c2", "t", {}), { type: "done" }],
@@ -395,7 +489,7 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
     expect(io.writes).toHaveLength(4);
-    expect(agent.context.filter((m) => m.type === 4)).toHaveLength(3);
+    expect(agent.context.messages().filter((m) => m.type === 4)).toHaveLength(3);
   });
 
   test("compaction bypasses the normal context guard so it can recover an over-cap context", async () => {
@@ -406,6 +500,6 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     const result = await agent.compact();
     expect(result.ok).toBe(true);
     expect(io.writes).toHaveLength(1);
-    expect(agent.context.some((m) => m.type === 3 && m.content[0].text.includes("compact summary"))).toBe(true);
+    expect(agent.context.messages().some((m) => m.type === 3 && m.content[0].text.includes("compact summary"))).toBe(true);
   });
 });

@@ -3,12 +3,13 @@ import { performance } from "node:perf_hooks";
 import { GTUI } from "../lib/app/gtui/gtui.js";
 import { createApp } from "../lib/app/tui/app.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";
+import { Context } from "../lib/context.js";
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
 for (const mode of ["inline", "alt"]) {
   test(`${mode}: scrolling and typing remain responsive during a sustained token stream`, async () => {
     const context = Array.from({ length: 100 }, (_, i) => ({ type: 3, content: [{ type: "text", text: `MESSAGE ${i}\n` + "historical words ".repeat(100) }] }));
-    const agent = { context, pending: [], model: "test/model", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
+    const agent = { context: new Context({ messages: context }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
     const input = new TerminalInput();
     const output = new TerminalScreen(100, 32);
     const app = createApp(agent, { sources: {} });

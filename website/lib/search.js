@@ -30,7 +30,7 @@ export function searchIndex(pageEntries, data, generated) {
       }
       // Class members are API points too: a module-namesake class's member
       // is addressable as Module.member (Agent.onEvent), any other class's
-      // as Module.Class.member (Agent.SessionStore.append).
+      // as Module.Class.member (Env.HttpStatusError.constructor).
       const seen = new Set();
       for (const member of symbol.members ?? []) {
         if (!member.doc?.description || seen.has(member.name)) continue;

@@ -22,7 +22,7 @@ describe("stripJsonComments / parseJsonc", () => {
 
   test("a commented-out key leaves valid JSON behind", () => {
     const text = `{
-      // "toolTimeout": 120000,
+      // "tools": { "timeout": 120000 },
       "maxActive": 4
     }`;
     expect(parseJsonc(text)).toEqual({ maxActive: 4 });

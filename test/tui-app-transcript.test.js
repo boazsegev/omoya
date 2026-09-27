@@ -14,7 +14,8 @@ import { markdownRows } from "../lib/app/tui/markdown-view.js";
 import { transcriptItems, noticeItems, createTranscriptProjector } from "../lib/app/tui/transcript.js";
 import { contextBlocks } from "../lib/app/tui/context-blocks.js";
 import { createApp, msg } from "../lib/app/tui/app.js";
-import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
+import { Context } from "../lib/context.js";
+import { scriptedIO, fakeIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
 
 const tick = () => new Promise((resolve) => queueMicrotask(resolve));
 async function until(fn, timeout = 2000) {
@@ -169,7 +170,7 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     // no result and no running turn: the call was never run
     expect(items[0].node.children[0].content.map((s) => s.text).join("")).toBe("– read  x");
     const memory = GTUI.host.memory({ width: 80 });
-    const ui = new GTUI({ host: memory, theme: createApp({ context: [], pending: [], endpoint: "", model: "", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
+    const ui = new GTUI({ host: memory, theme: createApp({ context: new Context({ id: "stub", messages: [] }), pending: [], endpoint: "", model: "", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
     ui.run({ init: () => ({ model: {}, effects: [] }), update: (m) => ({ model: m, effects: [] }), view: () => GTUI.view.feed({ items }) });
     expect(memory.snapshot().lines[0]).toContain("▌   – read  x");
     ui.stop();
@@ -254,6 +255,15 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     expect(lines({ previews: false })).toContain("line three");
   });
 
+  test("a failed response renders its error after whatever arrived, for as long as the message exists", () => {
+    const failed = { type: 3, content: [{ type: "text", text: "half" }], error: "stream reset" };
+    const blocks = contextBlocks([{ type: 2, content: [{ type: "text", text: "go" }] }, failed]);
+    expect(blocks.slice(-2).map((block) => [block.type, block.text])).toEqual([["text", "half"], ["error", "stream reset"]]);
+    const node = transcriptItems(blocks).at(-1).node;
+    expect(JSON.stringify(node)).toContain('"role":"notice.error"');
+    expect(contextBlocks([{ type: 2, content: [{ type: "text", text: "go" }] }]).some((block) => block.type === "error")).toBe(false);
+  });
+
   test("each user message opens an exchange with one unstyled blank row", () => {
     const user = { type: "user", text: "hi", group: "message:1", section: "User", ordinal: 0 };
     const snapshot = (options) => layoutView(transcriptItems([user], 0, options)[0].node, { width: 20, height: 4 }).snapshot;
@@ -317,6 +327,50 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
 });
 
 describe("the app end to end: transcript, links, and notices", () => {
+  test("request completion drops the streamed preview and reads the authoritative context", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const app = createApp(agent, { env });
+    const event = (model, type, fields = {}) => app.update(model, { type: "agent.turn.event", origin: agent, event: { type, ...fields } }).model;
+    let model = event(app.init().model, "start");
+    model = event(model, "text_start", { contentIndex: 0 });
+    model = event(model, "text_delta", { contentIndex: 0, text: "**draft" });
+    expect(model.live?.message().content[0].text).toBe("**draft");
+    agent.context.append({ type: 3, content: [{ type: "text", text: "**final** and $x^2$" }] });
+    model = event(model, "done");
+    expect(model.live).toBeNull();
+    const feed = app.view(model).children[0].children[0].items;
+    const answer = feed.find((item) => item.key.endsWith(":Message:0"));
+    expect(answer.done).toBe(true);
+    expect(JSON.stringify(answer.node)).toContain("md.strong");
+    expect(JSON.stringify(answer.node)).toContain("**final** and $x^2$");
+  });
+  test("the done event reconciles a differing final Markdown/math message before turn settlement", async () => {
+    const env = await testEnv();
+    let release;
+    const io = fakeIO(async (_io, callbacks) => {
+      callbacks.onStart?.({ type: "start" });
+      callbacks.onTextDelta?.({ type: "text_delta", contentIndex: 0, text: "**draft" });
+      return new Promise((resolve) => {
+        release = () => resolve({ type: "done", message: { type: 3, content: [{ type: "text", text: "**final** and $x^2$" }] } });
+      });
+    });
+    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const app = createApp(agent, { env });
+    const memory = GTUI.host.memory({ width: 80, height: 20 });
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(app);
+    try {
+      ui.dispatch(msg.submit("hello"));
+      expect(await until(() => memory.snapshot().lines.some((line) => line.includes("**draft")))).toBe(true);
+      release();
+      expect(await until(() => memory.snapshot().lines.some((line) => line.includes("final and $x^2$")))).toBe(true);
+      const snapshot = memory.snapshot();
+      expect(snapshot.lines.join("\n")).not.toContain("**draft");
+      expect(snapshot.roles.some((span) => span.role === "message.text md.strong")).toBe(true);
+      expect(agent.context.messages().at(-1).content[0].text).toBe("**final** and $x^2$");
+    } finally { release?.(); ui.stop(); await running; }
+  });
   test("a turn's exchange lands in the transcript with the right roles", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi there"), { type: "done" }]]);
@@ -353,7 +407,7 @@ describe("the app end to end: transcript, links, and notices", () => {
     await until(() => memory.snapshot().lines.some((l) => l.includes("docs")));
     const snapshot = memory.snapshot();
     expect(snapshot.links.some((l) => l.link === "http://example.com")).toBe(true);
-    const message = agent.context.find((m) => m.type === 3);
+    const message = agent.context.messages().find((m) => m.type === 3);
     const rawText = message.content[0].text;
     const linkStart = rawText.indexOf("docs"); // one GTUI source entry per grapheme cell — check the span's first character
     const source = snapshot.sources.find((s) => s.source.start === linkStart && s.source.end === linkStart + 1);

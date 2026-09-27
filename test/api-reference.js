@@ -36,9 +36,10 @@
  * and nothing more. Good enough for a reference; not a JS parser.
  */
 
-import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve, basename, relative, extname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { toolsLoad } from "./env-internals.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const TRANSPILER = new Bun.Transpiler({ loader: "js" }); // parse real imports, never quoted examples/comments
@@ -46,6 +47,7 @@ const SOURCE_EXTENSIONS = new Set([".js"]);
 const isSourceFile = (entry) => entry.isFile() && SOURCE_EXTENSIONS.has(extname(entry.name));
 
 const PUBLIC_MODULES = [
+  { name: "Sandbox", file: "lib/sandbox.js" },
   { name: "Markdown", file: "lib/app/markdown/index.js" },
   { name: "Context", file: "lib/context.js" },
   { name: "Env", file: "lib/env.js" },
@@ -93,7 +95,10 @@ const CONTRACTS = [
   {
     name: "Provider contract",
     sources: [
-      { file: "lib/env/provider.js", moduleDoc: true, symbols: ["defineProvider", "ProviderError", "classifyError"], objectKeys: ["INSTANCE_DEFAULTS", "methods completed with OpenAI defaults when the class lacks them"] },
+      { label: "CATALOG side — Env completes the statics", file: "lib/env/provider.js", moduleDoc: true, objectKeys: ["STATIC_DEFAULTS", "static methods completed when the class lacks them"] },
+      { label: "WIRE side — IO completes the instance", file: "lib/io/provider.js", moduleDoc: true },
+      { label: "Errors — providers throw plain errors with `kind` or `status`", file: "lib/io/provider-error.js", moduleDoc: true, symbols: ["classifyError"] },
+      { label: "Thinking — native modes; IO maps library levels", file: "lib/io/thinking.js", moduleDoc: true },
       { file: "providers/ollama.js", moduleDoc: true, note: "reference implementation" },
     ],
   },
@@ -101,10 +106,10 @@ const CONTRACTS = [
     name: "Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)",
     sources: [
       { label: "PUBLISHES — the module shape a tool file must export", file: "lib/env/tools.js", moduleDoc: true, symbols: ["scanToolRoots"] },
-      { file: "lib/env/tool-registry.js", symbols: ["registerTool", "toolSchemas"] },
+      { label: "PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow)", file: "lib/env/tool-registry.js", symbols: ["registerTool", "toolsList", "callTool"] },
       { label: "PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx)", file: "tools/read.js", example: true },
       { label: "PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed)", file: "tools/write.js", example: true },
-      { label: "REQUIRES — every in-process call's (args, ctx) signature: ctx = {question, env, call, agent}", file: "lib/agent.js", members: { class: "Agent", names: ["_toolContext", "_toolEnv"] } },
+      { label: "REQUIRES — every in-process call's (args, ctx) signature: ctx = {question, env, safe, selector, io, call, agent, statusSet}", file: "lib/agent.js", members: { class: "Agent", names: ["_toolContext", "toolContext"] } },
       { label: "REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx)", file: "lib/agent/tool-exec.js", symbols: ["callToolFor"] },
       { label: "REQUIRES — a worked example: an interactive tool (`interactive: true`) using ctx.question.ask", file: "tools/question.js", moduleDoc: true },
       { label: "REQUIRES — the forked worker's REDUCED ctx: {question: null, env} only — no `call`, no `agent`", file: "lib/agent/tool-worker.js", moduleDoc: true },
@@ -114,10 +119,10 @@ const CONTRACTS = [
   {
     name: "Agent identity and delegation metadata",
     sources: [
-      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "createChild", "childAdd", "childRemove", "name", "description", "spawnPermission", "setSpawnPermission"] } },
-      { label: "Env.createAgent installation at the Agent/Env composition boundary", file: "lib/agent.js", moduleDoc: true },
-      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent"] } },
-      { file: "lib/env/events.js", symbols: ["ENV_EVENT"] },
+      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "nameSet", "description", "descriptionSet", "spawnPermission", "spawnPermissionSet"] } },
+      { label: "Env plugins: how a higher layer installs its Env members (Env.extend)", file: "lib/env/extend.js", moduleDoc: true },
+      { label: "Agent's Env plugin: the active-Agent registry, agentCreate, capacity, AGENT_* events", file: "lib/agent/env-plugin.js", moduleDoc: true },
+      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend"] } },
     ],
   },
   {
@@ -128,27 +133,20 @@ const CONTRACTS = [
     ],
   },
   {
-    name: "Agent-owned tool timeout policy",
+    name: "Agent policy — settings resolved once per Agent (context guard, retries, tool timeouts)",
     sources: [
-      { file: "lib/env/tool-timeout.js", moduleDoc: true, symbols: ["DEFAULT_TOOL_TIMEOUT", "DEFAULT_TOOL_TIMEOUT_LIMIT", "TOOL_ON_TIMEOUT_LIMIT"] },
-      { file: "lib/agent/tool-timeout.js", moduleDoc: true, symbols: ["prepareToolTimeout", "runWithToolTimeout"] },
-      { file: "lib/env.js", members: { class: "Env", names: ["toolTimeout", "toolTimeoutLimit"] } },
-    ],
-  },
-  {
-    name: "Agent-owned runaway guard — context-usage caps, settable",
-    sources: [
-      { file: "lib/env/context-guard.js", moduleDoc: true, symbols: ["DEFAULT_CONTEXT_GUARD_CAP", "DEFAULT_CONTEXT_GUARD_TURN_CAP", "configuredContextGuardCap", "configuredContextGuardTurnCap"] },
+      { file: "lib/agent/policy.js", moduleDoc: true, symbols: ["POLICY_SETTINGS", "agentPolicy", "retryDelay"] },
+      { label: "agent.policy", file: "lib/agent.js", members: { class: "Agent", names: ["policy"] } },
       { file: "lib/agent/run.js", symbols: ["contextGuardTrip"] },
-      { file: "lib/env.js", members: { class: "Env", names: ["contextGuardCap", "contextGuardTurnCap"] } },
+      { file: "lib/agent/tool-timeout-settings.js", moduleDoc: true, symbols: ["DEFAULT_TOOL_TIMEOUT", "DEFAULT_TOOL_TIMEOUT_LIMIT", "TOOL_ON_TIMEOUT_LIMIT"] },
+      { file: "lib/agent/tool-timeout.js", moduleDoc: true, symbols: ["prepareToolTimeout", "runWithToolTimeout"] },
     ],
   },
   {
-    name: "IO-failure retries and endpoint token-depletion — settable",
+    name: "Request-failure retries and endpoint token-depletion",
     sources: [
-      { file: "lib/env/reliability.js", moduleDoc: true, symbols: ["DEFAULT_MAX_ATTEMPTS", "DEFAULT_RETRY_BASE", "DEFAULT_RETRY_MAX", "RETRYABLE_KINDS", "configuredMaxAttempts", "retryDelay", "awaitTimeout"] },
-      { file: "lib/env/provider.js", symbols: ["depletionError"] },
-      { file: "lib/env.js", members: { class: "Env", names: ["maxAttempts", "retryDelay"] } },
+      { file: "lib/agent/reliability.js", moduleDoc: true, symbols: ["RETRYABLE_KINDS", "awaitTimeout"] },
+      { file: "lib/io/provider-error.js", symbols: ["depletionError"] },
     ],
   },
   {
@@ -161,9 +159,10 @@ const CONTRACTS = [
     ],
   },
   {
-    name: "Endpoint/auth entity",
+    name: "Model catalog — endpoint/model pairs, their caps and capacity",
     sources: [
-      { file: "lib/env.js", members: { class: "Env", names: ["endpointSettings", "refreshEndpointSettings", "authSet", "saveEndpoint"] } },
+      { file: "lib/env/models.js", moduleDoc: true },
+      { file: "lib/env.js", members: { class: "Env", names: ["models", "connection"] } },
       { file: "settings.json", example: true },
     ],
   },
@@ -658,7 +657,7 @@ const TOOL_FLAGS = {
  */
 export async function collectToolCatalog(dir = join(ROOT, "tools")) {
   await import("../lib/env.js"); // the global tool wrappers stamp with
-  const { isToolModuleFile } = await import("../lib/env.js"); // the public façade (never lib privates)
+  const { isToolModuleFile } = await import("../lib/env/tools.js"); // Env's own tool-module predicate (private to Env)
   const folder = resolve(dir); // imports need absolute file URLs
   const missing = [];
   const tools = [];
@@ -725,8 +724,8 @@ export async function collectToolCatalog(dir = join(ROOT, "tools")) {
  * AUTO-DETECT the DEFAULTS SCHEMA (lib/env/settings-schema.js): a
  * package-scoped Env loads ONLY the package's own tools/ (never
  * configured tool roots — this must build identically on every
- * machine) and env.defaultsSchema() is collected verbatim, so a
- * tool's own contributed key (tools/mcp.js's `mcp`) appears exactly
+ * machine) and env.settingsSchema() is collected verbatim, so a
+ * tool's own contributed key (tools/read.js's `read`) appears exactly
  * as it would at runtime. Each entry keeps its complete schema so
  * renderers can expose it on demand instead of expanding nested
  * defaults (such as themes) into the page.
@@ -734,17 +733,28 @@ export async function collectToolCatalog(dir = join(ROOT, "tools")) {
  */
 export async function collectSettingsSchema() {
   const { Env } = await import("../lib/env.js");
-  const env = new Env();
-  await env.loadTools({ dirs: [join(ROOT, "tools")] });
-  const schema = env.defaultsSchema();
-  const entries = Object.entries(schema)
-    .map(([key, setting]) => ({
-      key,
-      description: String(setting?.description ?? ""),
-      schema: setting ?? {},
-    }))
-    .sort((a, b) => a.key.localeCompare(b.key));
-  return { contract: { name: "Settings defaults schema — top-level keys (auto-detected)", entries } };
+  await import("../lib/agent.js"); // Env plugins contribute their settings (Env.extend)
+  // No host settings, project config, or credentials may enter generated docs.
+  const isolated = mkdtempSync(join(ROOT, "ai-tmp", "api-settings-"));
+  const env = new Env({ dir: isolated, cwd: isolated, settingsDir: null });
+  try {
+    const core = JSON.parse(JSON.stringify(env.settings));
+    await toolsLoad(env, { dirs: [join(ROOT, "tools")] });
+    const schema = env.settingsSchema();
+    const entries = Object.entries(schema)
+      .map(([key, setting]) => ({
+        key,
+        description: String(setting?.description ?? ""),
+        schema: setting ?? {},
+        value: env.settings[key],
+        coreDefault: core[key],
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+    return { contract: { name: "Settings defaults schema — top-level keys (auto-detected)", entries } };
+  } finally {
+    env.close();
+    rmSync(isolated, { recursive: true, force: true });
+  }
 }
 
 /** Compact parameter summary of a tool's inputSchema: name (required marked), type. */
@@ -910,24 +920,27 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   return { layers, executables, connectors };
 }
 
-/** Methods installed on another exported class prototype at a composition
- * boundary (`Object.defineProperty(Env.prototype, "createAgent", …)`). */
-function installedPrototypeMembers(src) {
+/** Members a layer installs on another public class after the fact — an
+ * Env plugin: `Env.extend({ methods: {…}, getters: {…}, events: […] })`
+ * (lib/env/extend.js). Each member keeps its JSDoc from the plugin source. */
+function installedPluginMembers(src) {
   const members = [];
-  const re = /Object\.defineProperty\(([\w$]+)\.prototype,\s*["']([\w$]+)["'],\s*\{/g;
-  for (const m of src.matchAll(re)) {
-    const open = src.indexOf("{", m.index + m[0].length - 1);
-    const body = src.slice(open + 1, blockEnd(src, open));
-    const value = /\bvalue\s*\(([^)]*)\)\s*\{/.exec(body);
-    if (!value) continue;
-    members.push({
-      owner: m[1],
-      member: {
-        name: m[2], kind: "method", async: false,
-        signature: `${m[2]}(${compactParams(value[1])})`,
-        doc: docBefore(src, m.index),
-      },
-    });
+  for (const m of src.matchAll(/\b([A-Z][\w$]*)\.extend\(\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const plugin = src.slice(open + 1, blockEnd(src, open));
+    for (const [key, kind] of [["methods", "method"], ["getters", "getter"]]) {
+      const block = new RegExp(`^\\s*${key}:\\s*\\{`, "m").exec(plugin);
+      if (!block) continue;
+      const blockOpen = block.index + block[0].length - 1;
+      for (const member of frozenObjectMembers(plugin.slice(blockOpen + 1, blockEnd(plugin, blockOpen)))) {
+        members.push({
+          owner: m[1],
+          member: kind === "getter"
+            ? { ...member, kind, signature: `get ${member.signature}` }
+            : member,
+        });
+      }
+    }
   }
   return members;
 }
@@ -969,9 +982,14 @@ export async function collect(modules = PUBLIC_MODULES) {
       exports: mod.exports.map((e) => ({ ...e, from: e.from.startsWith(ROOT) ? e.from.slice(ROOT.length) : e.from })),
     };
   });
-  for (const { file } of modules) {
-    const sourceFile = join(ROOT, file);
-    for (const installed of installedPrototypeMembers(readFileSync(sourceFile, "utf8"))) {
+  // A public module's own folder (lib/<module>/) may hold its plugins.
+  const moduleFiles = (file) => {
+    const folder = join(ROOT, file.replace(/\.js$/, ""));
+    const own = existsSync(folder) ? readdirSync(folder).filter((name) => name.endsWith(".js")).sort().map((name) => join(folder, name)) : [];
+    return [join(ROOT, file), ...own];
+  };
+  for (const sourceFile of modules.flatMap(({ file }) => moduleFiles(file))) {
+    for (const installed of installedPluginMembers(readFileSync(sourceFile, "utf8"))) {
       const ownerModule = collectedModules.find((mod) => mod.exports.some((symbol) => symbol.kind === "class" && symbol.name === installed.owner));
       const owner = ownerModule?.exports.find((symbol) => symbol.kind === "class" && symbol.name === installed.owner);
       if (owner && !owner.members.some((member) => member.name === installed.member.name)) {

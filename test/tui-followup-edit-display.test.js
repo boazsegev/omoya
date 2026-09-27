@@ -15,7 +15,7 @@ for (const mode of ["inline", "alt"]) {
     const root = env.cwd;
     const path = "sample.txt";
     await writeFile(`${root}/${path}`, "OLD CONTENT\n");
-    env.registerTool("edit", edit, { description: "edit fixture", interactive: true, inputSchema: { type: "object" } });
+    env.toolAdd("edit", edit, { description: "edit fixture", interactive: true, inputSchema: { type: "object" } });
     let release;
     const held = new Promise((resolve) => { release = resolve; });
     let nextStarted;

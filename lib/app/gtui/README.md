@@ -82,7 +82,7 @@ const app = {
 
 - `GTUI.view` — nodes and controls (§4).
 - `GTUI.effect` — `task(key, run)`, `cancel(key)`, `after(ms, message)`, `copy(text)`, `open(url)`, `notify(text)` (host-level OSC notification, never visible screen text), `refresh()`, `quit(code)`.
-- `GTUI.event` — constructors/guards for the reserved message types hosts emit: `key`, `paste`, `pointer`, `resize`, `focus`, `input.change`, `input.submit`, `menu.select`, `menu.cancel`, `selection.copy`, `task.done`, `task.failed`, `copy.done`. App messages use any other `type`.
+- `GTUI.event` — constructors/guards for the reserved message types hosts emit: `key`, `paste`, `pointer`, `resize`, `focus`, `input.change`, `input.submit`, `menu.select`, `menu.cancel`, `action.select`, `toolbar.change`, `selection.copy`, `task.done`, `task.failed`, `copy.done`. App messages use any other `type`.
 - `GTUI.host` — `terminal({ input, output, mode, title? })` and `memory({ width, height })`. Hosts are opaque; `memory` adds `send(event)`, `flush()`, `snapshot()` (lines + role spans + focus/caret, no ANSI) and a recorded `effects` list for app tests.
 - `GTUI.keybindings.create(name, strings)` — creates an immutable, reusable named routing context with sixteen null-prototype modifier tables. The terminal's normalized string key codes route directly; absent entries are false. Legacy string arrays remain accepted by `bindings`.
 
@@ -107,6 +107,7 @@ const app = {
 | `overlay` | modal layer; captures focus and keys except app `bindings`; `fill: true` gives its child the centered 80% × 90% safe area |
 | `input` | **controlled** text control (below); `cursor: { shape: "line"|"underline"|"block"|number, blinkMs }` defaults to a line cursor with a 450 ms half-period |
 | `menu` | **controlled** list: items `{ id, label, hint, children }`, filter query, highlight window; emits `menu.select`/`menu.cancel` |
+| `toolbar(props, buttons)` | **controlled** one-line row of `button(props, label)`s (`{ action, id?, icon?, pressed?, tone?, priority? }`). Tight space drops whole buttons, lowest `priority` first; `align: "end"` keeps the rest right-aligned. The app owns `focus`; GTUI owns the roving button: while focused, ←/→ Tab/Shift+Tab (wrapping) and Home/End move it (`toolbar.change { id, key, action }`), Enter/Space and clicks emit `action.select { id, action }`, and every other key bubbles to `update` — leaving the toolbar is app policy. Roles: `button`, `button.on` (`pressed`), `button.<tone>`, `button.focus`, `button.hover`. |
 
 **Controlled controls.** The host owns editing mechanics and geometry: caret movement, word ops, wrapping, vertical movement across wrapped rows, selection, scroll window, completion-list layout, hit-testing, and cursor timing. The app owns the value and policy: it receives `input.change { id, value, caret, selection }` and `input.submit`, and supplies `completions` content and an optional `placeholder` (muted text shown only while the value is empty). Keys the control cannot use (e.g. Up on the first visual row) bubble to `update` as `key` — that is how history works without the app knowing rows.
 
@@ -116,7 +117,7 @@ const app = {
 
 **Input history:** every GTUI input has a host-owned, 20-state undo/redo stream. Consecutive updates that only insert one non-whitespace grapheme (with unchanged prefix and optional postfix) share an undo state, stretching word entry beyond that limit. `Ctrl+Z` (or terminal-reported `Meta+Z`) restores the prior value/caret/selection, `Ctrl+Shift+Z` (or `Shift+Meta+Z`) redoes it, a new edit after undo clears the redo branch, and submission clears both streams.
 
-**Pointer:** events carry a resolved target — `{ kind, target: id, index }` — never x/y or columns. Input/menu clicks and scroll-wheel events are implemented. There is exactly ONE primed selection at a time, whatever the gesture: a mouse press in an input sets its caret and clears any mounted text selection, a mouse drag over an input selects through the same `input.change { selection }` the keyboard's Shift-moves use, and a mouse drag over selectable text emits `selection.change { text }` so the app's Copy key — the same key that copies an input keyboard selection — copies it (`selection.copy` remains GTUI's own immediate-copy gesture; both feed the same copy effect). Input keyboard selections copy in logical source order; Block View copies a complete source block with `c`, which is the reliable alt-screen path. With terminal-inline `mouse: "always"`, selectable transcript text also supports managed source-range drag selection; `"overlays"` (the inline default) leaves terminal-native selection and scrolling available, and `"off"` captures no pointer input. Native terminal copying selects physical rendered cells, including any borders or decoration; GTUI cannot filter that terminal-owned clipboard selection.
+**Pointer:** events carry a resolved target — `{ kind, target: id, index }` — never x/y or columns. Input/menu/toolbar clicks and scroll-wheel events are implemented; pointer motion highlights a hovered link or button as one unit. There is exactly ONE primed selection at a time, whatever the gesture: a mouse press in an input sets its caret and clears any mounted text selection, a mouse drag over an input selects through the same `input.change { selection }` the keyboard's Shift-moves use, and a mouse drag over selectable text emits `selection.change { text }` so the app's Copy key — the same key that copies an input keyboard selection — copies it (`selection.copy` remains GTUI's own immediate-copy gesture; both feed the same copy effect). Input keyboard selections copy in logical source order; Block View copies a complete source block with `c`, which is the reliable alt-screen path. With terminal-inline `mouse: "always"`, selectable transcript text also supports managed source-range drag selection; `"overlays"` (the inline default) leaves terminal-native selection and scrolling available (reporting only while an overlay, a completion list, or a keyboard-focused toolbar is shown), and `"off"` captures no pointer input. Native terminal copying selects physical rendered cells, including any borders or decoration; GTUI cannot filter that terminal-owned clipboard selection.
 
 ## 5. Modes (terminal host)
 
@@ -132,7 +133,7 @@ Both: never write a pending-wrap final column, reset SGR at every style boundary
 
 ## 6. Themes
 
-- **GTUI owns the mechanism**: token lookup with fallback to `text`, generic control tokens (`text`, `muted`, `accent`, `error`, `border`, `border.active`, `selection`, `input.*`, `completion.*`, `menu.*`, `overlay.*`), style values `{ fg, bg, bold, dim, italic, underline, reverse, strike }` with colors `ansi:<0-255>` | `#rrggbb` | `default`, and `{ dark, light }` variants picked from host capability (unknown → no subtle background, as `theme.js` does today).
+- **GTUI owns the mechanism**: token lookup with fallback to `text`, generic control tokens (`text`, `muted`, `accent`, `error`, `border`, `border.active`, `selection`, `input.*`, `completion.*`, `menu.*`, `overlay.*`), `button.*`, style values `{ fg, bg, bold, dim, italic, underline, reverse, strike }` with colors `ansi:<0-255>` | `#rrggbb` | `default`, and `{ dark, light }` variants picked from host capability (unknown → no subtle background, as `theme.js` does today).
 - **Animations are declarative**: tokens may name a generic animation (`comet` head/tail/nose stops + length ratio + crossing time + mirror; `wave` text crest; `flash` period). A node with `active: true` animates on the host clock; a GUI host may use native animation.
 - **`lib/app/tui` owns ai roles** (`message.user`, `status.identity`, …), the default theme and settings parsing (`tui.theme`, `tui.themes`). The default theme uses the exact legacy palette indices so terminal bytes match.
 
@@ -157,7 +158,7 @@ Cells/buffers, diff, ANSI emit/parse, key/mouse/paste decoding, raw mode, cursor
 - Foreign terminal-owning loops: `runMenu`/`runPager` `{write, keys}` loops, `app-keyfeed.js` pause/resume, `session.pause()`.
 - App shape leaking into the runtime: a former driver reading `model().overlay`, `inlineFrame`, `inlineReset`, `invalidate()`, `cursorWidth` from settings.
 - Blocking effects: `await program.runCmds()` before paint froze rendering for a whole streaming turn.
-- Apps emitting SGR strings that the runtime parses back (`writeAnsiRow`).
+- Apps emitting SGR strings that the runtime parses back.
 
 ## 10. Migration rule
 

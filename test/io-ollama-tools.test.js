@@ -3,17 +3,17 @@
 // shape (required by the file-read smoke test).
 import { describe, expect, test } from "bun:test";
 import OllamaPlugin from "../providers/ollama.js";
-import { defineProvider } from "../lib/io.js";
+import { providerClass } from "./fakes.js";
 
-const Ollama = defineProvider(OllamaPlugin, { name: "ollama" });
+const Ollama = await providerClass(OllamaPlugin, "ollama");
 const connector = (aiio = {}) => new Ollama(aiio.url, aiio);
 const ollama = {
   context2msg: (context, aiio) => connector(aiio).context2msg(context, aiio),
   msg2events: (message, state, aiio) => connector(aiio).msg2events(message, state, aiio),
 };
-import { createAssembler } from "../lib/context.js";
+import { assemblerCreate } from "../lib/context.js";
 
-const aiio = { currentModel: "m", settings: {}, tools: () => [] };
+const aiio = { modelCurrent: "m", settings: {}, tools: () => [] };
 
 describe("Ollama thinking: wire -> normalized shape", () => {
   test("message.thinking frames become thinking events at block 0; text follows at 1", () => {
@@ -37,7 +37,7 @@ describe("Ollama thinking: wire -> normalized shape", () => {
     expect(e4.at(-1)).toMatchObject({ type: "done" });
 
     // the assembled message holds the thinking block at 0, text at 1
-    const assembler = createAssembler();
+    const assembler = assemblerCreate();
     for (const e of [...e1, ...e2, ...e3, ...e4]) assembler.consume(e);
     expect(assembler.message().content).toEqual([
       { type: "thinking", text: "hmm..." },
@@ -53,16 +53,16 @@ describe("Ollama thinking: wire -> normalized shape", () => {
       state,
     );
     expect(events[0]).toMatchObject({ type: "thinking_end", contentIndex: 0 });
-    expect(events[1]).toMatchObject({ type: "toolcall_start", contentIndex: 1 });
+    expect(events[1]).toMatchObject({ type: "tool_call_start", contentIndex: 1 });
   });
 
   test("the think request option passes from settings into the body", () => {
-    const withThink = { currentModel: "m", settings: { think: "low" }, tools: () => [] };
+    const withThink = { modelCurrent: "m", settings: { think: "low" }, tools: () => [] };
     const [, body] = ollama.context2msg([], withThink);
     expect(body.think).toBe("low");
-    const off = { currentModel: "m", settings: { think: false }, tools: () => [] };
+    const off = { modelCurrent: "m", settings: { think: "none" }, tools: () => [] };
     expect(ollama.context2msg([], off)[1].think).toBe(false);
-    const plain = { currentModel: "m", settings: {}, tools: () => [] };
+    const plain = { modelCurrent: "m", settings: {}, tools: () => [] };
     expect("think" in ollama.context2msg([], plain)[1]).toBe(false);
   });
 });
@@ -82,13 +82,13 @@ describe("Ollama tool calls: wire -> normalized shape", () => {
     );
     expect(events).toEqual([
       {
-        type: "toolcall_start",
+        type: "tool_call_start",
         contentIndex: 0,
         callId: "ollama-1",
         name: "file-read",
         arguments: { path: "./a.txt" },
       },
-      { type: "toolcall_end", contentIndex: 0, arguments: { path: "./a.txt" } },
+      { type: "tool_call_end", contentIndex: 0, arguments: { path: "./a.txt" } },
     ]);
   });
 
@@ -107,7 +107,7 @@ describe("Ollama tool calls: wire -> normalized shape", () => {
       },
       {},
     );
-    const starts = events.filter((e) => e.type === "toolcall_start");
+    const starts = events.filter((e) => e.type === "tool_call_start");
     expect(starts.map((e) => e.callId)).toEqual(["ollama-1", "ollama-2"]);
     expect(starts.map((e) => e.contentIndex)).toEqual([0, 1]);
   });
@@ -120,12 +120,12 @@ describe("Ollama tool calls: wire -> normalized shape", () => {
       state,
     );
     expect(events[0]).toMatchObject({ type: "text_end", contentIndex: 0 }); // text closes first
-    expect(events[1]).toMatchObject({ type: "toolcall_start", contentIndex: 1 });
+    expect(events[1]).toMatchObject({ type: "tool_call_start", contentIndex: 1 });
   });
 
   test("assembled toolCall block replays arguments as an object", () => {
     const state = {};
-    const assembler = createAssembler();
+    const assembler = assemblerCreate();
     for (const frame of [
       { message: { role: "assistant", content: "", tool_calls: [{ function: { name: "file-read", arguments: { path: "./x" } } }] }, done: false },
       { message: { role: "assistant", content: "" }, done: true, prompt_eval_count: 1, eval_count: 1 },

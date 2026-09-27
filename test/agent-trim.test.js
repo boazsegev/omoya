@@ -4,7 +4,7 @@
 // whitespace-only submission is no turn at all — it behaves exactly
 // like /continue (no user message enters the context, the existing
 // context runs). lib/agent/trim-user.js owns the transformation;
-// enqueue() and the run loop (lib/agent/run.js) own the two call
+// send() and the run loop (lib/agent/run.js) own the two call
 // sites.
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
@@ -15,10 +15,10 @@ describe("Agent user-message trimming", () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
-    agent.enqueue(USER("  hello agent \t\r\n"));
+    agent.send(USER("  hello agent \t\r\n"));
     await agent.run();
     expect(io.writes[0].context).toEqual([USER("hello agent")]);
-    expect(agent.context).toEqual([
+    expect(agent.context.messages()).toEqual([
       USER("hello agent"),
       { type: 3, content: [{ type: "text", text: "answer" }] },
     ]);
@@ -28,13 +28,13 @@ describe("Agent user-message trimming", () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "continued"), { type: "done" }]]);
     const agent = new Agent({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
-    const result = agent.enqueue(USER(" \t\n\r\n "));
-    expect(result).toBeNull(); // nothing was queued
+    const result = agent.send(USER(" \t\n\r\n "));
+    expect(result).toBeInstanceOf(Promise); // nothing was queued, but the turn runs
     await agent.run();
     // exactly ONE request over the existing context — no empty user turn
     expect(io.writes).toHaveLength(1);
     expect(io.writes[0].context).toEqual([USER("prior")]);
-    expect(agent.context).toEqual([
+    expect(agent.context.messages()).toEqual([
       USER("prior"),
       { type: 3, content: [{ type: "text", text: "continued" }] },
     ]);
@@ -44,10 +44,10 @@ describe("Agent user-message trimming", () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
     const agent = new Agent({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
-    agent.append(USER("\n\t  \n")); // bypasses enqueue()'s trim
+    agent.context.append(USER("\n\t  \n")); // bypasses send()'s trim
     await agent.run();
     expect(io.writes[0].context).toEqual([USER("prior")]);
-    expect(agent.context.some((m) => m.type === 2 && m.content.length === 0)).toBe(false);
+    expect(agent.context.messages().some((m) => m.type === 2 && m.content.length === 0)).toBe(false);
   });
 
   test("the sweep removes every empty MESSAGE but never a metadata record", async () => {
@@ -64,8 +64,8 @@ describe("Agent user-message trimming", () => {
       createIO: () => io,
     });
     await agent.run();
-    expect(agent.context.some((m) => typeof m.type === "number" && m.content.length === 0)).toBe(false);
-    expect(agent.context.some((m) => m.type === "note-store")).toBe(true); // the record stayed put
+    expect(agent.context.messages().some((m) => typeof m.type === "number" && m.content.length === 0)).toBe(false);
+    expect(agent.context.messages().some((m) => m.type === "note-store")).toBe(true); // the record stayed put
   });
 
   test("trailing whitespace-only text blocks drop out; attachment blocks keep the message", async () => {
@@ -79,7 +79,7 @@ describe("Agent user-message trimming", () => {
       ],
     };
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
-    agent.enqueue(attached);
+    agent.send(attached);
     await agent.run();
     // the whitespace text block dropped out; the attachment survives
     expect(io.writes[0].context).toEqual([{
@@ -96,7 +96,7 @@ describe("Agent user-message trimming", () => {
     ]);
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
-    agent.enqueue(USER("  queued \n"));
+    agent.send(USER("  queued \n"));
     await run;
     expect(io.writes[1].context).toEqual([
       USER("go"),

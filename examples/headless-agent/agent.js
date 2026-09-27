@@ -92,18 +92,14 @@ agent.onEvent(E.TOOL_EXECUTE, ({ name }) => {
   console.error(`[tool] ${name}`);
 });
 
-agent.onEvent(E.ERROR, ({ error, kind }) => {
+agent.onEvent(E.REQUEST_ERROR, ({ error, kind }) => {
   fail(`provider error${kind ? ` (${kind})` : ""}: ${error ?? "unknown"}`);
 });
 
 // --- Run --------------------------------------------------------------------
 
-// enqueue() appends a user message built with the public Context helpers and,
-// because the agent is idle, starts the turn immediately. run() returns the
-// promise for the terminal done/error event; awaiting it bounds the script's
-// lifetime to the turn.
-agent.enqueue(Agent.Context.userMessage(PROMPT));
-const terminal = await agent.run();
+// send() starts the idle turn and resolves to its terminal done/error event.
+const terminal = await agent.send(Agent.Context.messageUser(PROMPT));
 
 // Deliberate example output: the provider-reported usage envelope, when any.
 if (terminal?.usage) {

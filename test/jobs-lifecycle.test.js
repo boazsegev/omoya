@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import { initializeJobs, disableJobs, validateJobsActivation } from "../lib/jobs/lifecycle.js";
-import { jobsPaths, dispatchJobs, scheduleJobs, jobsStatus } from "../lib/jobs.js";
+import { jobsPaths } from "../lib/jobs/paths.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
+import { scheduleJobs } from "../lib/jobs/operations.js";
+import { jobsStatus } from "../lib/jobs/status.js";
 const roots = [];
 async function fixture() { const root = await fs.realpath(await fs.mkdtemp("./ai-tmp/jobs-life-")); roots.push(root); return root; }
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });

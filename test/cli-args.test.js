@@ -2,29 +2,31 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { Env } from "../lib/env.js";
-import { listModelCandidates, readLastCombo, resolveModelCombo, selectEndpointModel, writeLastCombo } from "../lib/cli.js";
+import { listModelCandidates, readLastCombo, resolveModelCombo, selectEndpointModel } from "../lib/cli.js";
+import { authSetOf, detect, dynamic, endpointOf, lastPair, providerAdd, remember } from "./env-internals.js";
 
-async function comboEnv() {
+/** Two wire endpoints over one stub provider; `collect` runs Env's
+ *  background model collection (Env.create) and awaits its first pass. */
+async function comboEnv({ collect = false } = {}) {
   const dir = mkdtempSync("./ai-tmp/cli-args-");
-  const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {
+  const liveCalls = [];
+  class Wire {
+    static provider = {};
+    static async models(options) {
+      liveCalls.push(options);
+      return { "live-1": null, "live-2": null };
+    }
+  }
+  const options = { dir, cwd: dir, settingsDir: dir, providers: { wire: Wire }, settings: {
     providers: {
       fake: { provider: "wire", url: "http://fake" },
       fake2: { provider: "wire", url: "http://fake2" },
     },
     fake: { models: { shared: null, "cached-1": null } },
     fake2: { models: { shared: null, "ns/lyricist:latest": null } },
-  } });
-  const liveCalls = [];
-  class Wire {
-    static provider = {};
-    constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-    async models() {
-      liveCalls.push(this.aiio);
-      return { "live-1": null, "live-2": null };
-    }
-    async close() {}
-  }
-  env.registerProvider("wire", Wire);
+  } };
+  const env = collect ? await Env.create(options, { tools: false, detect: false }) : new Env(options);
+  await env.modelsReady;
   return { env, liveCalls };
 }
 
@@ -41,11 +43,17 @@ describe("resolveModelCombo", () => {
     expect(await resolveModelCombo("ns/lyricist:latest", env)).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
   });
 
-  test("an endpoint alone refreshes its models and empty suffix means endpoint alone", async () => {
-    const { env, liveCalls } = await comboEnv();
+  test("an endpoint alone takes its first collected model; an empty suffix means endpoint alone", async () => {
+    const { env, liveCalls } = await comboEnv({ collect: true });
+    expect(liveCalls).toHaveLength(2); // the background collection asked each endpoint once
     expect(await resolveModelCombo("fake2", env)).toEqual({ endpoint: "fake2", model: "live-1" });
     expect(await resolveModelCombo("fake2/", env)).toEqual({ endpoint: "fake2", model: "live-1" });
-    expect(liveCalls).toHaveLength(2);
+    expect(liveCalls).toHaveLength(2); // selection reads the catalog, never drives a refresh
+  });
+
+  test("without collection an endpoint alone takes its first cached model", async () => {
+    const { env } = await comboEnv();
+    expect(await resolveModelCombo("fake2", env)).toEqual({ endpoint: "fake2", model: "shared" });
   });
 
   test("an unknown model remains bare and malformed input is rejected", async () => {
@@ -59,17 +67,18 @@ describe("resolveModelCombo", () => {
 describe("selectEndpointModel: explicit provider with invocation-only URL", () => {
   test("keeps suffixes without persisting an endpoint configuration", async () => {
     const { env } = await comboEnv();
-    expect(env.endpoint("wire")).toBeUndefined();
+    expect(endpointOf(env, "wire")).toBeUndefined();
 
     expect(await selectEndpointModel(env, { model: "wire/m", url: "http://temporary" }))
       .toEqual({ endpoint: "wire", model: "m" });
     expect(await selectEndpointModel(env, { model: "wire/org/model", url: "http://temporary" }))
       .toEqual({ endpoint: "wire", model: "org/model" });
-    expect(existsSync(`${env.dir}/last-model.json`)).toBe(false);
+    expect(existsSync(`${env._dir}/last-model.json`)).toBe(false);
   });
 
   test("an empty suffix remains endpoint-only selection", async () => {
     const { env } = await comboEnv();
+    // an invocation-only endpoint (an in-memory login): its list is fetched on demand
     expect(await selectEndpointModel(env, { model: "wire/", url: "http://temporary" }))
       .toEqual({ endpoint: "wire", model: "live-1" });
   });
@@ -78,8 +87,8 @@ describe("selectEndpointModel: explicit provider with invocation-only URL", () =
 describe("published model candidates", () => {
   test("contain public endpoint/model forms but omit secret entries", async () => {
     const { env } = await comboEnv();
-    env.endpoints.hidden = { provider: "wire", url: "test://hidden", secret: true };
-    env.authSet("hidden", { models: { "hidden-model": null } });
+    env._endpoints.hidden = { provider: "wire", url: "test://hidden", secret: true };
+    authSetOf(env, "hidden", { models: { "hidden-model": null } });
     const candidates = listModelCandidates(env);
     expect(candidates).toEqual(expect.arrayContaining(["fake", "fake2", "shared", "fake/cached-1", "fake2/ns/lyricist:latest"]));
     expect(candidates.join(" ")).not.toContain("hidden");
@@ -87,34 +96,70 @@ describe("published model candidates", () => {
 });
 
 describe("last-used endpoint/model persistence", () => {
-  test("round-trips an endpoint/model pair and skips identical writes", async () => {
+  test("round-trips an endpoint/model pair and refreshes its timestamp", async () => {
     const { env } = await comboEnv();
     expect(readLastCombo(env)).toBeNull();
-    writeLastCombo(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
+    remember(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
     expect(readLastCombo(env)).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
-    expect(JSON.parse(readFileSync(`${env.dir}/last-model.json`, "utf8"))).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
-    const { statSync } = await import("node:fs");
-    const before = statSync(`${env.dir}/last-model.json`).mtimeMs;
-    writeLastCombo(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
-    expect(statSync(`${env.dir}/last-model.json`).mtimeMs).toBe(before);
+    const entries = JSON.parse(readFileSync(`${env._dir}/last-model.json`, "utf8"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ endpoint: "fake2", model: "ns/lyricist:latest" });
+    expect(Number.isNaN(Date.parse(entries[0].ts))).toBe(false);
+    // a repeated selection refreshes the timestamp instead of duplicating
+    remember(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
+    const again = JSON.parse(readFileSync(`${env._dir}/last-model.json`, "utf8"));
+    expect(again).toHaveLength(1);
+    expect(Date.parse(again[0].ts)).toBeGreaterThanOrEqual(Date.parse(entries[0].ts));
+  });
+
+  test("startup walks history when endpoints disappear or return", async () => {
+    const { env } = await comboEnv();
+    let isDetected = true;
+    class AmbientWire {
+      static provider = {};
+      static async detect() {
+        return isDetected ? {
+          ambient: { provider: "ambientwire", url: "http://ambient", dynamic: true, models: { "ambient-m": null } },
+        } : {};
+      }
+    }
+    providerAdd(env, "ambientwire", AmbientWire);
+    await detect(env);
+    expect(dynamic(env, "ambient")).toBe(true);
+    writeFileSync(`${env._dir}/last-model.json`, JSON.stringify([
+      { endpoint: "removed", model: "old-m", ts: "2026-09-28T12:00:00.000Z" },
+      { endpoint: "ambient", model: "ambient-m", ts: "2026-09-28T11:00:00.000Z" },
+      { endpoint: "fake2", model: "ns/lyricist:latest", ts: "2026-09-28T10:00:00.000Z" },
+    ]));
+    expect(lastPair(env)).toEqual({ endpoint: "ambient", model: "ambient-m" });
+    await expect(selectEndpointModel(env, {}, { lastUsed: true }))
+      .resolves.toEqual({ endpoint: "ambient", model: "ambient-m" });
+    isDetected = false;
+    await detect(env);
+    await expect(selectEndpointModel(env, {}, { lastUsed: true }))
+      .resolves.toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
+    isDetected = true;
+    await detect(env);
+    await expect(selectEndpointModel(env, {}, { lastUsed: true }))
+      .resolves.toEqual({ endpoint: "ambient", model: "ambient-m" });
   });
 
   test("Env treats an unavailable last model exactly like a missing file", async () => {
     const { env } = await comboEnv();
-    expect(env.lastModel()).toBeNull();
-    writeFileSync(`${env.dir}/last-model.json`, JSON.stringify({ endpoint: "fake", model: "removed" }));
-    expect(env.lastModel()).toBeNull();
+    expect(lastPair(env)).toBeNull();
+    writeFileSync(`${env._dir}/last-model.json`, JSON.stringify({ endpoint: "fake", model: "removed" }));
+    expect(lastPair(env)).toBeNull();
     expect(readLastCombo(env)).toBeNull();
     await expect(selectEndpointModel(env, {}, { lastUsed: true })).resolves.toEqual({ endpoint: undefined, model: undefined });
   });
 
   test("does not persist model-only records and ignores a record without an endpoint", async () => {
     const { env } = await comboEnv();
-    writeFileSync(`${env.dir}/last-model.json`, JSON.stringify({ model: "m1" }));
+    writeFileSync(`${env._dir}/last-model.json`, JSON.stringify({ model: "m1" }));
     expect(readLastCombo(env)).toBeNull(); // invalid state behaves exactly like no saved selection
-    writeFileSync(`${env.dir}/last-model.json`, "");
-    writeLastCombo(env, { model: "m1" });
-    expect(existsSync(`${env.dir}/last-model.json`)).toBe(true); // existing file is never deleted
+    writeFileSync(`${env._dir}/last-model.json`, "");
+    remember(env, { model: "m1" });
+    expect(existsSync(`${env._dir}/last-model.json`)).toBe(true); // existing file is never deleted
     expect(readLastCombo(env)).toBeNull();
   });
 });

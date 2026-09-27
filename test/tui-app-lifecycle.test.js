@@ -7,8 +7,10 @@
 // of those commands silently no-op'd through the router's own graceful
 // fallback text).
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { GTUI } from "../lib/app/gtui/gtui.js";
-import { Agent, SessionStore } from "../lib/agent.js";
+import { Agent } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createApp, msg } from "../lib/app/tui/app.js";
 import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
@@ -59,7 +61,7 @@ describe("TUI agent navigation", () => {
   test("Alt+Ctrl+Up switches a child to its parent and otherwise does nothing", async () => {
     const env = await testEnv();
     const parent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const child = parent.createChild({ model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const child = parent.childCreate({ name: "worker", model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(child, { env });
     let model = app.init().model;
     model = app.update(model, { type: "key", key: "alt+ctrl+up" }).model;
@@ -118,44 +120,130 @@ describe("TUI login wizard", () => {
   });
 });
 
-describe("TUI status settings", () => {
-  test("offers a session logging toggle for persisted sessions", async () => {
-    const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [], session: "persistent", createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const app = createApp(agent, { env });
-    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
+describe("TUI status toolbar", () => {
+  const statusLine = (memory) => memory.snapshot().lines.find((line) => line.includes("● ")) ?? "";
+  const hintLine = (memory) => {
+    const lines = memory.snapshot().lines;
+    return lines[lines.findIndex((line) => line.includes("● ")) + 1] ?? "";
+  };
 
-    const items = opened.overlay.stack.at(-1).items;
-    expect(items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "header", label: "Session logging" }),
-      expect.objectContaining({
-        kind: "action",
-        label: "session logging: on (toggle)",
-        value: { type: "session-save", value: false },
-      }),
-    ]));
+  test("shows the shared setting chips beside the agent state", async () => {
+    const { memory, ui, running } = await harness();
+    await tick();
+    expect(statusLine(memory)).toContain("◎ p   ◇ m   ✦ Think: auto"); // endpoint left of model
+    expect(statusLine(memory)).toContain("✦ Think: auto");
+    expect(statusLine(memory)).toContain("🔓 Read/write");
+    expect(statusLine(memory)).toContain("📝 No-log"); // the harness agent is anonymous
+    expect(hintLine(memory)).toContain("↓ settings");
+    ui.stop();
+    await running;
   });
 
-  test("uses the current disabled state when toggling session logging", async () => {
-    const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [], session: "memory", sessionSave: false, createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const app = createApp(agent, { env });
-    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
-
-    const items = opened.overlay.stack.at(-1).items;
-    expect(items).toContainEqual(expect.objectContaining({
-      label: "session logging: off (memory only) (toggle)",
-      value: { type: "session-save", value: true },
-    }));
+  test("↓ from the input focuses the toolbar, ←/→ rove with hints, ↑ returns", async () => {
+    const { memory, ui, running } = await harness();
+    await tick();
+    expect(memory.snapshot().focus).toBe("draft");
+    memory.send({ type: "key", key: "down" });
+    expect(memory.snapshot().focus).toBe("status-tools");
+    expect(hintLine(memory)).toContain("Endpoint: p · ⏎ switch endpoint · ←/→ move · ↑ back");
+    memory.send({ type: "key", key: "right" });
+    expect(hintLine(memory)).toContain("Model: p/m · ⏎ switch model");
+    memory.send({ type: "key", key: "right" });
+    memory.send({ type: "key", key: "right" });
+    expect(hintLine(memory)).toContain("Tools may write · ⏎ switch to read-only safe mode");
+    memory.send({ type: "key", key: "up" });
+    expect(memory.snapshot().focus).toBe("draft");
+    ui.stop();
+    await running;
   });
 
-  test("omits session logging for anonymous sessions", async () => {
+  test("Enter on the safe chip toggles read-only safe mode and keeps toolbar focus", async () => {
+    const { agent, memory, ui, running } = await harness();
+    await tick();
+    memory.send({ type: "key", key: "down" });
+    for (let i = 0; i < 3; i++) memory.send({ type: "key", key: "right" });
+    memory.send({ type: "key", key: "enter" });
+    expect(await until(() => agent.safe === true)).toBe(true);
+    await until(() => statusLine(memory).includes("🔒 Read-only"));
+    expect(statusLine(memory)).toContain("🔒 Read-only");
+    expect(memory.snapshot().focus).toBe("status-tools");
+    memory.send({ type: "key", key: "space" });
+    expect(await until(() => agent.safe === false)).toBe(true);
+    ui.stop();
+    await running;
+  });
+
+  test("typing or pasting while the toolbar has focus returns to the input with the text; Esc returns too", async () => {
+    const env = await testEnv();
+    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const onToolbar = app.update(app.init().model, { type: "key", key: "down" }).model;
+    expect(onToolbar.focus).toBe("toolbar");
+    const typed = app.update(onToolbar, { type: "key", key: "h", text: "h" }).model;
+    expect(typed.focus).toBe("input");
+    expect(typed.input.value).toBe("h");
+    expect(app.update(onToolbar, { type: "key", key: "escape" }).model.focus).toBe("input");
+    const pasted = app.update(onToolbar, { type: "paste", text: "pasted words" }).model;
+    expect(pasted.focus).toBe("input");
+    expect(pasted.input.value).toBe("pasted words");
+  });
+
+  test("the logging chip pauses and resumes a saved session", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [], contextId: "persistent", createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const memory = GTUI.host.memory({ width: 100, height: 10 });
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(createApp(agent, { env }));
+    await tick();
+    expect(statusLine(memory)).toContain("📝 Logging");
+    memory.send({ type: "action.select", id: "logging", action: "status.logging" });
+    expect(await until(() => agent.context.save === false)).toBe(true);
+    memory.send({ type: "action.select", id: "logging", action: "status.logging" });
+    expect(await until(() => agent.context.save === true)).toBe(true);
+    ui.stop();
+    await running;
+  });
+
+  test("the logging chip starts logging a conversation that was never logged, keeping it", async () => {
     const env = await testEnv();
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const app = createApp(agent, { env });
-    const opened = app.update(app.init().model, { type: "action.select", action: "status.settings" }).model;
+    const memory = GTUI.host.memory({ width: 100, height: 10 });
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(createApp(agent, { env }));
+    await tick();
+    const context = agent.context;
+    memory.send({ type: "action.select", id: "logging", action: "status.logging" });
+    expect(await until(() => agent.context.save === true)).toBe(true);
+    expect(agent.context).toBe(context);
+    ui.stop();
+    await running;
+  });
 
-    expect(opened.overlay.stack.at(-1).items.some((item) => item.label === "Session logging")).toBe(false);
+  test("the endpoint chip opens the ^P endpoint menu", async () => {
+    const env = await testEnv();
+    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const byChip = app.update(app.init().model, { type: "action.select", id: "endpoint", action: "shortcut.ctrl+p" }).model;
+    const byKey = app.update(app.init().model, { type: "key", key: "ctrl+p" }).model;
+    expect(byChip.overlay.stack.at(-1).title).toBe("Endpoints");
+    expect(byChip.overlay.stack.at(-1).items).toEqual(byKey.overlay.stack.at(-1).items);
+  });
+
+  test("the thinking chip opens the thinking levels with the current one marked", async () => {
+    const env = await testEnv();
+    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const opened = app.update(app.init().model, { type: "action.select", id: "thinking", action: "status.thinking" }).model;
+    const items = opened.overlay.stack.at(-1).items;
+    expect(items[0]).toMatchObject({ label: "default (current)", value: { type: "thinking", value: "default" } });
+  });
+
+  test("a clicked hint takes its key's path: Esc interrupt while a turn runs", async () => {
+    const env = await testEnv();
+    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const running = { ...app.init().model, turnRunning: true };
+    const byKey = app.update(running, { type: "key", key: "escape" }).effects;
+    const byClick = app.update(running, { type: "action.select", action: "shortcut.escape" }).effects;
+    expect(byKey.length).toBeGreaterThan(0);
+    const kinds = (effects) => effects.map((effect) => [effect.type, String(effect.key).replace(/\.\d+$/, "")]); // keys carry a sequence number
+    expect(kinds(byClick)).toEqual(kinds(byKey));
   });
 });
 
@@ -252,13 +340,13 @@ describe("Ctrl+C: idle draft clear, then a two-press exit", () => {
 
 describe("session deletion confirmation", () => {
   test("/session-delete-all! uses the TUI question bridge and deletes after confirmation", async () => {
-    const env = await testEnv();
     const dir = mkdtempSync("./ai-tmp/tui-delete-");
-    const session = new SessionStore({ id: "live", dir, context: [] });
-    const saved = new SessionStore({ id: "saved", dir, context: [] });
+    const env = await testEnv({ sessions: resolve(dir) });
+    const session = new Context({ id: "live", dir, messages: [] });
+    const saved = new Context({ id: "saved", dir, messages: [] });
     saved.append({ type: 2, content: [{ type: "text", text: "keep me" }] });
     saved.close();
-    const agent = new Agent({ env, model: "p/m", context: [], session, createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = new Agent({ env, model: "p/m", context: session, createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 100, height: 12 });
     const ui = new GTUI({ host: memory });
@@ -269,7 +357,7 @@ describe("session deletion confirmation", () => {
       ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Delete all" } });
       ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Delete all" } });
       await until(() => memory.snapshot().lines.some((line) => line.includes("deleted 1 session file(s)")));
-      expect(SessionStore.list({ dir })).toHaveLength(0);
+      expect(Context.list({ dir })).toHaveLength(0);
     } finally {
       ui.stop();
       await running;
@@ -281,7 +369,7 @@ describe("session deletion confirmation", () => {
 describe("clipboard effects", () => {
   test("/context-copy reaches the host instead of reporting a missing OSC 52 sink", async () => {
     const { agent, memory, ui, running } = await harness();
-    agent.append({ type: 3, content: [{ type: "text", text: "logical response" }] });
+    agent.context.append({ type: 3, content: [{ type: "text", text: "logical response" }] });
     ui.dispatch(msg.submit("/context-copy"));
     await until(() => memory.snapshot().lines.some((line) => line.includes("copied the last response")));
     expect(memory.effects.find((entry) => entry.type === "copy")).toMatchObject({ text: "logical response" });
@@ -438,7 +526,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
     memory.send(GTUI.event.key({ key: "enter" }));
     await until(() => io.turns() === 1); // the router didn't just print "not available"
     await until(() => memory.snapshot().lines.some((l) => l.includes("ok"))); // the scripted reply actually rendered
-    expect(agent.context.some((m) => m.type === 2)).toBe(false); // it re-activated the Agent — no NEW user message
+    expect(agent.context.messages().some((m) => m.type === 2)).toBe(false); // it re-activated the Agent — no NEW user message
     ui.stop();
     await running;
   });
@@ -457,8 +545,34 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
     memory.send(GTUI.event.key({ key: "enter" }));
     await until(() => io.turns() === 1); // the turn actually ran — exactly like /continue
     await until(() => memory.snapshot().lines.some((l) => l.includes("ok")));
-    expect(agent.context.some((m) => m.type === 2)).toBe(false); // NO user message was appended
+    expect(agent.context.messages().some((m) => m.type === 2)).toBe(false); // NO user message was appended
     expect(memory.snapshot().roles.some((span) => span.role.startsWith("message.user"))).toBe(false); // nothing printed for the empty turn
+    ui.stop();
+    await running;
+  });
+
+  test("/context-compact runs a REAL compact turn (never the router's \"not available\") and rebuilds the context from the model's summary", async () => {
+    const env = await testEnv();
+    const io = scriptedIO([[...TEXT(0, "SUMMARY: earlier work")]]);
+    const agent = new Agent({ env, model: "p/m", context: [
+      { type: 2, content: [{ type: "text", text: "old question" }] },
+      { type: 3, content: [{ type: "text", text: "old answer" }] },
+    ], createIO: () => io });
+    const app = createApp(agent, { env });
+    const memory = GTUI.host.memory({ width: 80, height: 10 });
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(app);
+
+    for (const ch of "/context-compact") { memory.send(GTUI.event.key({ key: ch, text: ch })); await tick(); }
+    memory.send(GTUI.event.key({ key: "enter" }));
+    await until(() => io.turns() === 1); // the model was actually asked to summarize
+    await until(() => memory.snapshot().lines.some((l) => l.includes("compacted")));
+    expect(memory.snapshot().lines.some((l) => l.includes("not available"))).toBe(false);
+    // The history was replaced by ONE assistant message holding the summary.
+    const messages = agent.context.messages();
+    expect(messages).toHaveLength(1);
+    expect(messages[0].type).toBe(3); // MessageType.Assistant
+    expect(messages[0].content[0].text).toContain("SUMMARY: earlier work");
     ui.stop();
     await running;
   });

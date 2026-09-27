@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
-import Env, { ENV_EVENT } from "../lib/env.js";
+import Env from "../lib/env.js";
 import { scriptedIO, testEnv, TEXT, USER } from "./fakes.js";
 
 
@@ -32,18 +32,18 @@ describe("Agent close lifecycle", () => {
     const agent = new Agent({ env });
 
     expect(env.agents()).toEqual([agent]);
-    expect(env.registerAgent(agent)).toBe(agent);
+    expect(env.agentAdd(agent)).toBe(agent);
     expect(env.agents()).toEqual([agent]);
     expect(env.listAgents).toBeUndefined();
     expect(env.terminateAgent).toBeUndefined();
     expect(agent.terminateAgent).toBeUndefined();
-    expect(() => env.registerAgent(null)).toThrow(/agent must be an object/i);
-    expect(() => env.removeAgent(null)).toThrow(/agent must be an object/i);
+    expect(() => env.agentAdd(null)).toThrow(/agent must be an object/i);
+    expect(() => env.agentRemove(null)).toThrow(/agent must be an object/i);
   });
 
   test("Env creates registered Agents through its instance factory", async () => {
     const env = await testEnv();
-    const agent = env.createAgent({ name: "factory" });
+    const agent = env.agentCreate({ name: "factory" });
     expect(agent).toBeInstanceOf(Agent);
     expect(agent.env).toBe(env);
     expect(agent.name).toBe("factory");
@@ -52,7 +52,7 @@ describe("Agent close lifecycle", () => {
 
   test("registration retains user-facing agents until Agent.close expressly removes them", async () => {
     const env = await testEnv();
-    (() => { env.createAgent({ name: "persistent" }); })();
+    (() => { env.agentCreate({ name: "persistent" }); })();
     Bun.gc(true);
     await Bun.sleep(0);
 
@@ -69,13 +69,13 @@ describe("Agent close lifecycle", () => {
     expect(standalone.parent).toBeUndefined();
     expect(child.name).toBe("planner");
     expect(child.description).toBe("Plans work.");
-    child.name = "reviewer";
-    child.description = "";
+    child.nameSet("reviewer");
+    child.descriptionSet("");
     expect(child.name).toBe("reviewer");
     expect(child.description).toBe("");
     expect(standalone.name).toMatch(/^agent-\d+$/);
-    expect(() => { child.name = 1; }).toThrow(/name must be a string/i);
-    expect(() => { child.description = null; }).toThrow(/description must be a string/i);
+    expect(() => { child.nameSet(1); }).toThrow(/name must be a string/i);
+    expect(() => { child.descriptionSet(null); }).toThrow(/description must be a string/i);
   });
 
   test("tracks direct children through construction and close", async () => {
@@ -117,19 +117,55 @@ describe("Agent close lifecycle", () => {
     const child = new Agent({ env, parent: agent, spawnPermission: true });
     expect(agent.spawnPermission).toBe(true);
     expect(child.spawnPermission).toBe(false);
-    expect(child.setSpawnPermission(false)).toBe(false);
-    expect(child.setSpawnPermission(true)).toBe(true);
+    expect(child.spawnPermissionSet(false)).toBe(false);
+    expect(child.spawnPermissionSet(true)).toBe(true);
     expect(child.spawnPermission).toBe(false);
-    expect(agent.setSpawnPermission()).toBeUndefined();
-    expect(agent.setSpawnPermission("yes")).toBeUndefined();
+    expect(agent.spawnPermissionSet()).toBeUndefined();
+    expect(agent.spawnPermissionSet("yes")).toBeUndefined();
     expect(agent.spawnPermission).toBeUndefined();
+  });
+
+  test("childCreate defaults to the parent's model and rejects duplicate worker names", async () => {
+    const env = await testEnv();
+    const parent = new Agent({ env, model: "p/m" });
+    const child = parent.childCreate({ name: "review" });
+    expect(child).toMatchObject({ endpoint: "p", model: "m" });
+    expect(() => parent.childCreate({ name: "review" })).toThrow(/already in use/);
+    expect(() => parent.childCreate({ name: "*" })).toThrow(/name other than/);
+    expect(parent.children).toEqual([child]);
+    parent.close();
+    child.close();
+  });
+
+  test("close after a busy send drains queued handoff before closing and rejects later messages", async () => {
+    const env = await testEnv();
+    let release;
+    const waiting = new Promise((resolve) => { release = resolve; });
+    const requests = [];
+    const io = scriptedIO([]);
+    io.write = async (messages, callbacks) => {
+      requests.push(messages.filter((m) => m.type === 2).map((m) => m.content[0].text));
+      if (requests.length === 1) await waiting;
+      return (await import("./fakes.js")).emitScript([{ type: "start" }, ...TEXT(0, "answer"), { type: "done" }], callbacks);
+    };
+    const agent = new Agent({ env, model: "p/m", createIO: () => io });
+    const running = agent.send(USER("first"));
+    await until(() => requests.length === 1);
+    agent.send(USER("/handoff"));
+    agent.close();
+    expect(() => agent.send(USER("late"))).toThrow(/closed/);
+    release();
+    await running;
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toContain("/handoff");
+    expect(agent.closed).toBe(true);
   });
 
   test("Env lifecycle events are multi-consumer and use non-string values", async () => {
     const env = await testEnv();
     const seen = [];
-    const first = env.onEvent(ENV_EVENT.AGENT_ADDED, ({ agent }) => seen.push(["first", agent]));
-    env.onEvent(ENV_EVENT.AGENT_ADDED, ({ agent }) => seen.push(["second", agent]));
+    const first = env.onEvent(Env.EVENT.AGENT_ADDED, ({ agent }) => seen.push(["first", agent]));
+    env.onEvent(Env.EVENT.AGENT_ADDED, ({ agent }) => seen.push(["second", agent]));
     const agent = new Agent({ env });
     expect(seen).toEqual([["first", agent], ["second", agent]]);
     expect(env.offEvent(first)).toBe(true);
@@ -150,7 +186,7 @@ describe("Agent close lifecycle", () => {
     expect(env.agents()).not.toContain(agent);
     expect(agent.close()).toBe(false);
     expect(seen).toEqual(["marked", "closed"]);
-    expect(() => agent.enqueue(USER("late"))).toThrow(/closed/i);
+    expect(() => agent.send(USER("late"))).toThrow(/closed/i);
   });
 
   test("busy close waits until DONE listeners finish, then closes and evicts", async () => {
@@ -159,14 +195,14 @@ describe("Agent close lifecycle", () => {
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const seen = [];
     agent.onEvent(Agent.EVENT.CLOSE_MARKED, () => seen.push("marked"));
-    agent.onEvent(Agent.EVENT.DONE, () => seen.push("done"));
+    agent.onEvent(Agent.EVENT.REQUEST_DONE, () => seen.push("done"));
     agent.onEvent(Agent.EVENT.CLOSED, () => seen.push("closed"));
 
     const running = agent.run();
     await until(() => agent.busy);
     expect(agent.close()).toBe(true);
     expect(agent.closed).toBe(false);
-    expect(() => agent.enqueue(USER("late"))).toThrow(/closed/i);
+    expect(() => agent.send(USER("late"))).toThrow(/closed/i);
     expect(env.agents()).toContain(agent);
     release();
     await running;
@@ -181,19 +217,21 @@ describe("Agent close lifecycle", () => {
     const { io, release } = pausableIO();
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
     const seen = [];
-    agent.onEvent(Agent.EVENT.DONE, () => seen.push("done"));
+    agent.onEvent(Agent.EVENT.REQUEST_DONE, () => seen.push("done"));
     agent.onEvent(Agent.EVENT.CLOSED, () => seen.push("closed"));
 
-    expect(agent.enqueue(USER("process me"))).toEqual(USER("process me"));
+    const turn = agent.send(USER("process me"));
+    expect(turn).toBeInstanceOf(Promise);
     expect(agent.busy).toBe(true);
     expect(agent.close()).toBe(true);
     expect(agent.closed).toBe(false);
-    expect(() => agent.enqueue(USER("too late"))).toThrow(/closed/i);
+    expect(() => agent.send(USER("too late"))).toThrow(/closed/i);
     release();
+    await turn;
     await until(() => agent.closed);
 
-    expect(agent.context.some((message) => JSON.stringify(message).includes("process me"))).toBe(true);
-    expect(agent.context.some((message) => JSON.stringify(message).includes("answer"))).toBe(true);
+    expect(agent.context.messages().some((message) => JSON.stringify(message).includes("process me"))).toBe(true);
+    expect(agent.context.messages().some((message) => JSON.stringify(message).includes("answer"))).toBe(true);
     expect(seen).toEqual(["done", "closed"]);
     expect(env.agents()).not.toContain(agent);
   });

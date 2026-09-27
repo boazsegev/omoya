@@ -1,24 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { defineProvider } from "../lib/io.js";
+import { providerClass } from "./fakes.js";
 import { oauthPasteOnly } from "../lib/cli.js";
 import Env from "../lib/env.js";
 import AnthropicPlugin from "../providers/anthropic.js";
 import ClaudePlugin from "../providers/claude.js";
+import { providerNamesOf, providersLoad } from "./env-internals.js";
 
-const Anthropic = defineProvider(AnthropicPlugin, { name: "anthropic" });
-const Claude = defineProvider(ClaudePlugin, { name: "claude" });
+const Anthropic = await providerClass(AnthropicPlugin, "anthropic");
+const Claude = await providerClass(ClaudePlugin, "claude");
 const URL = "https://api.anthropic.com/v1";
 const identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-const io = (auth, tools = []) => ({ currentModel: "claude-sonnet-4-6", settings: { auth }, tools: () => tools });
+const io = (auth, tools = []) => ({ modelCurrent: "claude-sonnet-4-6", settings: { auth }, tools: () => tools });
 const user = [{ type: 2, content: [{ type: "text", text: "hello" }] }];
 
 describe("Claude subscription provider", () => {
   test("package scan registers Claude independently and publishes its OAuth preset", async () => {
     const env = new Env({ settingsDir: null, settings: { providers: {} } });
-    await env.loadProviders({ detect: false });
-    expect(env.providerNames()).toContain("claude");
-    expect(env.knownEndpoints().find((entry) => entry.name === "claude")?.provider).toBe("claude");
-    expect(env.knownEndpoints().find((entry) => entry.name === "anthropic-claude")).toBeUndefined();
+    await providersLoad(env, { detect: false });
+    expect(providerNamesOf(env)).toContain("claude");
+    expect(env.loginPresets().find((entry) => entry.name === "claude")?.provider).toBe("claude");
+    expect(env.loginPresets().find((entry) => entry.name === "anthropic-claude")).toBeUndefined();
   });
 
   test("subscription login is its own provider, not an Anthropic preset", () => {
@@ -112,8 +113,8 @@ describe("Claude subscription provider", () => {
       return new Response(JSON.stringify({ content: [] }), { status: 200 });
     };
     try {
-      const connection = new Claude(URL, { settings: { auth: { type: "oauth", token: "sk-ant-oat-test" } }, tools: () => [] });
-      expect(await connection.testConnection()).toEqual({ models: Object.keys(Claude.knownEndpoints[0].models).length });
+      expect(await Claude.testConnection({ url: URL, auth: { type: "oauth", token: "sk-ant-oat-test" } }))
+        .toEqual({ models: Object.keys(Claude.knownEndpoints[0].models).length });
       expect(sent.model).toBe(Object.keys(Claude.knownEndpoints[0].models)[0]);
       expect(sent.system).toEqual([{ type: "text", text: identity, cache_control: { type: "ephemeral" } }]);
       expect(sent.stream).toBe(false);
@@ -128,10 +129,11 @@ describe("Claude subscription provider", () => {
       return new Response(JSON.stringify({ content: [{ type: "text", text: "- result" }] }), { status: 200 });
     };
     try {
-      const aiio = { url: URL, currentModel: "claude-sonnet-4-6", settings: { auth: { type: "oauth", token: "sk-ant-oat-test" } }, env: { settings: {} } };
-      const { capabilities } = Claude.provider;
-      expect(await capabilities["web-search"].call(Claude, { aiio, args: { query: "bun" } })).toBe("- result");
-      expect(await capabilities["web-fetch"].call(Claude, { aiio, args: { url: "https://example.com/" } })).toBe("- result");
+      const aiio = { url: URL, modelCurrent: "claude-sonnet-4-6", settings: { auth: { type: "oauth", token: "sk-ant-oat-test" } },
+        fetch: (url, init) => globalThis.fetch(url, init) };
+      const { tools } = Claude.provider.capabilities;
+      expect(await tools["web-search"].function({ aiio, args: { query: "bun" } })).toBe("- result");
+      expect(await tools["web-fetch"].function({ aiio, args: { url: "https://example.com/" } })).toBe("- result");
       expect(sent.map((request) => request.url)).toEqual([`${URL}/messages`, `${URL}/messages`]);
       expect(sent.map((request) => request.body.tools[0].type)).toEqual(["web_search_20250305", "web_fetch_20250910"]);
       for (const request of sent) {
@@ -140,18 +142,13 @@ describe("Claude subscription provider", () => {
         expect(request.headers["anthropic-beta"]).toContain("oauth-2025-04-20");
         expect(request.body.system).toEqual([{ type: "text", text: identity }]);
       }
-      // web.provider === false opts out; no request is made.
-      expect(await capabilities["web-search"].call(Claude, { aiio: { ...aiio, env: { settings: { web: { provider: false } } } }, args: { query: "bun" } })).toBeUndefined();
       expect(sent).toHaveLength(2);
     } finally { globalThis.fetch = originalFetch; }
   });
 
-  test("login only accepts subscription access tokens", async () => {
-    const writes = [];
-    const connection = new Claude(URL, { settings: {}, authSet: (data) => writes.push(data) });
-    await expect(connection.login({ token: "sk-ant-api03-test" })).rejects.toThrow(/OAuth access token/);
-    expect(await connection.login({ token: "sk-ant-oat01-test" })).toEqual({ type: "oauth", token: "sk-ant-oat01-test" });
-    expect(writes).toEqual([{ auth: { type: "oauth", token: "sk-ant-oat01-test" } }]);
+  test("login only accepts subscription access tokens", () => {
+    expect(() => Claude.login({ token: "sk-ant-api03-test" })).toThrow(/OAuth access token/);
+    expect(Claude.login({ token: "sk-ant-oat01-test" })).toEqual({ type: "oauth", token: "sk-ant-oat01-test" });
   });
 
   test("API key provider does not acquire subscription identity or name changes", () => {

@@ -9,13 +9,14 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { Agent } from "../lib/agent.js";
 import { MessageType } from "../lib/context.js";
 import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
+import { toolEntry, toolsLoad } from "./env-internals.js";
 
 const SKILL_TOOL = { description: "loads", safe: true, inputSchema: { type: "object", properties: {} } };
 
 describe("agent: tool-attached system messages", () => {
   test("a THROWN error's `system` payload appends after the tool-result error", async () => {
     const env = await testEnv();
-    env.registerTool("failing", () => {
+    env.toolAdd("failing", () => {
       const err = new Error("path traversal refused: test");
       err.system = "Stay in the current directory tree.";
       throw err;
@@ -27,18 +28,18 @@ describe("agent: tool-attached system messages", () => {
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run({});
 
-    const types = agent.context.map((m) => m.type);
+    const types = agent.context.messages().map((m) => m.type);
     // user, assistant(calls), toolResult(ERROR), SYSTEM payload, assistant
     expect(types).toEqual([2, 3, 4, 1, 3]);
-    expect(agent.context[2].error).toBe(true);
-    expect(agent.context[3].content[0].text).toBe("Stay in the current directory tree.");
+    expect(agent.context.at(2).error).toBe(true);
+    expect(agent.context.at(3).content[0].text).toBe("Stay in the current directory tree.");
   });
 
   test("{ result, system }: payload appends AFTER the result, BEFORE queued user messages", async () => {
     const env = await testEnv();
     let agent;
-    env.registerTool("loader", () => {
-      agent.enqueue(USER("queued mid-turn")); // flushes after this iteration's tool outcomes
+    env.toolAdd("loader", () => {
+      agent.send(USER("queued mid-turn")); // flushes after this iteration's tool outcomes
       return { result: "skill loading: core", system: "<skill>payload</skill>" };
     }, SKILL_TOOL);
     const io = scriptedIO([
@@ -49,18 +50,18 @@ describe("agent: tool-attached system messages", () => {
     const terminal = await agent.run({});
 
     expect(terminal.type).toBe("done");
-    const types = agent.context.map((m) => m.type);
+    const types = agent.context.messages().map((m) => m.type);
     // user, assistant(calls), toolResult, SYSTEM payload, queued user, assistant
     expect(types).toEqual([2, 3, 4, 1, 2, 3]);
-    const system = agent.context[3];
+    const system = agent.context.at(3);
     expect(system.content[0].text).toBe("<skill>payload</skill>");
-    const result = agent.context[2];
+    const result = agent.context.at(2);
     expect(result.content[0].text).toBe("skill loading: core"); // the answer stays brief
   });
 
   test("a system ARRAY appends each payload as its own system message", async () => {
     const env = await testEnv();
-    env.registerTool("loader", () => ({ result: "ok", system: ["one", "two"] }), SKILL_TOOL);
+    env.toolAdd("loader", () => ({ result: "ok", system: ["one", "two"] }), SKILL_TOOL);
     const io = scriptedIO([
       TOOLCALL(0, "c1", "loader", {}),
       [...TEXT(0, "done")],
@@ -68,14 +69,14 @@ describe("agent: tool-attached system messages", () => {
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run({});
 
-    const systems = agent.context.filter((m) => m.type === MessageType.System);
+    const systems = agent.context.messages().filter((m) => m.type === MessageType.System);
     expect(systems).toHaveLength(2);
     expect(systems.map((m) => m.content[0].text)).toEqual(["one", "two"]);
   });
 
   test("onToolResult fires once only after its result, display, and system payload are appended", async () => {
     const env = await testEnv();
-    env.registerTool("complete", () => ({ result: "brief", display: "shown", system: "system payload" }), SKILL_TOOL);
+    env.toolAdd("complete", () => ({ result: "brief", display: "shown", system: "system payload" }), SKILL_TOOL);
     const io = scriptedIO([
       TOOLCALL(0, "c1", "complete", {}),
       [...TEXT(0, "done")],
@@ -84,8 +85,8 @@ describe("agent: tool-attached system messages", () => {
     let agent;
     agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result: message, display }) => seen.push({
-      message, display, resultAppended: agent.context.includes(message),
-      systemAppended: agent.context.some((m) => m.type === MessageType.System && m.content.some((b) => b.text === "system payload")),
+      message, display, resultAppended: agent.context.messages().includes(message),
+      systemAppended: agent.context.messages().some((m) => m.type === MessageType.System && m.content.some((b) => b.text === "system payload")),
     }));
     await agent.run({});
 
@@ -97,7 +98,7 @@ describe("agent: tool-attached system messages", () => {
 
   test("{ result, display }: the display payload rides onToolResult only — NEVER the context", async () => {
     const env = await testEnv();
-    env.registerTool("diffy", () => ({ result: "edited", display: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new" }), SKILL_TOOL);
+    env.toolAdd("diffy", () => ({ result: "edited", display: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new" }), SKILL_TOOL);
     const io = scriptedIO([
       TOOLCALL(0, "c1", "diffy", {}),
       [...TEXT(0, "done")],
@@ -108,10 +109,10 @@ describe("agent: tool-attached system messages", () => {
     await agent.run({});
 
     // the tool result carries ONLY the brief answer
-    const result = agent.context.find((m) => m.type === MessageType.ToolResult);
+    const result = agent.context.messages().find((m) => m.type === MessageType.ToolResult);
     expect(result.content[0].text).toBe("edited");
     // no System message; display is preserved on the result for context viewers
-    expect(agent.context.filter((m) => m.type === MessageType.System)).toHaveLength(0);
+    expect(agent.context.messages().filter((m) => m.type === MessageType.System)).toHaveLength(0);
     expect(result.display).toEqual([{ type: "text", text: "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new" }]);
     // the binding saw the display payload as onToolResult's second argument
     expect(seen).toHaveLength(1);
@@ -121,7 +122,7 @@ describe("agent: tool-attached system messages", () => {
   test("the shared tool context carries the call's linkage ({callId, name})", async () => {
     const env = await testEnv();
     let got;
-    env.registerTool("probe", (args, context) => { got = context?.call; return "ok"; }, {
+    env.toolAdd("probe", (args, context) => { got = context?.call; return "ok"; }, {
       ...SKILL_TOOL,
     });
     const io = scriptedIO([
@@ -135,7 +136,7 @@ describe("agent: tool-attached system messages", () => {
 
   test("ordinary returns carry NO system key into the context; onToolResult sees only the result", async () => {
     const env = await testEnv();
-    env.registerTool("plain", () => "just text", SKILL_TOOL);
+    env.toolAdd("plain", () => "just text", SKILL_TOOL);
     const io = scriptedIO([
       TOOLCALL(0, "c1", "plain", {}),
       [...TEXT(0, "done")],
@@ -145,7 +146,7 @@ describe("agent: tool-attached system messages", () => {
     agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => seen.push(result));
     await agent.run({});
 
-    expect(agent.context.filter((m) => m.type === MessageType.System)).toHaveLength(0);
+    expect(agent.context.messages().filter((m) => m.type === MessageType.System)).toHaveLength(0);
     expect(seen).toHaveLength(1);
     expect(seen[0].type).toBe(MessageType.ToolResult);
     expect(seen[0].content[0].text).toBe("just text");
@@ -161,7 +162,7 @@ describe("agent: tool-attached system messages", () => {
         return { loader: { description: "d", safe: true, inputSchema: {} } };
       }
     `);
-    await env.loadTools({ dirs: [dir] });
+    await toolsLoad(env, { dirs: [dir] });
     const io = scriptedIO([
       TOOLCALL(0, "c1", "loader", {}),
       [...TEXT(0, "done")],
@@ -169,10 +170,10 @@ describe("agent: tool-attached system messages", () => {
     const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run({});
 
-    const systems = agent.context.filter((m) => m.type === MessageType.System);
+    const systems = agent.context.messages().filter((m) => m.type === MessageType.System);
     expect(systems).toHaveLength(1);
     expect(systems[0].content[0].text).toBe("payload via fork");
-    const result = agent.context.find((m) => m.type === MessageType.ToolResult);
+    const result = agent.context.messages().find((m) => m.type === MessageType.ToolResult);
     expect(result.content[0].text).toBe("brief");
   });
 });
@@ -190,6 +191,8 @@ describe("tools/skill.js: the skill tool", () => {
     const global = mkdtempSync("./ai-tmp/skills-");
     mkdirSync(`${global}/demo`);
     writeFileSync(`${global}/demo/SKILL.md`, "---\ndescription: a demo skill\n---\nDEMO BODY\n");
+    mkdirSync(`${global}/second`);
+    writeFileSync(`${global}/second/SKILL.md`, "---\ndescription: another skill\n---\nSECOND BODY\n");
     process.env[NAMES.skillsEnv] = global;
   }
 
@@ -234,8 +237,8 @@ describe("tools/skill.js: the skill tool", () => {
   test("end to end through the Agent: answer in the result, payload in the context", async () => {
     fakeSkillDirs();
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.toolEntry("skill")?.safe).toBe(true);
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolEntry(env, "skill")?.safe).toBe(true);
     const io = scriptedIO([
       TOOLCALL(0, "c1", "skill", { names: ["demo"] }),
       [...TEXT(0, "using the demo skill")],
@@ -243,26 +246,28 @@ describe("tools/skill.js: the skill tool", () => {
     const agent = new Agent({ env, model: "p/m", context: [USER("load demo")], createIO: () => io });
     await agent.run({});
 
-    const result = agent.context.find((m) => m.type === MessageType.ToolResult);
+    const result = agent.context.messages().find((m) => m.type === MessageType.ToolResult);
     expect(result.content[0].text).toBe("Loaded skills: demo.");
-    const system = agent.context.find((m) => m.type === MessageType.System);
+    const system = agent.context.messages().find((m) => m.type === MessageType.System);
     expect(system.content[0].text).toContain("DEMO BODY");
   });
 
   test("end to end: multiple skills remain separate system messages", async () => {
     fakeSkillDirs();
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
-      TOOLCALL(0, "c1", "skill", { names: ["core", "demo"] }),
+      // the calling Env answers: its own (temporary) package folder has no
+      // packaged skills, so both come from the environment root
+      TOOLCALL(0, "c1", "skill", { names: ["demo", "second"] }),
       [...TEXT(0, "using both skills")],
     ]);
     const agent = new Agent({ env, model: "p/m", context: [USER("load both")], createIO: () => io });
     await agent.run({});
 
-    const systems = agent.context.filter((m) => m.type === MessageType.System);
+    const systems = agent.context.messages().filter((m) => m.type === MessageType.System);
     expect(systems).toHaveLength(2);
-    expect(systems[0].content[0].text).toContain('<skill name="core">');
-    expect(systems[1].content[0].text).toContain('<skill name="demo">');
+    expect(systems[0].content[0].text).toContain('<skill name="demo">');
+    expect(systems[1].content[0].text).toContain('<skill name="second">');
   });
 });

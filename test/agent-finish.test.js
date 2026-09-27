@@ -5,7 +5,7 @@
 // flush survives process.exit and SIGTERM.
 import { describe, expect, test, afterEach } from "bun:test";
 import { rmSync, mkdirSync, existsSync, readFileSync } from "node:fs";
-import { onFinish, runFinish, armFinishSignals, _resetFinish } from "../lib/agent.js";
+import { onFinish, runFinish, armFinishSignals, _resetFinish } from "../lib/agent/finish.js";
 
 afterEach(() => _resetFinish());
 
@@ -87,7 +87,7 @@ describe("crash safety in a real process", () => {
     mkdirSync(ROOT, { recursive: true });
     const file = `${ROOT}/exit.marker`;
     const { exit, stderr } = await spawnChild(`
-      import { onFinish } from "./lib/agent.js";
+      import { finishAdd as onFinish } from "./lib/agent.js";
       import { writeFileSync } from "node:fs";
       onFinish(() => writeFileSync(${JSON.stringify(file)}, "flushed"));
       process.exit(0);
@@ -100,7 +100,7 @@ describe("crash safety in a real process", () => {
     mkdirSync(ROOT, { recursive: true });
     const file = `${ROOT}/sigterm.marker`;
     const proc = Bun.spawn(["bun", "-e", `
-      import { onFinish, armFinishSignals } from "./lib/agent.js";
+      import { finishAdd as onFinish, finishSignalsArm as armFinishSignals } from "./lib/agent.js";
       import { writeFileSync } from "node:fs";
       onFinish(() => writeFileSync(${JSON.stringify(file)}, "flushed"));
       armFinishSignals();

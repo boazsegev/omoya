@@ -1,8 +1,8 @@
 // test/fakes.js — shared test doubles for the Agent unit.
 // Not a test file: bun test only runs *.test.js.
 import { readdirSync, rmSync, statSync } from "node:fs"; // vacuumStaleTempDirs
-import { normalizeCallbacks, dispatch } from "../lib/context.js";
-import { createAssembler } from "../lib/context.js";
+import { callbacksNormalize, eventDispatch } from "../lib/context.js";
+import { assemblerCreate } from "../lib/context.js";
 
 /**
  * A fake IO duck-type: { state, write(context, callbacks, options),
@@ -19,7 +19,7 @@ export function fakeIO(handler) {
       io.writes.push({ context: structuredClone(context), options });
       return handler(io, callbacks, options);
     },
-    async kill() {
+    async close() {
       io.kills++;
       io.state = "closed";
       io._onKill?.();
@@ -46,8 +46,8 @@ export function scriptedIO(script) {
 
 /** Dispatch a scripted event list; returns the terminal event. */
 export function emitScript(events, callbacks = {}) {
-  const assembler = createAssembler();
-  const set = normalizeCallbacks(callbacks, {});
+  const assembler = assemblerCreate();
+  const set = callbacksNormalize(callbacks, {});
   let terminal = null;
   for (const raw of events) {
     let event = raw;
@@ -57,13 +57,13 @@ export function emitScript(events, callbacks = {}) {
     }
     assembler.consume(event);
     if (Number.isInteger(event.contentIndex)) event.content = assembler.message().content[event.contentIndex];
-    dispatch(set, event);
+    eventDispatch(set, event);
     if (event.type === "done" || event.type === "error") terminal = event;
   }
   if (!terminal) {
     const assembled = assembler.message();
     terminal = assembled.content.length > 0 ? { type: "done", message: assembled } : { type: "done" };
-    dispatch(set, terminal);
+    eventDispatch(set, terminal);
   }
   return terminal;
 }
@@ -103,7 +103,7 @@ function vacuumStaleTempDirs() {
     }
   } catch { /* no ai-tmp yet */ }
 }
-export async function testEnv() {
+export async function testEnv(settings = {}) {
   const { mkdtempSync } = await import("node:fs");
   const { Env } = await import("../lib/env.js");
   vacuumStaleTempDirs();
@@ -118,16 +118,27 @@ export async function testEnv() {
   const providers = Object.fromEntries(
     ["capturing", "fake", "p", "p1", "p2", "test", "x"].map((name) => [name, { provider: "test", url: "test://script" }]),
   );
-  return new Env({ dir, cwd: dir, settings: { providers }, settingsDir: dir });
+  return new Env({ dir, cwd: dir, settings: { providers, ...settings }, settingsDir: dir });
 }
 
 export const USER = (text) => ({ type: 2, content: [{ type: "text", text }] });
 export const TOOLCALL = (contentIndex, callId, name, args) => [
-  { type: "toolcall_start", contentIndex, callId, name, arguments: args },
-  { type: "toolcall_end", contentIndex, arguments: args },
+  { type: "tool_call_start", contentIndex, callId, name, arguments: args },
+  { type: "tool_call_end", contentIndex, arguments: args },
 ];
 export const TEXT = (contentIndex, text) => [
   { type: "text_start", contentIndex },
   { type: "text_delta", contentIndex, text },
   { type: "text_end", contentIndex },
 ];
+
+/**
+ * A provider plugin class completed the way the library uses it: Env's
+ * static catalog side (lib/env/provider.js) plus IO's wire side
+ * (lib/io/provider.js). Unit tests drive providers through it.
+ */
+export async function providerClass(Plugin, name) {
+  const { defineProvider } = await import("../lib/env/provider.js");
+  const { providerComplete } = await import("../lib/io/provider.js");
+  return providerComplete(defineProvider(Plugin, { name }));
+}

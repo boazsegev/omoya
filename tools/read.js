@@ -32,7 +32,7 @@ export function toolDescription() {
   return { read: readDescription() };
 }
 
-/** This tool's own contribution to env.defaultsSchema(). */
+/** This tool's own contribution to env.settingsSchema(). */
 export function settingsSchema() {
   return readSettingsSchema();
 }

@@ -42,6 +42,7 @@ function makeSession(userTexts) {
   const body = [
     "const { agent, blocks, composerByAgent } = session;",
     "let { textareaEl } = session;",
+    "const nodes = []; const scrollEl = null;",
     "const hideAutocomplete = () => { session.hideAutocompleteCalls++; };",
     // The DOM mirror measurement, faked: a newline-free line soft-wraps every
     // WRAP characters, each visual row 1 unit tall.

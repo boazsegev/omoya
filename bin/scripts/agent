@@ -67,9 +67,9 @@ options:
                        (default: all discovered tools)
   --no-tool-fork      disable the tool sandbox: file tools run in-process
                        (default: forked — a crashing tool can't kill ${PROGRAM})
-  --tool-timeout <dur> host override of Env.toolTimeout (default 120s);
+  --tool-timeout <dur> host override of settings.tools.timeout (default 120s);
                        a ms numeral or unit string ("30s", "5m"); a tool's
-                       declared request is capped at toolTimeoutLimit (20m)
+                       declared request is capped at tools.timeoutLimit (20m)
   --tool-async        execute one message's tool calls concurrently
   --session <id>       persist under <settings>/${NAMES.sessionsDir}/
                        (the file name is date + sessionUUID + name — see
@@ -81,7 +81,7 @@ options:
                        is unknown): provider requests per invocation (32)
   --max-tool-calls <n> same fallback: tool executions per invocation (64)
                        (the PRIMARY guard is context usage, settings.
-                       contextGuardCap/contextGuardTurnCap — 90%/40%)
+                       context.cap/context.turn — 90%/40%)
   --login              configure an endpoint with the interactive wizard, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
   --help               show this text and exit
@@ -155,12 +155,6 @@ async function main() {
       return;
     }
   }
-  // Startup model-cache renewal: every endpoint reports its available
-  // models in the BACKGROUND (failures keep the stale/static list) —
-  // startup never waits on a slow or busy endpoint; selection paths
-  // that need a live list refresh it themselves (endpointOnly, login).
-  env.refreshModels().catch(() => {});
-
   // Resolve the --model combo AFTER providers load (needs the registry
   // and known model lists): explicit combo, cached model match,
   // provider-only (first available model), or bare model name.
@@ -196,14 +190,14 @@ async function main() {
         timeout: args["tool-timeout"],
         async: args["tool-async"] === true,
       },
-      session: args.session ?? args.resume,
+      contextId: args.session ?? args.resume,
       context,
     });
     const responseEvents = [
-      [Agent.EVENT.START, "start"], [Agent.EVENT.TEXT_START, "text_start"], [Agent.EVENT.TEXT_DELTA, "text_delta"], [Agent.EVENT.TEXT_END, "text_end"],
+      [Agent.EVENT.REQUEST_START, "start"], [Agent.EVENT.TEXT_START, "text_start"], [Agent.EVENT.TEXT_DELTA, "text_delta"], [Agent.EVENT.TEXT_END, "text_end"],
       [Agent.EVENT.THINKING_START, "thinking_start"], [Agent.EVENT.THINKING_DELTA, "thinking_delta"], [Agent.EVENT.THINKING_END, "thinking_end"],
-      [Agent.EVENT.TOOLCALL_START, "toolcall_start"], [Agent.EVENT.TOOLCALL_DELTA, "toolcall_delta"], [Agent.EVENT.TOOLCALL_END, "toolcall_end"],
-      [Agent.EVENT.DONE, "done"], [Agent.EVENT.ERROR, "error"],
+      [Agent.EVENT.TOOL_CALL_START, "tool_call_start"], [Agent.EVENT.TOOL_CALL_DELTA, "tool_call_delta"], [Agent.EVENT.TOOL_CALL_END, "tool_call_end"],
+      [Agent.EVENT.REQUEST_DONE, "done"], [Agent.EVENT.REQUEST_ERROR, "error"],
     ];
     for (const [event, type] of responseEvents) agent.onEvent(event, (value) => out({ type, ...value }));
     agent.onEvent(Agent.EVENT.LOG, log);

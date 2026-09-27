@@ -287,7 +287,7 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
       }));
       recordEdit(callId, { path, edits: recorded, ending }, context);
     }
-    const suffix = callId ? ` Edit id: ${callId} (rollback with edit {path: "${path}", rollback: "${callId}"}).` : "";
+    const suffix = callId ? ` Edit id: ${callId}` : "";
     return {
       result: `Replaced ${edits.length} block(s) in ${path}.${suffix}`,
       display: unifiedPatch(path, normalized, out), // shown to the user, never sent to the model

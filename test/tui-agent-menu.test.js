@@ -33,11 +33,17 @@ describe("active-agent menu snapshots", () => {
     ]);
   });
 
+  test("sorts the full theme menu alphabetically, including default", () => {
+    const env = { settings: { tui: { themes: { zebra: {}, amber: {}, blues: {} } } }, endpointNames: () => [], agents: () => [] };
+    const options = masterMenuOptions({ thinking: "default", safe: false }, env, "(none)/(none)", { catalog: { sessions: [], prompts: [] } });
+    expect(options.themes).toEqual(["amber", "blues", "default", "zebra"]);
+  });
+
   test("stores the active-agent snapshot in the menu data instead of reading it during redraw", () => {
     const first = agent("first");
     const second = agent("second");
     let next = [first];
-    const env = { agents: () => next, promptNames: () => [], toolNames: () => [], endpointNames: () => [] };
+    const env = { agents: () => next, prompts: () => new Map(), toolNames: () => [], endpointNames: () => [] };
     const current = { thinking: undefined, safe: false, listSessions: () => [] };
     const options = masterMenuOptions(current, env, "(none)/(none)");
     next = [second];
@@ -46,35 +52,27 @@ describe("active-agent menu snapshots", () => {
   });
 
   test("snapshots endpoint and model availability for Add menus", () => {
-    const calls = [];
-    const env = {
-      endpointNames: () => ["ollama"],
-      endpointSettings: () => ({ models: { llama: {}, qwen: {} } }),
-      agentsEndpointLimit: (endpoint, model) => {
-        calls.push(["limit", endpoint, model]);
-        return model === "qwen" ? { excluded: true, cap: 0 } : { excluded: false, cap: model ? 3 : 4 };
-      },
-      agentEndpointAvailable: (endpoint, model) => {
-        calls.push(["available", endpoint, model]);
-        return model === "llama" ? 2 : 1;
-      },
-    };
+    // the catalog's pair entries carry capacity (Agent's modelInfo fields)
+    const catalog = new Map([
+      ["ollama/llama", { endpoint: "ollama", model: "llama", listed: true, maxActive: 3, available: 2 }],
+      ["ollama/qwen", { endpoint: "ollama", model: "qwen", listed: true, maxActive: 0, available: 0 }],
+    ]);
+    const env = { models: () => catalog };
     const providers = addAgentMenuOptions(env);
     expect(providers).toEqual([{
-      name: "ollama", available: 1, limit: 4, excluded: false,
+      name: "ollama", available: 2, limit: 3, excluded: false,
       models: [
         { id: "llama", available: 2, limit: 3, excluded: false },
-        { id: "qwen", available: 1, limit: 0, excluded: true },
+        { id: "qwen", available: 0, limit: 0, excluded: true },
       ],
     }]);
     expect(buildSessionAddItems({ providers })).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: "ollama | 1/4 available", value: { type: "session-add-provider", endpoint: "ollama", models: providers[0].models } }),
+      expect.objectContaining({ label: "ollama | 2/3 available", value: { type: "session-add-provider", endpoint: "ollama", models: providers[0].models } }),
     ]));
     expect(buildSessionAddModelItems({ endpoint: "ollama", models: providers[0].models })).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: "llama | 2/3 available", value: { type: "session-add", endpoint: "ollama", model: "llama" } }),
-      expect.objectContaining({ kind: "info", label: "qwen | 1/0 available" }),
+      expect.objectContaining({ kind: "info", label: "qwen | 0/0 available" }),
     ]));
-    expect(calls).toHaveLength(6);
   });
 
   test("offers a Close submenu with a frozen active-agent target list", () => {

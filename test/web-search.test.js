@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { __resetPackageSearchForTest, packageSearch } from "../tools/web/search/index.js";
+import { __resetPackageSearchForTest, packageSearch as rawpackageSearch } from "../tools/web/search/index.js";
+import { packageFetch } from "../tools/web/fetch/index.js";
+import { __resetWebRateForTests, ratePressure } from "../tools/web/shared.js";
+
+function packageSearch(args, context = {}, options = {}) {
+  return rawpackageSearch(args, context, { sleep: async () => {}, ...options });
+}
 
 const response = (body, init = {}) => new Response(body, { status: init.status ?? 200, headers: init.headers ?? { "content-type": "text/html" } });
 
 function createFetch(routes, calls = []) {
   return async (url, init = {}) => {
     const href = url.toString();
-    calls.push({ url: href, headers: Object.fromEntries(init.headers.entries()) });
+    calls.push({ url: href, headers: Object.fromEntries(init.headers?.entries?.() ?? []) });
     const route = routes.find(([pattern]) => typeof pattern === "string" ? href.startsWith(pattern) : pattern.test(href));
     if (!route) throw new Error(`unexpected fetch ${href}`);
     const value = typeof route[1] === "function" ? route[1](url, init) : route[1];
@@ -38,6 +44,59 @@ const mojeekHtml = `
 describe("packageSearch", () => {
   beforeEach(() => __resetPackageSearchForTest());
 
+  test("falls through an unresponsive SearXNG backend to engines after the connect timeout", async () => {
+    const calls = [];
+    const fetchImpl = async (url, init = {}) => {
+      const href = url.toString();
+      calls.push(href);
+      if (href.startsWith("http://dead-searxng.test/")) {
+        // backend accepts the request but never connects/responds: only abort stops it
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 60_000);
+          init.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal.reason ?? new Error("aborted")); }, { once: true });
+        });
+        throw new Error("unreachable");
+      }
+      if (href.startsWith("https://html.duckduckgo.com/html/")) return response(ddgHtml);
+      if (href.startsWith("https://www.mojeek.com/search")) return response("no results");
+      throw new Error(`unexpected fetch ${href}`);
+    };
+    const startedAt = Date.now();
+    const markdown = await packageSearch(
+      { query: "failover", limit: 5 },
+      { env: { settings: { web: { limit: { calls: 4 }, throttle: { startAt: 0.25, step: 0.25, stepMs: 1_000 }, search: { cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://html.duckduckgo.com/html/" }] } } } } },
+      { fetchImpl, env: { SEARXNG_URL: "http://dead-searxng.test/search" } },
+    );
+    const elapsed = Date.now() - startedAt;
+    expect(markdown).toContain('Search Results for "failover"');
+    expect(markdown).toContain("Alpha DDG");
+    expect(calls[0]).toStartWith("http://dead-searxng.test/");
+    expect(calls.some((url) => url.startsWith("https://html.duckduckgo.com/"))).toBe(true);
+    expect(elapsed).toBeLessThan(10_000);
+  }, 15_000);
+
+  test("keeps waiting for search results while the body trickles in after a fast connection", async () => {
+    const trickle = (text, chunkMs) => new ReadableStream({
+      start(controller) {
+        const half = Math.ceil(text.length / 2);
+        controller.enqueue(new TextEncoder().encode(text.slice(0, half)));
+        setTimeout(() => {
+          controller.enqueue(new TextEncoder().encode(text.slice(half)));
+          controller.close();
+        }, chunkMs);
+      },
+    });
+    const fetchImpl = createFetch([
+      ["http://slow-searxng.test/", () => response(trickle(JSON.stringify({ results: [{ title: "Slow", url: "https://slow.test/", content: "slow snippet" }] }), 2_600), { headers: { "content-type": "application/json" } })],
+    ]);
+    const markdown = await packageSearch(
+      { query: "slow", limit: 5 },
+      { env: { settings: { web: { search: { cacheSeconds: 0, engines: [] } } } } },
+      { fetchImpl, env: { SEARXNG_URL: "http://slow-searxng.test/search" } },
+    );
+    expect(markdown).toContain("URL: https://slow.test/");
+  }, 15_000);
+
   test("uses default DuckDuckGo, Mojeek, and credentialed Brave engines with consensus ranking", async () => {
     const brave = JSON.stringify({ web: { results: [
       { title: "Solo Brave", url: "https://brave.test/solo", description: "First but unconfirmed" },
@@ -54,7 +113,7 @@ describe("packageSearch", () => {
       { fetchImpl, env: { BRAVE_API_KEY: "brave-secret" } },
     );
 
-    expect(markdown).toStartWith("Code Path: engine aggregate");
+    expect(markdown).toStartWith("HTTP: engine aggregate");
     expect(markdown).toContain('Search Results for "alpha"');
     expect(markdown).toContain("URL: https://example.com/a?utm_source=x");
     expect(markdown).toContain("Engine Attempt: duckduckgo: success (2 results)");
@@ -71,6 +130,20 @@ describe("packageSearch", () => {
     expect(markdown).toContain("Found 4 results");
   });
 
+  test("empty SearXNG results fall through to the next backend", async () => {
+    const calls = [];
+    const fetchImpl = createFetch([
+      ["http://empty.test/", response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } })],
+      ["http://good.test/", response(JSON.stringify({ results: [{ title: "Good", url: "https://good.test/" }] }), { headers: { "content-type": "application/json" } })],
+    ], calls);
+    const markdown = await packageSearch({ query: "x", limit: 5 },
+      { env: { settings: { web: { search: { cacheSeconds: 0, backends: [
+        { type: "searxng", url: "http://empty.test/" }, { type: "searxng", url: "http://good.test/" },
+      ], engines: [] } } } } }, { fetchImpl });
+    expect(markdown).toContain("https://good.test/");
+    expect(calls).toHaveLength(2);
+  });
+
   test("tries configured SearXNG before direct engines and stops on recognized success", async () => {
     const calls = [];
     const fetchImpl = createFetch([
@@ -84,7 +157,7 @@ describe("packageSearch", () => {
       { fetchImpl },
     );
 
-    expect(markdown).toStartWith("Code Path: SearXNG (searxng)");
+    expect(markdown).toStartWith("HTTP: SearXNG (searxng)");
     expect(markdown).toContain("URL: https://local.test/");
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toContain("format=json");
@@ -187,7 +260,7 @@ describe("packageSearch", () => {
     const calls = [];
     const fetchImpl = createFetch([
       ["http://searx.test/", response("", { status: 302, headers: { location: "https://other.test/search" } })],
-      ["https://other.test/search", response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } })],
+      ["https://other.test/search", response(JSON.stringify({ results: [{ title: "Other", url: "https://other.test/result" }] }), { headers: { "content-type": "application/json" } })],
     ], calls);
 
     await packageSearch(
@@ -202,6 +275,16 @@ describe("packageSearch", () => {
     expect(calls[0].headers["accept-language"]).toBe("en-US,en;q=0.5");
     expect(calls[0].headers["upgrade-insecure-requests"]).toBe("1");
     expect(calls[1].headers.authorization).toBeUndefined();
+  });
+
+  test("all empty engines fail rather than report a successful zero-result search", async () => {
+    const fetchImpl = createFetch([
+      ["https://html.duckduckgo.com/html/", response("no results")],
+      ["https://www.mojeek.com/search", response("no results")],
+    ]);
+    await expect(packageSearch({ query: "nothing", limit: 5 },
+      { env: { settings: { web: { search: { cacheSeconds: 0 } } } } }, { fetchImpl, env: {} }))
+      .rejects.toThrow(/all configured search engines failed/);
   });
 
   test("returns aggregate errors after partial group failure only when all engines fail", async () => {
@@ -249,5 +332,66 @@ describe("packageSearch", () => {
     const markdown = await packageSearch({ query: "clamp", limit: 40, wasClamped: true }, { env: { settings: { web: { search: { cacheSeconds: 0 } } } } }, { fetchImpl });
 
     expect(markdown).toContain("returns at most 40 results");
+  });
+
+  test("shares the rate ledger with web-fetch: successful fetches throttle searches", async () => {
+    const savedEnv = { SEARXNG_URL: process.env.SEARXNG_URL, SEARXNG_BASE: process.env.SEARXNG_BASE };
+    delete process.env.SEARXNG_URL;
+    delete process.env.SEARXNG_BASE;
+    try {
+      const fetchImpl = createFetch([
+        ["https://html.duckduckgo.com/html/", response(ddgHtml)],
+        ["https://www.mojeek.com/search", response("no results")],
+        ["https://pages.example/", response("page", { headers: { "content-type": "text/plain" } })],
+      ]);
+      const pauses = [];
+      const sleep = async (ms) => { pauses.push(ms); };
+      const fetchContext = { env: { settings: { web: { limit: { calls: 4 }, throttle: { startAt: 0.25, step: 0.25, stepMs: 1_000 }, fetch: { cacheSeconds: 0 } } } } };
+      const fetchOptions = { fetch: fetchImpl, now: () => new Date(), sleep };
+      // Two successful fetches pause 1s then 2s (25%, then 50% of the shared
+      // burst window of 4) — the ledger both tools write to.
+      await packageFetch({ url: "https://pages.example/a" }, fetchContext, fetchOptions);
+      await packageFetch({ url: "https://pages.example/b" }, fetchContext, fetchOptions);
+      expect(pauses).toEqual([1_000, 2_000]);
+      const searchMarkdown = await packageSearch(
+        { query: "shared", limit: 5 },
+        { env: { settings: { web: { limit: { calls: 4 }, throttle: { startAt: 0.25, step: 0.25, stepMs: 1_000 }, search: { cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://html.duckduckgo.com/html/" }] } } } } },
+        { fetchImpl, env: {}, sleep },
+      );
+      expect(searchMarkdown).toContain("Alpha DDG");
+      // Search uses the same configured window: the third attempt is 75%.
+      // A fetch-only ledger would see only 25% here.
+      expect(pauses).toEqual([1_000, 2_000, 3_000]);
+      expect(ratePressure({ calls: 4, windowMs: 40_000 }, Date.now())).toBe(0.75);
+    } finally {
+      if (savedEnv.SEARXNG_URL === undefined) delete process.env.SEARXNG_URL; else process.env.SEARXNG_URL = savedEnv.SEARXNG_URL;
+      if (savedEnv.SEARXNG_BASE === undefined) delete process.env.SEARXNG_BASE; else process.env.SEARXNG_BASE = savedEnv.SEARXNG_BASE;
+      __resetWebRateForTests();
+    }
+  });
+
+  test("web limiter does not impose a parallel execution limit", async () => {
+    const savedEnv = { SEARXNG_URL: process.env.SEARXNG_URL, SEARXNG_BASE: process.env.SEARXNG_BASE };
+    delete process.env.SEARXNG_URL;
+    delete process.env.SEARXNG_BASE;
+    try {
+      let active = 0;
+      let peak = 0;
+      const fetchImpl = async (url) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await Bun.sleep(20);
+        active -= 1;
+        return response(ddgHtml);
+      };
+      const context = { env: { settings: { web: { search: { cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://html.duckduckgo.com/html/" }] } } } } };
+      // Direct backend calls have no parallelism cap. Agent dispatch owns it.
+      const results = await Promise.all([0, 1, 2, 3, 4].map((i) => packageSearch({ query: `q${i}`, limit: 5 }, context, { fetchImpl, env: {} })));
+      expect(results.every((markdown) => markdown.includes("Alpha DDG"))).toBe(true);
+      expect(peak).toBe(5); // parallelism belongs to the Agent dispatcher
+    } finally {
+      if (savedEnv.SEARXNG_URL === undefined) delete process.env.SEARXNG_URL; else process.env.SEARXNG_URL = savedEnv.SEARXNG_URL;
+      if (savedEnv.SEARXNG_BASE === undefined) delete process.env.SEARXNG_BASE; else process.env.SEARXNG_BASE = savedEnv.SEARXNG_BASE;
+    }
   });
 });

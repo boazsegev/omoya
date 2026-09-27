@@ -42,7 +42,7 @@
  *   - base64: true: the result encoded as base64 TEXT (the byte range
  *     in binary mode, the text result otherwise) for models without
  *     binary support.
- * With no options the raw file content is returned, exactly as before;
+ * Direct text reads prefix `[detected/mime-type]` for display clients;
  * a FOLDER listing shows each file entry's approximate size in bytes
  * (a directory's own "size" is inode bookkeeping, never its content,
  * so it's never shown). With info: true the tool returns a SUMMARY
@@ -62,7 +62,7 @@ import { grep, grepFolder, DEFAULT_MAX_MATCHES, DEFAULT_GREP_FILE_SIZE_LIMIT } f
 import { matchesGlob } from "./glob.js";
 import { isBinary } from "./binary.js";
 import { ancestorIgnores, isIgnored, isSystemFile, loadIgnore } from "./ignore.js";
-import { detectMime } from "./mime-detection.js";
+import { mimeDetect } from "./mime-detection.js";
 import { intArg, encodeIf, infoBlock } from "./util.js";
 
 // The root-folder hint, or null when the agent folder IS the project
@@ -245,7 +245,7 @@ export async function read({
     if (s > e) throw new Error("startChar must not be greater than endChar.");
     const slice = buf.subarray(Math.min(s, buf.length), Math.min(e, buf.length));
     const last = slice.length === 0 ? s : s + slice.length - 1;
-    const mime = detectMime({ path: resolved, buffer: slice });
+    const mime = mimeDetect({ path: resolved, buffer: slice });
     const encoded = slice.toString("base64");
     if (info) {
       return summary(`read would return ${slice.length} bytes (byte range ${s}–${last} of ${buf.length}, ${mime})`);
@@ -259,7 +259,9 @@ export async function read({
 
   /* ------------------------------------------------------ text modes */
 
-  let text = await readFile(resolved, byteGrep ? "latin1" : "utf8");
+  const content = await readFile(resolved);
+  let text = content.toString(byteGrep ? "latin1" : "utf8");
+  const typeHeader = `[${mimeDetect({ path: resolved, buffer: content })}]\n`;
   // only counted when actually needed (info:true) — a plain read of a
   // huge file never pays for a full code-point scan it doesn't ask for
   if (info) fullTextCounts = { characters: [...text].length, lines: text.split("\n").length };
@@ -275,7 +277,7 @@ export async function read({
       if (pattern === undefined) {
         const empty = `[lines ${s}–${e} of ${all.length} total]\n`;
         if (info) return summary(`read would return ${Buffer.byteLength(empty, "utf8")} bytes (lines ${s}–${e} of ${all.length})`);
-        return encodeIf(base64, empty);
+        return encodeIf(base64, typeHeader + empty);
       }
       lines = [];
     } else {
@@ -304,13 +306,13 @@ export async function read({
     if (info) return summary(`grep would return ${stats.matches} matches (${Buffer.byteLength(result, "utf8")} bytes)`);
     return encodeIf(base64, result);
   }
-  const result = header !== "" ? header + (lines ? lines.join("\n") : text) : text;
+  const result = typeHeader + header + (lines ? lines.join("\n") : text);
   if (info) {
     const scope = lineRange ? `lines ${lineOffset}–${lineOffset + (lines?.length ?? 1) - 1}`
       : charRange ? "character range" : "whole file";
     return summary(`read would return ${Buffer.byteLength(result, "utf8")} bytes (${scope})`);
   }
-  return encodeIf(base64, result); // header === "": the unchanged fast path
+  return encodeIf(base64, result);
 }
 
 /** Sniff up to 64 KiB and judge text vs. binary by CONTENT alone. */

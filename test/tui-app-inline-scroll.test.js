@@ -72,6 +72,21 @@ function fullLayout(items, width) {
 const trimLeadingBlank = (rows) => { const out = rows.slice(); while (out[0] === "") out.shift(); return out; };
 
 describe("inline transcript scrolling over a long soft-wrapped answer", () => {
+  test("final Markdown repaint replaces streamed text even when live rows reached native scrollback", () => {
+    const width = 40, height = 8;
+    const projector = createTranscriptProjector();
+    const streamed = session(width, height);
+    const draft = Array.from({ length: 35 }, (_, index) => `draft ${index}`).join("\n");
+    streamed.render(root(projector.project(blocks(draft, true))));
+    const final = "**final** and $x^2$";
+    const finalItems = projector.project(blocks(final));
+    streamed.render(root(finalItems));
+    const fresh = session(width, height);
+    fresh.render(root(createTranscriptProjector().project(blocks(final))));
+    expect(trimLeadingBlank(streamed.physical())).toEqual(trimLeadingBlank(fresh.physical()));
+    expect(streamed.physical().join("\n")).not.toContain("draft 0");
+  });
+
   for (const [width, height] of SIZES) {
     test(`${width}x${height}: each scroll step shifts the viewport by one row`, () => {
       const items = createTranscriptProjector().project(blocks(ANSWER));

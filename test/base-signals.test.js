@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { armCancelSignals } from "../lib/cli.js";
-import { createAssembler } from "../lib/context.js";
+import { assemblerCreate } from "../lib/context.js";
 
 const fakeProc = () => new EventEmitter();
 
@@ -45,9 +45,9 @@ describe("armCancelSignals", () => {
 describe("partial-assembly contract (cancellation)", () => {
   test("the assembler holds the partial assistant message when cancel lands mid-stream", () => {
     // Contract per Decisions: Context assembles the partial; Agent
-    // persists it. aiio.kill() itself is built in AI-IO on top of this.
+    // persists it. aiio.close() itself is built in AI-IO on top of this.
     const proc = fakeProc();
-    const assembler = createAssembler();
+    const assembler = assemblerCreate();
     assembler.consume({ type: "start" });
     assembler.consume({ type: "text_start", contentIndex: 0 });
     assembler.consume({ type: "text_delta", contentIndex: 0, text: "half an ans" });

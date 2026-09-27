@@ -14,6 +14,7 @@ import { createApp, msg } from "../lib/app/tui/app.js";
 import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
 import { NAMES } from "../lib/namespace.js";
 import { fakeIO, scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
+import { toolsLoad } from "./env-internals.js";
 
 const tick = () => new Promise((resolve) => queueMicrotask(resolve));
 async function until(fn, timeout = 2000) {
@@ -67,7 +68,7 @@ describe("agent adapter: turns as task streams", () => {
     expect(agent.busy).toBe(true); // the status bar's own rendering is test/tui-app-transcript.test.js's concern
 
     await until(() => !agent.busy);
-    expect(agent.context.map((m) => m.type)).toEqual([2, 3]);
+    expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3]);
     expect(agent.pending).toEqual([]);
 
     ui.stop();
@@ -103,7 +104,7 @@ describe("agent adapter: turns as task streams", () => {
     expect(cancelCalls).toBe(0); // never treated as an interrupt/second task
     expect(agent.pending).toEqual([]);
     expect(io.writes).toHaveLength(2); // one turn, two requests — the SAME loop drained the queued one
-    const userTurns = agent.context.filter((m) => m.type === 2);
+    const userTurns = agent.context.messages().filter((m) => m.type === 2);
     expect(userTurns.map((m) => m.content[0].text)).toEqual(["first", "second"]);
 
     ui.stop();
@@ -248,7 +249,7 @@ describe("agent adapter: real-agent tool hook bridge", () => {
     const listeners = Array.from({ length: Object.keys(Agent.EVENT).length }, () => []);
     let nextHandle = 0;
     const real = {
-      pending: [], setQuestion() {}, cancel() {},
+      pending: [], questionSet() {}, cancel() {},
       onEvent(event, callback) { const handle = ++nextHandle; listeners[event].push([callback, handle]); return handle; },
       offEvent(handle) { for (const entries of listeners) { const index = entries.findIndex((entry) => entry[1] === handle); if (index >= 0) { entries.splice(index, 1); return true; } } return false; },
       emit(event, value) { for (const [callback] of listeners[event]) callback(value); },
@@ -256,13 +257,13 @@ describe("agent adapter: real-agent tool hook bridge", () => {
         this.emit(Agent.EVENT.TOOL_EXECUTE, { callId: "c" });
         const result = { callId: "c", content: [] };
         this.emit(Agent.EVENT.TOOL_RESULT, { result, display: [] });
-        this.emit(Agent.EVENT.DONE, { type: "done" });
+        this.emit(Agent.EVENT.REQUEST_DONE, { type: "done" });
         return { type: "done" };
       },
     };
     real.onEvent(Agent.EVENT.TOOL_EXECUTE, (call) => seen.push(["prior-execute", call.callId]));
     real.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => seen.push(["prior-result", result.callId]));
-    const proxy = { pending: [], setQuestion() {}, cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
+    const proxy = { pending: [], questionSet() {}, cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
     const adapter = createAgentAdapter(proxy);
     const sent = [];
     await adapter.turnEffect().run({ send: (message) => sent.push(message), signal: new AbortController().signal });
@@ -276,7 +277,7 @@ describe("agent adapter: real-agent tool hook bridge", () => {
 describe("agent adapter: the question bridge", () => {
   test("a question toolcall opens a message; answering resolves it and the answer lands in the agent's context", async () => {
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q1] }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "answered"), { type: "done" }],
@@ -292,11 +293,11 @@ describe("agent adapter: the question bridge", () => {
 
     ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "B" } });
     await tick();
-    expect(agent.context.find((m) => m.type === 4)).toBeUndefined();
+    expect(agent.context.messages().find((m) => m.type === 4)).toBeUndefined();
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "B" } });
     await until(() => !agent.busy);
 
-    const result = agent.context.find((m) => m.type === 4);
+    const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.content[0].text).toBe("Q: Pick one?\nA: B");
 
     ui.stop();
@@ -304,10 +305,11 @@ describe("agent adapter: the question bridge", () => {
   });
 
   test("a test/ui-shaped worker permission question resumes with its canonical model selector", async () => {
-    const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    // a worker's model is a published catalog pair
+    const env = await testEnv({ p: { models: { m: {}, "ui-response": {} } } });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
-      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker", { name: "ui-response-demo", description: "UI response demonstrator", model: "p/ui-response", prompt: "Reply with the child-worker UI demonstration." }), { type: "done" }],
+      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "ui-response-demo", description: "UI response demonstrator", model: "p/ui-response" }], prompt: "Reply with the child-worker UI demonstration." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "worker started"), { type: "done" }],
     ]);
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
@@ -317,12 +319,12 @@ describe("agent adapter: the question bridge", () => {
     const running = ui.run(app);
 
     ui.dispatch(msg.submit("delegate this"));
-    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control child workers?"));
+    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control workers?"));
     ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     await until(() => !agent.busy);
 
-    expect(agent.context.find((message) => message.type === 4 && message.name === "worker").content[0].text).toBe("{}");
+    expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
     expect(agent.children).toHaveLength(1);
     expect(agent.children[0]).toMatchObject({ name: "ui-response-demo", endpoint: "p", model: "ui-response" });
     ui.stop();
@@ -331,9 +333,9 @@ describe("agent adapter: the question bridge", () => {
 
   test("a worker permission question resumes the tool call with the selected answer", async () => {
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
-      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker", { name: "reviewer", prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
+      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "reviewer" }], prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "worker started"), { type: "done" }],
     ]);
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
@@ -343,12 +345,12 @@ describe("agent adapter: the question bridge", () => {
     const running = ui.run(app);
 
     ui.dispatch(msg.submit("delegate this"));
-    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control child workers?"));
+    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control workers?"));
     ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     await until(() => !agent.busy);
 
-    expect(agent.context.find((message) => message.type === 4 && message.name === "worker").content[0].text).toBe("{}");
+    expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
     expect(agent.children).toHaveLength(1);
     expect(agent.children[0]).toMatchObject({ name: "reviewer", endpoint: "p", model: "m" });
     ui.stop();
@@ -357,9 +359,9 @@ describe("agent adapter: the question bridge", () => {
 
   test("a timed-out worker permission question closes and a late answer cannot spawn a worker", async () => {
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
-      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker", { name: "timed-out-reviewer", prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
+      [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "timed-out-reviewer" }], prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "continued without a worker"), { type: "done" }],
     ]);
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
@@ -369,11 +371,11 @@ describe("agent adapter: the question bridge", () => {
     const running = ui.run(app);
 
     ui.dispatch(msg.submit("delegate this"));
-    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control child workers?"));
+    await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control workers?"));
     agent._question.timeout(); // mirrors Agent's tool timeout boundary
     await until(() => !agent.busy);
 
-    expect(memory.snapshot().lines).not.toContain("Allow this Agent to create and control child workers?");
+    expect(memory.snapshot().lines).not.toContain("Allow this Agent to create and control workers?");
     ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     expect(agent.children).toHaveLength(0);
@@ -388,7 +390,7 @@ describe("agent adapter: the question bridge", () => {
     // the pending ask — a late menu answer can never resume the
     // timed-out tool call.
     const env = await testEnv();
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [{ question: "Pick one?", header: "Choice", options: [
         { label: "Alpha", description: "first" }, { label: "Beta", description: "second" },
@@ -406,7 +408,7 @@ describe("agent adapter: the question bridge", () => {
 
     // Never answer: the 300ms tool-call timeout fires the boundary itself.
     await until(() => !agent.busy);
-    const result = agent.context.find((message) => message.type === 4 && message.name === "question");
+    const result = agent.context.messages().find((message) => message.type === 4 && message.name === "question");
     expect(result.content[0].text).toContain('tool "question" timed out after 300ms');
     // The tool-call JSON echoed into the transcript mentions the option
     // labels; the QUESTIONNAIRE overlay is what must be gone.
@@ -418,7 +420,7 @@ describe("agent adapter: the question bridge", () => {
     ui.dispatch({ type: "menu.select", id: QUESTION_MENU_ID, item: { value: "Alpha" } });
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Alpha" } });
     await until(() => !agent.busy);
-    expect(agent.context.filter((message) => message.type === 4 && message.name === "question")).toHaveLength(1);
+    expect(agent.context.messages().filter((message) => message.type === 4 && message.name === "question")).toHaveLength(1);
 
     ui.stop();
     await running;
@@ -427,8 +429,8 @@ describe("agent adapter: the question bridge", () => {
   test("abandonPending resolves every open question with null — a clean exit never hangs a tool call", async () => {
     let capturedBridge;
     const fakeAgent = {
-      pending: [], enqueue() {}, cancel() {}, run: () => new Promise(() => {}),
-      setQuestion(bridge) { capturedBridge = bridge; },
+      pending: [], send() {}, cancel() {}, run: () => new Promise(() => {}),
+      questionSet(bridge) { capturedBridge = bridge; },
       _toolContext: () => ({ resetTimeout() {} }),
     };
     const adapter = createAgentAdapter(fakeAgent);

@@ -32,7 +32,7 @@ describe("Agent busy / ioState (public TUI surface)", () => {
 
   test("a connection-class error marks disconnected until a request succeeds", async () => {
     const env = await testEnv();
-    env.settings.maxAttempts = 1; // one shot: this test asserts the post-FAILURE surface, not the retry wait
+    env.settings.retry = { attempts: 1 }; // one shot: this test asserts the post-FAILURE surface, not the retry wait
     const io = scriptedIO([
       [{ type: "error", error: "connection refused", kind: "network" }],
       [...TEXT(0, "recovered"), { type: "done" }],

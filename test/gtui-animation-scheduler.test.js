@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createTheme } from "../lib/app/gtui/theme.js";
 import { layoutView } from "../lib/app/gtui/layout.js";
-import { compileAnimations, scheduleCompiledAnimations, animationTimerWake, animationSchedulerInternals } from "../lib/app/gtui/animation-scheduler.js";
+import { animationApply, compileAnimations, scheduleCompiledAnimations, animationTimerWake, animationSchedulerInternals } from "../lib/app/gtui/animation-scheduler.js";
+import { sceneBaseBuffer } from "../lib/app/gtui/scene-buffer.js";
 import { cometFrame, flashFrame, waveFrame } from "../lib/app/gtui/theme.js";
 
 function scene(text, theme) { return layoutView({ type: "text", margin: 0, role: "busy", content: text }, { width: 12, height: 1, theme }); }
@@ -11,20 +12,29 @@ function fakeClock(time = 0) {
 }
 
 describe("GTUI compiled animation scheduler", () => {
-  test("compiles animated runs into one timer and reuses its painted buffer", () => {
+  test("compiles animated runs into one timer and hands the host only due style updates", () => {
     const theme = createTheme({ text: {}, busy: { animation: { type: "flash", period: 30 }, fg: 1 }, accent: { fg: 2 } });
-    const compiled = compileAnimations(scene("abcdefgh", theme), theme, { time: 0, sampleMs: 50 });
+    const shown = scene("abcdefgh", theme);
+    const compiled = compileAnimations(shown, theme, { sampleMs: 50 });
     expect(compiled.targets.length).toBe(1);
-    const buffer = compiled.buffer;
-    const clock = fakeClock(); let paints = 0;
-    const sink = { paint(_sink, value) { paints++; expect(value).toBe(buffer); } };
+    expect("buffer" in compiled).toBe(false); // the host owns the screen buffers
+    // The host paints its frame and applies the current phase into it.
+    const frame = sceneBaseBuffer(shown, theme);
+    animationApply(compiled, frame, 0);
+    const clock = fakeClock(); const painted = [];
+    const sink = { paint(_sink, updates) { painted.push(updates); } };
     const state = { compiled, sink, timer: null, disposed: false, generation: 1, expectedGeneration: 1, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout };
     scheduleCompiledAnimations(state);
     expect(clock.calls.length).toBe(1);
-    clock.set(30); animationTimerWake(state);
-    expect(paints).toBe(1);
-    expect(compiled.buffer).toBe(buffer);
-    expect(compiled.allocations).toBe(1);
+    clock.set(15); animationTimerWake(state); // same phase as the painted frame
+    expect(painted).toEqual([]);
+    clock.set(30); animationTimerWake(state); // next phase
+    expect(painted).toHaveLength(1);
+    const [[target, styles]] = painted[0];
+    expect(target).toBe(compiled.targets[0]);
+    expect(styles).toHaveLength(8);
+    clock.set(45); animationTimerWake(state); // still that phase: nothing new
+    expect(painted).toHaveLength(1);
   });
 
   test("collapses identical output phases and jumps late directly to its absolute phase", () => {
@@ -37,7 +47,7 @@ describe("GTUI compiled animation scheduler", () => {
     expect(target.frames.map((frame) => frame.duration)).toEqual([25, 25]);
     const clock = fakeClock(175); let paints = 0;
     const sink = { paint() { paints++; } };
-    const state = { compiled: { buffer: compileAnimations(scene("x", changing), changing, { time: 0, sampleMs: 50 }).buffer, theme: changing, targets: [target], sampleMs: 50 }, sink, timer: null, disposed: false, generation: 1, expectedGeneration: 1, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout };
+    const state = { compiled: { theme: changing, targets: [target], sampleMs: 50 }, sink, timer: null, disposed: false, generation: 1, expectedGeneration: 1, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout };
     animationTimerWake(state);
     expect(paints).toBe(1); // no replay of missed 25ms phases
     expect(clock.calls.at(-1).delay).toBe(25); // next absolute boundary: 200

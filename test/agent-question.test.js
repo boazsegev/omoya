@@ -10,13 +10,14 @@ import { Env } from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
 import { question } from "../tools/question.js";
 import { scriptedIO, TOOLCALL } from "./fakes.js";
+import { toolEntry, toolNamesSafe, toolSchemas, toolsLoad } from "./env-internals.js";
 
 const DIRS = [];
 const tmpEnv = async () => {
   const dir = mkdtempSync("./ai-tmp/question-");
   DIRS.push(dir);
   const env = new Env({ dir, cwd: dir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
-  await env.loadTools({ dirs: ["./tools"] });
+  await toolsLoad(env, { dirs: ["./tools"] });
   return env;
 };
 afterEach(() => { while (DIRS.length) rmSync(DIRS.pop(), { recursive: true, force: true }); });
@@ -91,7 +92,7 @@ describe("question tool: the bridge", () => {
 
   test("the bridge is harness metadata: never in the published schema", async () => {
     const env = await tmpEnv();
-    const [schema] = env.toolSchemas(["question"]);
+    const [schema] = toolSchemas(env, ["question"]);
     expect(schema.name).toBe("question");
     expect(schema.safe).toBeUndefined(); // stripped
     expect("ask" in schema).toBe(false); // the bridge is never published
@@ -101,11 +102,11 @@ describe("question tool: the bridge", () => {
 
   test("published as SAFE and SANDBOXED through typed IPC", async () => {
     const env = await tmpEnv();
-    expect(env.safeToolNames()).toContain("question");
-    expect(env.toolEntry("question")).toMatchObject({ safe: true, sandbox: true });
-    expect(env.safe.toolNames()).toContain("question");
-    // the safe view forwards the context (the bridge) to the tool
-    const out = await env.safe.callTool("question", { questions: [Q()] }, { question: { ask: async () => [{ labels: ["A"] }] } });
+    expect(toolNamesSafe(env)).toContain("question");
+    expect(toolEntry(env, "question")).toMatchObject({ safe: true, sandbox: true });
+    expect((await env.tools(true)).has("question")).toBe(true);
+    // a safe call forwards the context (the bridge) to the tool
+    const out = await env.toolCall("question", { questions: [Q()] }, { safe: true, question: { ask: async () => [{ labels: ["A"] }] } });
     expect(out).toContain("A: A");
   });
 });
@@ -125,11 +126,11 @@ describe("Agent: the question bridge wiring", () => {
     await agent.run();
     expect(answers).toHaveLength(1);
     expect(answers[0][0].question).toBe("Pick one?");
-    const result = agent.context.find((m) => m.type === 4);
+    const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.content[0].text).toContain("from the constructor");
     // setQuestion replaces the bridge at runtime
-    agent.setQuestion({ ask: async () => [{ labels: ["B"] }] });
-    const direct = await env.callTool("question", { questions: [Q()] }, agent._toolContext());
+    agent.questionSet({ ask: async () => [{ labels: ["B"] }] });
+    const direct = await env.toolCall("question", { questions: [Q()] }, agent._toolContext());
     expect(direct).toContain("A: B");
   });
 
@@ -147,7 +148,7 @@ describe("Agent: the question bridge wiring", () => {
     });
     await agent.run();
     expect(bridged).toBe(1); // typed fd-3/fd-4 IPC crosses the sandbox boundary
-    const result = agent.context.find((m) => m.type === 4);
+    const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.error).toBeFalsy();
     expect(result.content[0].text).toContain("A: A");
   });
@@ -160,7 +161,7 @@ describe("Agent: the question bridge wiring", () => {
     ]);
     const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
     await agent.run();
-    const result = agent.context.find((m) => m.type === 4);
+    const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.error).toBe(true);
     expect(result.content[0].text).toBe("tool error: Proceed using your best judgment within available permissions; no user is available to answer questions right now.");
   });

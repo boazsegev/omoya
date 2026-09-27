@@ -13,13 +13,28 @@ import { ITALIC } from "../lib/app/gtui/cell.js";
 import { DEFAULT_THEME, resolveTheme, themePreviewRows } from "../lib/app/tui/theme-data.js";
 
 describe("bundled themes", () => {
+  test("all named themes provide light and dark palettes with their own background and text", () => {
+    for (const file of readdirSync("themes").filter((name) => name.endsWith(".json"))) {
+      const entry = Object.values(JSON.parse(readFileSync(`themes/${file}`, "utf8")).tui.themes)[0];
+      for (const mode of ["light", "dark"]) {
+        expect(entry[mode]?.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(entry[mode]?.text?.fg).toMatch(/^#[0-9a-f]{6}$/i);
+        const resolved = createTheme(resolveTheme({ tui: { theme: "sample", themes: { sample: entry } } }), { dark: mode === "dark" });
+        expect(resolved.resolve("background").bg).toBe(entry[mode].background.bg);
+        expect(resolved.resolve("text").fg).toBe(entry[mode].text.fg);
+      }
+    }
+  });
   test("declare an explicit global background so hosts never infer one from text colors", () => {
     const files = readdirSync("themes").filter((file) => file.endsWith(".json"));
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const parsed = JSON.parse(readFileSync(`themes/${file}`, "utf8"));
       const theme = Object.values(parsed.tui.themes)[0];
-      expect(theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
+      if (theme.light || theme.dark) {
+        expect(theme.light?.background?.bg ?? theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
+        expect(theme.dark?.background?.bg ?? theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
+      } else expect(theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
     }
   });
 });
@@ -28,7 +43,7 @@ describe("tui.theme / tui.themes: discoverable in the settings schema", () => {
   test("both keys default and describe themselves, before any tool loads", () => {
     const dir = mkdtempSync("./ai-tmp/theme-schema-");
     const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
-    const schema = env.defaultsSchema();
+    const schema = env.settingsSchema();
     expect(schema.tui.default.theme).toBe("default");
     expect(schema.tui.default.themes).toEqual({});
     expect(schema.tui.description).toEqual(expect.any(String));
@@ -60,10 +75,23 @@ describe("resolveTheme: fallback and reject", () => {
     expect(resolved.parent).toBeUndefined();
   });
 
+  test("mode qualifiers layer shared roles and inherit parent modes without losing role details", () => {
+    const tokens = resolveTheme({ tui: { theme: "child", themes: {
+      parent: { "message.user": { bold: true, decoration: { left: { glyph: "▌", role: "accent" } } }, light: { "message.user": { fg: "#123456" }, background: { bg: "#ffffff" } } },
+      child: { parent: "parent", "message.user": { italic: true }, light: { "message.user": { bg: "#eeeeee" } }, dark: { "message.user": { fg: "#abcdef" } } },
+    } } });
+    expect(createTheme(tokens, { dark: false }).resolve("message.user")).toMatchObject({ fg: "#123456", bg: "#eeeeee" });
+    expect(createTheme(tokens, { dark: true }).resolve("message.user")).toMatchObject({ fg: "#abcdef" });
+    expect(createTheme(tokens, { dark: false }).resolve("message.user").attrs).not.toBe(0);
+    expect(createTheme(tokens, { dark: false }).resolve("background").bg).toBe("#ffffff");
+    expect(createTheme(tokens, { colorfgbg: "invalid", dark: null }).resolve("background").bg).toBeNull();
+  });
+
   test("theme parents reject missing names, malformed values, and cycles", () => {
     expect(() => resolveTheme({ tui: { theme: "child", themes: { child: { parent: "missing" } } } })).toThrow(/parent "missing" does not exist/);
     expect(() => resolveTheme({ tui: { theme: "child", themes: { child: { parent: 7 } } } })).toThrow(/parent must be a non-empty theme name/);
     expect(() => resolveTheme({ tui: { theme: "a", themes: { a: { parent: "b" }, b: { parent: "a" } } } })).toThrow(/parent cycle: a -> b -> a/);
+    expect(() => resolveTheme({ tui: { theme: "bad", themes: { bad: { light: [] } } } })).toThrow(/\.light must be an object/);
   });
 
   // Contract only: the shape of the caps map and that custom theme values

@@ -1,8 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { runJobAgent, ensureJobsLayout, dispatchJobs, parseTask, loadTaskState } from "../lib/jobs.js";
-import Agent, { findSessionFile } from "../lib/agent.js";
+import { runJobAgent } from "../lib/jobs/agent-execution.js";
+import { ensureJobsLayout } from "../lib/jobs/lifecycle.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
+import { parseTask } from "../lib/jobs/tasks.js";
+import { loadTaskState } from "../lib/jobs/state.js";
+import Agent from "../lib/agent.js";
 import Env from "../lib/env.js";
 import Context from "../lib/context.js";
 
@@ -11,14 +15,14 @@ afterEach(async () => { for (const root of roots.splice(0)) await fs.rm(root, { 
 async function root() { await fs.mkdir("./ai-tmp", { recursive: true }); const p = resolve(await fs.mkdtemp("./ai-tmp/jobs-agent-")); roots.push(p); return p; }
 function harness(extra = {}) {
   const agents = [], calls = [];
-  const env = { endpointSettings: () => ({}), maxAttempts: 9 };
+  const env = { models: () => new Map() };
   return { agents, calls, options: {
     createEnv: async () => env,
     selectModel: async (_, args, flags) => { calls.push({ args, flags }); return { endpoint: "test", model: args.model ?? "default" }; },
     effectiveTimeout: ({ timeout }) => timeout ?? 1234,
     createAgent: (settings) => {
       const listeners = [];
-      const agent = { settings, append: (message) => { agent.prompt = message; }, session: { flush() {} },
+      const agent = { settings, context: { append: (message) => { agent.prompt = message; }, flush() {} },
         onEvent(_event, callback) { listeners.push(callback); return listeners.length; }, emit(call) { for (const listener of listeners) listener(call); },
         async run() { return { type: "done" }; }, cancel() { agent.cancelled = true; }, close() {} };
       agents.push(agent); return agent;
@@ -36,13 +40,13 @@ test("fresh agents/sessions, omitted tools vs empty tools, Agent-owned timeout a
   expect(Object.hasOwn(h.agents[0].settings, "timeout")).toBeFalse();
   expect(h.agents[1].settings.timeout).toBe(4567);
   expect(ready.map((v) => v.timeout)).toEqual([1234, 4567]);
-  expect(h.agents[0].prompt).toEqual(Context.userMessage("snapshot"));
+  expect(h.agents[0].prompt).toEqual(Context.messageUser("snapshot"));
   expect(h.agents[0].settings).toMatchObject({ toolCall: { detached: false } });
   expect(h.calls[0].flags.lastUsed).toBeTrue();
 });
 test("missing model/login and question requests finish blocked", async () => {
   for (const mode of ["model", "login", "question", "auth", "bridge"]) {
-    const h = harness(mode === "model" ? { selectModel: async () => ({}) } : mode === "login" ? { createEnv: async () => ({ endpointSettings: () => ({ loginRequired: true }) }) } : {});
+    const h = harness(mode === "model" ? { selectModel: async () => ({}) } : mode === "login" ? { createEnv: async () => ({ models: () => new Map([["test/default", { endpoint: "test", model: "default", loginRequired: true }]]) }) } : {});
     const create = h.options.createAgent;
     h.options.createAgent = (settings) => { const agent = create(settings); agent.run = async () => {
       if (mode === "question") agent.emit({ name: mode });
@@ -60,24 +64,24 @@ test("a deliberate cancel signal cancels the in-flight agent and reports cancell
   expect(result.outcome).toBe("cancelled"); expect(h.agents[0].cancelled).toBeTrue();
 });
 test("real Agent owns provider retries, transcript and inherited tool context", async () => {
-  const p = await root(); const env = new Env({ dir: p, cwd: p, settingsDir: null, settings: { maxAttempts: 2, retryBase: 1, retryMax: 1, contextGuardCap: 0.5 } });
-  env.endpoints.test = { provider: "test" };
+  const p = await root(); const env = new Env({ dir: p, cwd: p, settingsDir: null, settings: { retry: { attempts: 2, base: 1, max: 1 }, context: { cap: 0.5 }, sessions: resolve(p) } });
+  env._endpoints.test = { provider: "test" };
   let writes = 0, detached;
-  env.registerTool("probe", (_, context) => { detached = context.detached; return "ok"; }, { safe: true, inputSchema: { type: "object" } });
+  env.toolAdd("probe", (_, context) => { detached = context.detached; return "ok"; }, { safe: true, inputSchema: { type: "object" } });
   const result = await runJobAgent({ prompt: "persisted prompt", tools: [] }, {
     projectRoot: p, createEnv: async () => env, selectModel: async () => ({ endpoint: "test", model: "fake" }), effectiveTimeout: () => 1000,
-    createAgent: (settings) => new Agent({ ...settings, sessionDir: p, createIO: () => ({
-      async write() { writes++; return writes === 1 ? { type: "error", kind: "network" } : { type: "done", message: Context.assistantMessage([Context.textContent("answer")]) }; }, kill() {},
+    createAgent: (settings) => new Agent({ ...settings, env, createIO: () => ({
+      async write() { writes++; return writes === 1 ? { type: "error", kind: "network" } : { type: "done", message: Context.messageAssistant([Context.contentText("answer")]) }; }, close() {},
     }) }),
   });
   expect(result.outcome).toBe("completed"); expect(writes).toBe(2);
-  const transcript = await fs.readFile(findSessionFile(p, result.session), "utf8");
+  const transcript = await fs.readFile(Context.fileOf({ dir: p, id: result.session }), "utf8");
   expect(transcript).toContain("persisted prompt"); expect(transcript).toContain("answer");
   for (const policy of [undefined, false]) {
     let turn = 0;
     const agent = new Agent({ env, model: "test/fake", toolCall: policy === undefined ? {} : { detached: false }, createIO: () => ({ async write() {
-      return ++turn === 1 ? { type: "done", message: Context.assistantMessage([{ type: "toolCall", name: "probe", arguments: {} }]) } : { type: "done" };
-    }, kill() {} }) });
+      return ++turn === 1 ? { type: "done", message: Context.messageAssistant([{ type: "toolCall", name: "probe", arguments: {} }]) } : { type: "done" };
+    }, close() {} }) });
     await agent.run(); expect(detached).toBe(policy !== false); agent.close();
   }
 });
@@ -86,10 +90,10 @@ test("default dispatcher runs agents in-process serially against one shared env 
   for (const name of ["a.md", "b.md"]) await fs.writeFile(join(paths.tasks, name), name);
   let envCreations = 0, active = 0, maximum = 0; const agents = [], closes = [];
   const sharedEnv = {
-    endpointSettings: () => ({}), maxAttempts: 1,
-    createAgent(settings) {
+    models: () => new Map(),
+    agentCreate(settings) {
       let closed = false;
-      const agent = { settings, append() {}, session: { flush() {} }, onEvent() {}, cancel() {},
+      const agent = { settings, context: { append() {}, flush() {} }, onEvent() {}, cancel() {},
         async run() { maximum = Math.max(maximum, ++active); await Promise.resolve(); active--; return { type: "done" }; },
         close() { if (!closed) { closed = true; closes.push(agent); } } };
       agents.push(agent); return agent;

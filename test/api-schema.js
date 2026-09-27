@@ -7,6 +7,15 @@ const tick = String.fromCharCode(96);
 const fence = `${tick}${tick}${tick}`;
 const TYPE_FENCE = "ts";
 const shapes = {
+  "env-allow": "string[]",
+  "env-refuse": "string[]",
+  extensions: "string[]",
+  prompts: "string | string[]",
+  providerPaths: "string | string[]",
+  skills: "string | string[]",
+  "tools.folders": "string[]",
+  "tui.keys": { "<key>": "key binding" },
+  "providerTools": { "<tool>": "boolean" },
   mcp: { "<server>": { command: "string", args: "string[]", env: "object", timeout: "number", safe: "boolean", description: "string" } },
   providers: { "<endpoint>": { provider: "string", url: "string", model: "string", timeout: "number", contextWindow: "number", models: "object" } },
   "tui.themes": { "<theme>": {
@@ -96,10 +105,25 @@ function publicSchemas(data) {
   }
   return out;
 }
+function infer(value, path = "") {
+  if (shapes[path] !== undefined) return shapes[path];
+  if (Array.isArray(value)) return value.length ? `${infer(value[0])}[]` : "unknown[]";
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .map(([key, item]) => [key, infer(item, path ? `${path}.${key}` : key)]));
+  return value === undefined ? "unknown" : typeof value;
+}
+function combine(base, contributed) {
+  if (!base || typeof base !== "object" || Array.isArray(base)) return contributed ?? base;
+  if (!contributed || typeof contributed !== "object" || Array.isArray(contributed)) return base;
+  return Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(contributed)])]
+    .map((key) => [key, combine(base[key], contributed[key])]));
+}
 function settingsSchemas(data) {
   const contract = data.contracts.find((item) => Array.isArray(item.entries));
   const values = {};
-  for (const entry of contract?.entries || []) values[entry.key] = shapes[entry.key] || (entry.default === undefined ? "unknown" : entry.default);
+  for (const entry of contract?.entries || []) {
+    values[entry.key] = infer(combine(entry.coreDefault, entry.value), entry.key);
+  }
   return schemaSection("Env.settings", values);
 }
 function typedefSchemas(data) {

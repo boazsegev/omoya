@@ -26,9 +26,20 @@
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --radius: 12px; --radius-s: 8px;
   --col: 48rem;
+  /* Documentation-site motion, adapted to the app's short-lived UI. */
+  --motion: 180ms; --hover-motion: 300ms; --entrance-motion: .8s; --motion-ease: cubic-bezier(.2, .7, .2, 1);
   --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
+/* Bounded math layout: source is available in the native title tooltip. */
+.md-math, .md-math-block { font-family: Cambria, "Cambria Math", serif; white-space: nowrap; }
+.md-math-block { display: block; width: max-content; max-width: 100%; overflow-x: auto; margin: 1em auto; text-align: center; }
+.md-frac { display: inline-flex; vertical-align: middle; flex-direction: column; text-align: center; line-height: 1.2; }
+.md-frac > :first-child { border-bottom: 1px solid currentColor; padding: 0 .2em .1em; }
+.md-frac > :last-child { padding: .1em .2em 0; }
+.md-sqrt > span { border-top: 1px solid currentColor; padding: .08em .1em 0; }
+.md-scripts { display: inline-flex; flex-direction: column; font-size: .7em; line-height: 1; vertical-align: middle; }
+.md-scripts sup, .md-scripts sub { font-size: inherit; line-height: inherit; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
 [hidden] { display: none !important; }
@@ -92,11 +103,17 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
   border: 1px solid var(--border); border-radius: 999px; padding: .05rem .55rem; background: none; color: var(--muted); font-size: .74rem; font-family: var(--mono);
 }
 .session-badge.saved::before { content: "● "; color: var(--ok); }
-.session-badge.paused::before { content: "❚❚ "; color: var(--warn); }
 .session-badge.ghost { border-style: dashed; }
 .mode-badge { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); font-family: var(--font); }
-.header-actions { display: flex; align-items: center; gap: .15rem; flex: none; }
-.connection-state { display: inline-flex; align-items: center; gap: .4rem; margin-right: .4rem; color: var(--muted); font-size: .8rem; }
+.header-actions { display: flex; align-items: center; gap: .15rem; flex: none; font-size: 1em; }
+.header-actions .icon-button { font-size: 1em; min-width: 2.75rem; min-height: 2.75rem; }
+.connection-state { display: inline-flex; align-items: center; gap: .4rem; margin-right: .4rem; color: var(--muted); font-size: 1em; }
+.appearance-switch { display: inline-flex; align-items: center; padding: .15rem; border: 1px solid var(--border); border-radius: 999px; background: var(--raise); }
+.appearance-option { display: inline-grid; place-items: center; min-width: 2.75rem; min-height: 2.75rem; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: 1em; }
+.appearance-option[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.appearance-option:hover { background: var(--raise-2); color: var(--fg); }
+@media (max-width: 48rem) { .header-actions .state-label { display: none; } }
+@media (max-width: 36rem) { .header-actions .palette-button { display: none; } .appearance-option, .header-actions .icon-button { min-width: 2.5rem; } }
 .connection-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--warn); }
 .connection-dot.online { background: var(--status-idle, var(--ok)); }
 .connection-dot.online.working { background: var(--status-busy, var(--accent)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-busy, var(--accent)) 25%, transparent); animation: pulse 1.4s ease-in-out infinite; }
@@ -168,6 +185,12 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 .transcript-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
 .transcript { width: min(var(--col), 100%); margin: 0 auto; padding: 1.5rem 1.25rem 2rem; display: flex; flex-direction: column; gap: 1rem; }
 .empty-state { margin: 12vh auto 0; max-width: 34rem; text-align: center; display: grid; justify-items: center; gap: .35rem; }
+/* The welcome and newly mounted bubbles share the docs hero's rise. */
+.empty-state > * { animation: welcome-rise var(--entrance-motion) var(--motion-ease) both; }
+.empty-state > :nth-child(2) { animation-delay: 60ms; }
+.empty-state > :nth-child(3) { animation-delay: 120ms; }
+.empty-state > :nth-child(4) { animation-delay: 180ms; }
+.empty-state > :nth-child(n+5) { animation-delay: 260ms; }
 .empty-state h1 { margin: 0 0 .3rem; font-size: clamp(2.2rem, 7vw, 3.2rem); letter-spacing: -.02em; }
 .empty-lead { margin: 0 0 .6rem; color: var(--muted); font-size: 1.02rem; }
 .empty-tips { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem; margin-bottom: .6rem; }
@@ -175,11 +198,34 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 .suggestion:hover { border-color: var(--accent); background: var(--accent-soft); }
 .keys-line kbd { font-size: .72rem; }
 
+.message-row { position: relative; display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius); }
+/* The row survives stream patches; hover cannot drop between replaced bubbles. */
+.message-row::before {
+  content: ""; position: absolute; z-index: 2; inset: 0; border-radius: inherit; pointer-events: none;
+  background: var(--accent-soft); opacity: 0; transition: opacity var(--hover-motion) var(--motion-ease);
+}
+.message-row:hover::before, .message-row:focus-within::before { opacity: .45; }
+.message-row > .msg { z-index: 1; }
+.message-row.message-user::after, .message-row.message-thinking::after, .message-row.message-system::after, .message-row.message-tool::after {
+  content: ""; position: absolute; z-index: 2; inset: 0; border-radius: inherit;
+  box-shadow: inset .1875rem 0 0 var(--rail-color); opacity: .6; pointer-events: none;
+  transition: opacity var(--hover-motion) var(--motion-ease);
+}
+.message-row.message-user { --rail-color: var(--user-rail, var(--accent)); }
+.message-row.message-thinking { --rail-color: var(--thinking-rail, var(--accent)); }
+.message-row.message-system { --rail-color: var(--system-rail, var(--accent)); }
+.message-row.message-tool { --rail-color: var(--tool-call, var(--accent)); }
+.message-row.message-tool.tool-ok { --rail-color: var(--tool-ok, var(--ok)); }
+.message-row.message-tool.tool-error { --rail-color: var(--tool-err, var(--danger)); }
+.message-row:hover::after, .message-row:focus-within::after { opacity: 1; }
+.message-row.message-user { align-self: flex-end; width: fit-content; max-width: min(85%, 40rem); border-radius: 16px 16px 4px 16px; }
+.message-row.message-user > .msg { align-self: stretch; max-width: 100%; }
 .msg { position: relative; max-width: 100%; min-width: 0; }
+/* Only row creation starts motion; streaming patches keep this node mounted. */
+.message-row.entering { animation: welcome-rise var(--entrance-motion) var(--motion-ease) both; }
 .msg-user {
-  align-self: flex-end; max-width: min(85%, 40rem); padding: .6rem .9rem; border-radius: 16px 16px 4px 16px;
+  padding: .6rem .9rem; border-radius: 16px 16px 4px 16px;
   background: var(--user-bg, var(--raise-2)); color: var(--user-fg, var(--fg));
-  box-shadow: inset 3px 0 0 var(--user-rail, transparent);
 }
 .user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-assistant { color: var(--assistant-fg, var(--fg)); }
@@ -191,9 +237,9 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 .block-controls:not(.always) {
   position: absolute; z-index: 2; top: -.95rem; right: .4rem; padding: 2px;
   border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 4px 14px var(--shadow);
-  opacity: 0; pointer-events: none; transform: translateY(2px); transition: opacity .12s ease, transform .12s ease;
+  opacity: 0; pointer-events: none; transform: translateY(2px); transition: opacity var(--hover-motion) var(--motion-ease), transform var(--hover-motion) var(--motion-ease);
 }
-.msg:hover .block-controls, .msg:focus-within .block-controls { opacity: 1; pointer-events: auto; transform: none; }
+.message-row:hover .block-controls, .message-row:focus-within .block-controls { opacity: 1; pointer-events: auto; transform: none; }
 .msg-tool:not([open]) .tool-body .block-controls { display: none; }
 .block-icon { width: 1.75rem; height: 1.75rem; display: grid; place-items: center; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: .9rem; }
 .block-icon:hover { background: var(--raise-2); color: var(--fg); }
@@ -208,26 +254,30 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 .msg-thinking > summary::-webkit-details-marker, .msg-tool > summary::-webkit-details-marker, .msg-system > summary::-webkit-details-marker { display: none; }
 .card-head::after { content: "›"; order: 10; margin-left: auto; color: var(--muted); transition: transform .15s ease; }
 details[open] > summary > .card-head::after { transform: rotate(90deg); }
+/* Documentation's details fade, scoped to app disclosure bodies. */
+.msg-thinking[open] > .thinking-body, .msg-tool[open] > .tool-body, .msg-system[open] > .system-body { animation: detail-fade .25s var(--motion-ease); }
 /* collapsed preview: first line · omission marker · tail (TUI parity) */
 .block-preview { margin: .2rem 0 .3rem; padding-left: .1rem; color: var(--muted); font: .8rem/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .block-preview.thinking-preview { color: var(--thinking-fg, var(--muted)); font-family: var(--font); font-style: italic; font-size: .85rem; }
+.block-preview.markdown-preview { white-space: normal; }
+.block-preview.markdown-preview > div > :first-child { margin-top: 0; }
+.block-preview.markdown-preview > div > :last-child { margin-bottom: 0; }
+.block-preview.markdown-preview > .preview-gap { display: block; width: fit-content; }
 .block-preview.error { color: var(--tool-err, var(--danger)); }
 .preview-gap { display: inline-block; margin: .1rem 0; padding: 0 .45rem; border-radius: 999px; background: var(--raise-2); color: var(--muted); font: 600 .68rem/1.6 var(--font); font-style: normal; }
 details[open] > summary > .block-preview { display: none; }
 .tool-body .block-preview { margin: 0; padding: .6rem .75rem; border-radius: var(--radius-s); background: var(--code-bg, var(--raise)); color: var(--fg); }
-.msg-thinking > summary:hover, .msg-tool > summary:hover, .msg-system > summary:hover { background: var(--raise); }
+.msg-thinking > summary, .msg-tool > summary, .msg-system > summary { transition: background-color var(--hover-motion) var(--motion-ease); }
+.message-row:hover > .msg > summary, .message-row:focus-within > .msg > summary { background: var(--raise); }
 .block-kind { flex: none; font-size: .82rem; font-weight: 600; color: var(--muted); }
-.msg-thinking { box-shadow: inset 3px 0 0 var(--thinking-rail, color-mix(in srgb, var(--muted) 40%, transparent)); }
 .msg-thinking .block-kind { color: var(--thinking-fg, var(--muted)); }
 .msg-thinking.streaming .block-kind { background: linear-gradient(90deg, var(--muted), var(--fg), var(--muted)); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 1.6s linear infinite; }
 .thinking-body { padding: .1rem 1rem .6rem; color: var(--thinking-fg, var(--muted)); font-size: .88rem; font-style: italic; }
-.msg-system { box-shadow: inset 3px 0 0 var(--system-rail, var(--border)); }
 .system-body { padding: 0 1rem .6rem; color: var(--system-fg, var(--muted)); font-size: .88rem; }
 .shimmer-dots::after { content: "…"; animation: dots 1.2s steps(4) infinite; display: inline-block; width: 1.2em; overflow: hidden; vertical-align: bottom; color: var(--muted); }
 
-.msg-tool { font-size: .88rem; box-shadow: inset 3px 0 0 var(--tool-call, color-mix(in srgb, var(--accent) 40%, transparent)); }
-.msg-tool.tool-ok { box-shadow: inset 3px 0 0 var(--tool-ok, var(--ok)); }
-.msg-tool.tool-error { box-shadow: inset 3px 0 0 var(--tool-err, var(--danger)); border-color: color-mix(in srgb, var(--tool-err, var(--danger)) 35%, var(--line)); }
+.msg-tool { font-size: .88rem; }
+.msg-tool.tool-error { border-color: color-mix(in srgb, var(--tool-err, var(--danger)) 35%, var(--line)); }
 .tool-state { flex: none; display: grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 50%; font-size: .72rem; font-weight: 700; color: var(--muted); background: var(--raise-2); }
 .tool-ok .tool-state { color: var(--tool-ok, var(--ok)); background: color-mix(in srgb, var(--tool-ok, var(--ok)) 15%, transparent); }
 .tool-error .tool-state { color: var(--tool-err, var(--danger)); background: color-mix(in srgb, var(--tool-err, var(--danger)) 15%, transparent); }
@@ -418,6 +468,12 @@ dialog.picker .panel-body { padding: 0; gap: 0; display: flex; flex-direction: c
 .preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .5rem; }
 .preset-card { position: relative; display: grid; gap: .15rem; padding: .7rem .8rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--raise); text-align: left; }
 .preset-card:hover { border-color: var(--accent); background: var(--accent-soft); }
+/* Documentation card lift on selectable setup/theme cards, not transcript
+   blocks: these are interactive surfaces rather than continuously updated data. */
+.preset-card, .theme-card { transition: transform var(--motion) var(--motion-ease), border-color var(--motion) var(--motion-ease), box-shadow var(--motion) var(--motion-ease); }
+@media (hover: hover) {
+  .preset-card:hover, .theme-card:hover { transform: translateY(-2px); box-shadow: 0 16px 36px -24px color-mix(in srgb, var(--accent) 60%, transparent); }
+}
 .preset-card.manual { border-style: dashed; }
 .preset-card .badge { position: absolute; top: .5rem; right: .5rem; }
 .preset-card:has(.badge) { padding-right: 5.5rem; }
@@ -448,7 +504,10 @@ dialog.picker .panel-body { padding: 0; gap: 0; display: flex; flex-direction: c
 .shortcut-list dd { margin: 0; color: var(--muted); font-size: .88rem; }
 
 /* question */
-dialog.question-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
+/* Keep the modal centered and stationary while previews change. Only the body
+   and preview pane scroll; long questions still fit small/zoomed viewports. */
+dialog.question-dialog { width: min(40rem, calc(100vw - 1.5rem)); height: min(85vh, 42rem); height: min(85dvh, 42rem); }
+dialog.question-dialog .panel-body { overflow-y: auto; overscroll-behavior: contain; }
 .question-badge { display: inline-grid; place-items: center; width: 1.4rem; height: 1.4rem; border-radius: 50%; background: var(--accent); color: #fff; font-size: .8rem; }
 .question { display: grid; gap: .45rem; }
 .question + .question { padding-top: .8rem; border-top: 1px solid var(--line); }
@@ -458,6 +517,7 @@ dialog.question-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
 .question-options { display: grid; gap: .35rem; }
 .question-option { display: flex; align-items: flex-start; gap: .65rem; min-height: 2.8rem; padding: .5rem .7rem; border: 1px solid var(--border); border-radius: var(--radius-s); background: var(--surface); text-align: left; }
 .question-option:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: var(--raise); }
+.question-option:focus-visible { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 40%, transparent); outline-offset: 1px; }
 .question-option.selected { border-color: var(--accent); background: var(--accent-soft); }
 .option-key { flex: none; display: grid; place-items: center; width: 1.4rem; height: 1.4rem; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font: 600 .72rem var(--mono); }
 .question-option.selected .option-key { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -465,10 +525,11 @@ dialog.question-dialog { width: min(40rem, calc(100vw - 1.5rem)); }
 .question-option-label { font-weight: 550; }
 .question-option-description { color: var(--muted); font-size: .82rem; }
 .option-has-preview { flex: none; align-self: center; color: var(--muted); font-size: .7rem; }
-.question-preview-pane { min-height: 5.5rem; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--raise); }
+.question-preview-pane { height: 12rem; min-height: 12rem; overflow: auto; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--raise); }
 .question-preview-title { margin-bottom: .3rem; color: var(--muted); font-size: .75rem; font-weight: 650; }
-pre.question-preview { margin: 0; max-height: 14rem; overflow: auto; font: .8rem var(--mono); white-space: pre-wrap; }
+pre.question-preview { margin: 0; font: .8rem var(--mono); white-space: pre-wrap; }
 .question-actions { display: flex; justify-content: flex-end; align-items: center; gap: .5rem; padding-top: .4rem; }
+.question-keys { margin-right: auto; }
 
 /* context viewer */
 .context-tools { position: sticky; top: -1rem; z-index: 2; display: grid; gap: .5rem; margin: -1rem -1.1rem 0; padding: 1rem 1.1rem .6rem; background: var(--surface); border-bottom: 1px solid var(--line); }
@@ -528,6 +589,8 @@ dialog.panel.context-viewer { height: min(85vh, 48rem); height: min(85dvh, 48rem
 .toast-error { border-radius: var(--radius); border-color: var(--danger); background: var(--surface); color: var(--danger); text-align: left; }
 
 /* ---- motion ---- */
+@keyframes welcome-rise { from { opacity: 0; transform: translateY(14px); } }
+@keyframes detail-fade { from { opacity: 0; } }
 @keyframes pulse { 50% { opacity: .45; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes blink { 50% { opacity: 0; } }
@@ -556,7 +619,7 @@ dialog.panel.context-viewer { height: min(85vh, 48rem); height: min(85dvh, 48rem
   .transcript { padding: 1rem .85rem 1.5rem; }
   .composer-dock { padding: 0 .5rem max(.5rem, env(safe-area-inset-bottom)); }
   .composer { border-radius: 16px; }
-  .msg-user { max-width: 92%; }
+  .message-row.message-user { max-width: 92%; }
   .connection-state .state-label, .connection-state .working-word, .session-badge, .palette-button { display: none; }
   .agent-name { max-width: 11rem; }
   .tool-chip { padding: 0 .45rem; }

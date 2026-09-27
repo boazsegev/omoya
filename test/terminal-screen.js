@@ -2,8 +2,11 @@ import { EventEmitter } from "node:events";
 
 /** Small terminal-state oracle for viewport tests (CSI/OSC + wrap + scroll). */
 export class TerminalScreen extends EventEmitter {
-  constructor(columns = 60, rows = 16) {
+  /** `wide(char)` (optional) marks glyphs the emulated terminal draws two
+   *  columns wide, independent of the renderer's own width table. */
+  constructor(columns = 60, rows = 16, { wide = () => false } = {}) {
     super();
+    this.wide = wide;
     this.columns = columns;
     this.rows = rows;
     this.grid = Array.from({ length: rows }, () => Array(columns).fill(" "));
@@ -35,8 +38,10 @@ export class TerminalScreen extends EventEmitter {
       if (char === "\r") this.x = 0;
       else if (char === "\n") { this.x = 0; this.lineFeed(); }
       else if (char >= " " && char !== "\x7f") {
-        if (this.x >= this.columns) { this.x = 0; this.lineFeed(); }
+        const span = this.wide(char) ? 2 : 1;
+        if (this.x + span > this.columns) { this.x = 0; this.lineFeed(); }
         this.grid[this.y][this.x++] = char;
+        if (span === 2) this.grid[this.y][this.x++] = "";
       }
     }
   }
@@ -63,6 +68,17 @@ export class TerminalScreen extends EventEmitter {
       if (mode === 3) this.history = [];
     }
     if (final === "K") this.grid[this.y].fill(" ", values[0] === 2 ? 0 : this.x);
+  }
+  /** Resize like a terminal without reflow: crop/pad rows and columns,
+   *  keep the old content, emit "resize" for a listening host. */
+  resize(columns, rows) {
+    const grid = Array.from({ length: rows }, (_, y) => Array.from({ length: columns }, (_, x) => this.grid[y]?.[x] ?? " "));
+    this.grid = grid;
+    this.columns = columns;
+    this.rows = rows;
+    this.x = Math.min(this.x, columns - 1);
+    this.y = Math.min(this.y, rows - 1);
+    this.emit("resize");
   }
   lines() { return this.grid.map((line) => line.join("").trimEnd()); }
   text() { return this.lines().join("\n"); }

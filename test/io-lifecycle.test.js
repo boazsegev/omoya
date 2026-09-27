@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
 import { IO, ProviderError } from "../lib/io.js";
+import { authSetOf, providerAdd, providerOf, settingsOf } from "./env-internals.js";
 
 let dir, env;
 beforeEach(() => {
@@ -19,7 +20,7 @@ function fakeProvider(script = [], hooks = {}) {
     static provider = { capabilities: { tools: false, thinking: false, streaming: true } };
     constructor(url, aiio) { this.url = url; this.aiio = aiio; this.queue = [...script]; this.closed = false; }
     context2msg(context, aiio) {
-      return (hooks.context2msg ?? ((value, owner) => [{ "x-model": owner.currentModel ?? "" }, { context: value }]))(context, aiio);
+      return (hooks.context2msg ?? ((value, owner) => [{ "x-model": owner.modelCurrent ?? "" }, { context: value }]))(context, aiio);
     }
     msg2events(native, state, aiio) {
       return (hooks.msg2events ?? ((value) => value.events ?? []))(native, state, aiio);
@@ -40,11 +41,11 @@ function fakeProvider(script = [], hooks = {}) {
 }
 
 function makeIO({ Protocol = fakeProvider(), environment = env, endpoint = {}, ...options } = {}) {
-  if (!environment.provider("fake")) environment.registerProvider("fake", Protocol);
-  environment.endpoints.fake = {
+  if (!providerOf(environment, "fake")) providerAdd(environment, "fake", Protocol);
+  environment._endpoints.fake = {
     provider: "fake",
     url: "http://default",
-    ...(environment.endpoints.fake ?? {}),
+    ...(environment._endpoints.fake ?? {}),
     ...endpoint,
   };
   return new IO({ env: environment, model: "fake/m", ...options });
@@ -59,8 +60,8 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
   test("setContextUsage merges finite numbers; the getter copies", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     expect(aiio.contextUsage).toEqual({ used: undefined, total: undefined });
-    aiio.setContextUsage({ used: 1200.9 });
-    aiio.setContextUsage({ total: 128000, used: "junk" });
+    aiio.contextUsageSet({ used: 1200.9 });
+    aiio.contextUsageSet({ total: 128000, used: "junk" });
     expect(aiio.contextUsage).toEqual({ used: 1200, total: 128000 });
     // the getter copies: mutating its result never leaks back
     const copy = aiio.contextUsage;
@@ -77,9 +78,9 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
     // a second request without provider usage resets the report (used stays
     // unset — an estimate never masquerades as an exact readout)
     const sparse = fakeProvider([{ events: [{ type: "text_delta", contentIndex: 0, text: "x" }] }]);
-    env.providers.fake = null;
-    delete env.providers.fake;
-    env.registerProvider("fake", sparse);
+    env._providers.fake = null;
+    delete env._providers.fake;
+    providerAdd(env, "fake", sparse);
     const aiio2 = makeIO();
     await aiio2.write(ctx);
     expect(aiio2.contextUsage.used).toBeUndefined();
@@ -90,7 +91,7 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
       [{ events: [{ type: "done", usage: { inputTokens: 5, outputTokens: 1 } }] }],
       {
         msg2events: (native, state, aiio) => {
-          aiio?.setContextUsage?.({ total: 99999 });
+          aiio?.contextUsageSet?.({ total: 99999 });
           return native.events ?? [];
         },
       },
@@ -102,15 +103,14 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
 });
 
 describe("IO plan-usage reporting (provider → IO → consumer)", () => {
-  test("setPlanUsage keeps only numbers/non-empty strings and merges quotas key-by-key", () => {
+  test("planUsageSet keeps only numbers/non-empty strings; each call is ONE COMPLETE SNAPSHOT that REPLACES the last report", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     expect(aiio.planUsage).toBeNull();
-    aiio.setPlanUsage({ label: "Plan", quotas: { requests: { total: 500, remaining: 480, junk: undefined, bad: NaN } } });
-    aiio.setPlanUsage({ quotas: { requests: { remaining: 470, reset: "1s" }, tokens: { total: 100000 } } });
+    aiio.planUsageSet({ label: "Plan", quotas: { requests: { total: 500, remaining: 480, junk: undefined, bad: NaN } } });
+    aiio.planUsageSet({ quotas: { requests: { remaining: 470, reset: "1s" }, tokens: { total: 100000 } } });
     expect(aiio.planUsage).toEqual({
-      label: "Plan",
       quotas: {
-        requests: { total: 500, remaining: 470, reset: "1s" },
+        requests: { remaining: 470, reset: "1s" }, // replaced, not merged: the first report's fields/label are gone
         tokens: { total: 100000 },
       },
     });
@@ -118,6 +118,16 @@ describe("IO plan-usage reporting (provider → IO → consumer)", () => {
     const copy = aiio.planUsage;
     copy.quotas.requests.remaining = 0;
     expect(aiio.planUsage.quotas.requests.remaining).toBe(470);
+  });
+
+  test("a report that drops a quota never leaves the stale one behind (the endpoint-switch leak)", () => {
+    const aiio = makeIO({ Protocol: fakeProvider() });
+    // Endpoint A (an Anthropic key, say) publishes its windows…
+    aiio.planUsageSet({ quotas: { "5h": { total: 100, used: 50, remaining: 50 }, requests: { total: 500, remaining: 499 } } });
+    // …then the agent switched to endpoint B whose responses publish only
+    // a bare requests family: A's "5h" window must NOT keep showing.
+    aiio.planUsageSet({ quotas: { requests: { total: 500, remaining: 490 } } });
+    expect(aiio.planUsage).toEqual({ quotas: { requests: { total: 500, remaining: 490 } } });
   });
 
   test("the reportPlanUsage hook fires after send with the response headers (OpenAI x-ratelimit-* default)", async () => {
@@ -134,7 +144,7 @@ describe("IO plan-usage reporting (provider → IO → consumer)", () => {
           }),
         };
       }
-      // reportPlanUsage completed from the OpenAI defaults (defineProvider)
+      // reportPlanUsage completed from IO's OpenAI wire defaults
     };
     const aiio = makeIO({ Protocol });
     await aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
@@ -237,7 +247,7 @@ describe("IO provider surface", () => {
   test("provider-namespaced live settings view", async () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     expect(aiio.settings).toEqual({ provider: "fake", url: "http://default" });
-    env.authSet("fake", { token: "t-1" });
+    authSetOf(env, "fake", { token: "t-1" });
     expect(aiio.settings).toEqual({ provider: "fake", url: "http://default", auth: { token: "t-1" } });
   });
 
@@ -254,21 +264,26 @@ describe("IO provider surface", () => {
     expect(makeIO({ environment: env2, Protocol, model: "fake/m-x" }).model).toBe("m-x");
   });
 
-  test("tools() returns the current Env catalog", () => {
-    env.registerTool("file-read", () => {}, { description: "read", inputSchema: {} });
+  test("tools() returns the request's Env catalog snapshot", async () => {
+    env.toolAdd("file-read", () => {}, { description: "read", inputSchema: {} });
     const aiio = makeIO({ Protocol: fakeProvider() });
+    // each request snapshots Env.tools() once (lib/io/request.js)
+    aiio._toolCatalog = await env.tools();
     // the built-in tool-refresh is always registered (AI-AGENT unit)
     expect(aiio.tools().find((t) => t.name === "file-read")).toEqual({ name: "file-read", description: "read", inputSchema: {} });
     expect(aiio.tools().map((t) => t.name)).toEqual(["tool-refresh", "file-read"]);
-    env.registerTool("file-write", () => {}, { description: "write", inputSchema: {} });
+    env.toolAdd("file-write", () => {}, { description: "write", inputSchema: {} });
+    expect(aiio.tools().map((t) => t.name)).toEqual(["tool-refresh", "file-read"]); // fixed for the request
+    aiio._toolCatalog = await env.tools();
     expect(aiio.tools().map((t) => t.name)).toEqual(["tool-refresh", "file-read", "file-write"]);
   });
 
   test("aiio.authSet routes to Env.authSet under the provider name", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
+    // Returns the auth file's own section; provider/url stay with the endpoint config.
     const section = aiio.authSet({ token: "abc" });
-    expect(section).toEqual({ provider: "fake", url: "http://default", auth: { token: "abc" } });
-    expect(env.endpointSettings("fake")).toMatchObject({
+    expect(section).toEqual({ auth: { token: "abc" } });
+    expect(settingsOf(env, "fake")).toMatchObject({
       provider: "fake", url: "http://default", auth: { token: "abc" },
     });
   });
@@ -286,9 +301,9 @@ describe("IO provider surface", () => {
     // view, not fall back to the OpenAI defaults and POST an Anthropic-shaped
     // endpoint an OpenAI /responses request (the claude 404 regression).
     const Protocol = fakeProvider();
-    if (!env.provider("fake")) env.registerProvider("fake", Protocol);
-    env.endpoints.fake = { filter: "[a-z]-[567]", maxActive: false }; // placeholder only
-    env.authSet("fake", { provider: "fake", url: "http://auth-file", auth: { token: "t" } });
+    if (!providerOf(env, "fake")) providerAdd(env, "fake", Protocol);
+    env._endpoints.fake = { filter: "[a-z]-[567]", maxActive: false }; // placeholder only
+    authSetOf(env, "fake", { provider: "fake", url: "http://auth-file", auth: { token: "t" } });
     const aiio = new IO({ env, model: "fake/m" });
     expect(aiio.protocol).toBe("fake");
     expect(aiio.url).toBe("http://auth-file");
@@ -329,7 +344,7 @@ describe("IO state machine idle → sending → reading → idle", () => {
     // work starts; an immediate caller must never slip through that gap.
     expect(aiio.state).toBe("sending");
     await expect(aiio.write([{ type: 2, content: [] }])).rejects.toThrow(/contract error/);
-    await aiio.kill();
+    await aiio.close();
   });
 
   test("malformed context is rejected as malformed, state untouched", async () => {

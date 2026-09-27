@@ -7,9 +7,10 @@ import { transcriptItems } from "../lib/app/tui/transcript.js";
 import { markdownRows } from "../lib/app/tui/markdown-view.js";
 import { createApp } from "../lib/app/tui/app.js";
 import { USER } from "./fakes.js";
+import { Context } from "../lib/context.js";
 
 function stubAgent(context = []) {
-  return { context, pending: [], model: "test/model", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "high" };
+  return { context: new Context({ id: "stub", messages: context }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "high" };
 }
 const plain = (bytes) => bytes.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 

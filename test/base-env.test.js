@@ -3,6 +3,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
+import { providerAdd, providerNamesOf, providerOf, settingsOf, toolExists, toolNames, toolsLoad } from "./env-internals.js";
 
 let dir;
 beforeAll(() => {
@@ -11,28 +12,43 @@ beforeAll(() => {
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("Env construction", () => {
-  test("empty folder scans to empty settings", () => {
+  /** Every key the view answers is a schema default (or derived): no layer contributed. */
+  const onlyDefaults = (env) => {
+    const schema = env.settingsSchema();
+    for (const [key, value] of Object.entries(JSON.parse(JSON.stringify(env.settings)))) {
+      if (key === "providers") expect(value).toEqual({});
+      else if (!schema[key]?.derive) expect(value, key).toEqual(schema[key]?.default);
+    }
+  };
+
+  test("empty folder scans to empty settings (defaults only)", () => {
     const env = new Env({ dir, cwd: dir });
-    expect(env.settings).toEqual({});
-    expect(env.endpoints).toEqual({});
-    expect(env.endpointSettings("ollama")).toEqual({});
+    onlyDefaults(env);
+    expect(env._endpoints).toEqual({});
+    expect(settingsOf(env, "ollama")).toEqual({});
   });
 
   test("missing folder scans as empty (no crash)", () => {
     const missing = join(dir, "does-not-exist");
     const env = new Env({ dir: missing, cwd: missing });
-    expect(env.settings).toEqual({});
+    onlyDefaults(env);
   });
 
-  test("environment.folders is TITLED {title, path} pairs; tool roots join as 'tool folder'", async () => {
-    const env = new Env({ dir, cwd: dir });
-    const folders = env.environment.folders;
-    expect(folders).toContainEqual({ title: "project folder", path: dir });
-    expect(folders.every((f) => typeof f.title === "string" && typeof f.path === "string")).toBe(true);
-    await env.loadTools({ dirs: [join(dir, "tools-a")] });
-    expect(env.environment.folders).toContainEqual({ title: "tool folder", path: join(dir, "tools-a") });
-    await env.loadTools({ dirs: [join(dir, "tools-a")] }); // deduped by path
-    expect(env.environment.folders.filter((f) => f.path === join(dir, "tools-a"))).toHaveLength(1);
+  test("folders are typed {kind, title, path}, computed from current state; tool roots are kind 'tools'", async () => {
+    const settingsDir = join(dir, "user");
+    const env = new Env({ dir, cwd: dir, settingsDir });
+    const folders = env.folders;
+    expect(Object.isFrozen(folders)).toBe(true);
+    expect(folders.slice(0, 3)).toEqual([
+      { kind: "project", title: "project folder", path: dir },
+      { kind: "harness", title: "harness folder", path: dir },
+      { kind: "settings", title: "settings folder", path: settingsDir },
+    ]);
+    await toolsLoad(env, { dirs: [join(dir, "tools-a"), join(dir, "tools-a")] }); // a repeated root lists once
+    expect(env.folders.filter((f) => f.kind === "tools")).toEqual([{ kind: "tools", title: "tool folder", path: join(dir, "tools-a") }]);
+    env.cwd = join(dir, "elsewhere"); // a resumed session's folder
+    expect(env.folders[0].path).toBe(join(dir, "elsewhere"));
+    expect(new Env({ dir, cwd: dir, settingsDir: null }).folders.some((f) => f.kind === "settings")).toBe(false);
   });
 });
 
@@ -40,16 +56,16 @@ describe("provider registry surface (sole registry)", () => {
   test("register/lookup/names", () => {
     const env = new Env({ dir, cwd: dir });
     class Ollama {}
-    env.registerProvider("ollama", Ollama);
-    expect(env.provider("ollama").original).toBe(Ollama);
-    expect(env.provider("nope")).toBeUndefined();
-    expect(env.providerNames()).toEqual(["ollama"]);
+    providerAdd(env, "ollama", Ollama);
+    expect(providerOf(env, "ollama").original).toBe(Ollama);
+    expect(providerOf(env, "nope")).toBeUndefined();
+    expect(providerNamesOf(env)).toEqual(["ollama"]);
   });
 
   test("duplicate provider is diagnosed", () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerProvider("ollama", class {});
-    expect(() => env.registerProvider("ollama", class {})).toThrow(/duplicate provider/);
+    providerAdd(env, "ollama", class {});
+    expect(() => providerAdd(env, "ollama", class {})).toThrow(/duplicate provider/);
   });
 });
 
@@ -57,22 +73,22 @@ describe("tool registry surface (flattened exact lookup)", () => {
   test("register, list, exact dispatch", async () => {
     const env = new Env({ dir, cwd: dir });
     const fn = ({ path }) => `read:${path}`;
-    env.registerTool("file-read", fn, { description: "read a file" });
-    expect(env.toolNames()).toEqual(["tool-refresh", "file-read"]); // built-in first
-    expect(env.hasTool("file-read")).toBe(true);
-    expect(env.hasTool("fileread")).toBe(false); // no name parsing
-    await expect(env.callTool("file-read", { path: "a.txt" })).resolves.toBe("read:a.txt");
+    env.toolAdd("file-read", fn, { description: "read a file" });
+    expect(toolNames(env)).toEqual(["tool-refresh", "file-read"]); // built-in first
+    expect(toolExists(env, "file-read")).toBe(true);
+    expect(toolExists(env, "fileread")).toBe(false); // no name parsing
+    await expect(env.toolCall("file-read", { path: "a.txt" })).resolves.toBe("read:a.txt");
   });
 
   test("missing names and non-functions become ordinary errors", async () => {
     const env = new Env({ dir, cwd: dir });
-    await expect(env.callTool("ghost", {})).rejects.toThrow(/unknown tool "ghost"/);
-    expect(() => env.registerTool("bad", 42)).toThrow(/not callable/);
+    await expect(env.toolCall("ghost", {})).rejects.toThrow(/unknown tool "ghost"/);
+    expect(() => env.toolAdd("bad", 42)).toThrow(/not callable/);
   });
 
   test("duplicate flattened names are diagnosed", () => {
     const env = new Env({ dir, cwd: dir });
-    env.registerTool("file-read", () => {});
-    expect(() => env.registerTool("file-read", () => {})).toThrow(/duplicate tool name/);
+    env.toolAdd("file-read", () => {});
+    expect(() => env.toolAdd("file-read", () => {})).toThrow(/duplicate tool name/);
   });
 });

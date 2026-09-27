@@ -66,7 +66,7 @@
  *     context like any other entry.
  *
  * THE STICKY DISPLAY: every call also refreshes the agent's sticky
- * tool MESSAGE (Agent.updateToolMessage — agent-owned, the TUI
+ * tool MESSAGE (Agent.toolMessageSet — agent-owned, the TUI
  * collects it from the viewed agent): every note, one line
  * each, the type's badge emoji heading the bold title with its
  * summary trailing when set — DONE notes trail every open one (still
@@ -184,7 +184,8 @@ function applyNoteCall(notes, args) {
  * @returns {Map<string, object>}
  */
 function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
-  const context = agent.context;
+  const context = agent.context.messages();
+  const owner = agent.context; // the snapshot mirror is keyed by the live Context
   const notes = new Map();
   let lastRecord = null; // the snapshot the tool storage mirrors
   // the BASELINE: snapshot records (later ones override)
@@ -231,7 +232,7 @@ function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
     publish(agent, notes);
     return notes;
   }
-  if (snapshot?.owner === context && lastRecord !== null &&
+  if (snapshot?.owner === owner && lastRecord !== null &&
       JSON.stringify(lastRecord.notes) === JSON.stringify(Object.fromEntries(snapshot.notes))) {
     // fresh: the snapshot mirrors the record still heading the context
     // (the comparison is by CONTENT — the session's append can merge
@@ -253,11 +254,8 @@ function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
  *  replay. Only set/remove call this — the mutation actions. */
 function persist(agent, storage, notes) {
   const record = { type: RECORD_TYPE, notes: Object.fromEntries(notes) };
-  // the Agent's OWN append method (never Array.prototype.push —
-  // agent.context IS an array): it routes through the session, so the
-  // record joins the context AND the session file
-  if (typeof agent.append === "function" && agent.append !== agent.context?.push) agent.append(record);
-  else agent.context.push(record); // a bare context (tests): same effect, no session
+  // the Context append: the record joins the context AND its session file
+  agent.context.append(record);
   if (storage !== undefined) {
     storage.snapshot = {
       owner: agent.context,
@@ -291,9 +289,9 @@ function clip(text, max = MAX_EXTRA) {
  * lines actually fit). An empty result clears the message.
  */
 function publish(agent, notes) {
-  if (typeof agent.updateToolMessage !== "function") return; // a bare context (tests)
+  if (typeof agent.toolMessageSet !== "function") return; // a bare context (tests)
   if (notes.size === 0) {
-    agent.updateToolMessage("note", null);
+    agent.toolMessageSet("note", null);
     return;
   }
   const open = [...notes.entries()].filter(([, note]) => note.type !== "done");
@@ -302,7 +300,7 @@ function publish(agent, notes) {
     const summary = typeof note.summary === "string" ? note.summary.trim() : "";
     return `${badge(note.type)}**${title}**${summary ? ` — ${clip(summary)}` : ""}`;
   });
-  agent.updateToolMessage("note", lines.join("\n"));
+  agent.toolMessageSet("note", lines.join("\n"));
 }
 
 /** Validate a title; returns the trimmed key. */

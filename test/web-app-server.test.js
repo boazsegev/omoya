@@ -2,15 +2,17 @@
 // over the real public Agent/Env surfaces (never GTUI). The SPA is a client
 // of these packets; every check here drives the wire, not the DOM.
 import { expect, test } from "bun:test";
-import { readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { serve, MAX_WS_PAYLOAD_LENGTH } from "../lib/app/web/server.js";
 import { parseClientMessage } from "../lib/app/web/protocol.js";
 import { AgentSession } from "../lib/app/web/session.js";
+import { renderMarkdown } from "../lib/app/web/public/markdown.js";
 import Agent from "../lib/agent.js";
 import Context from "../lib/context.js";
 import { TEXT, TOOLCALL, scriptedIO, testEnv } from "./fakes.js";
+import { authSetOf, namesOf, providerAdd } from "./env-internals.js";
 
-const { userMessage } = Context;
+const { messageUser } = Context;
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const origin = (web) => `http://127.0.0.1:${web.port}`;
@@ -58,8 +60,8 @@ test("uploads are origin and connection bound, bounded, and consumed as text-fir
     const upload = await response.json();
     socket.send(JSON.stringify({ type: "chat.submit", text: "read this", attachments: [upload.id] }));
     const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && !agent.context.some((message) => message.type === 2 && message.content.length === 2)) await tick();
-    const user = agent.context.findLast((message) => message.type === 2);
+    while (Date.now() < deadline && !agent.context.messages().some((message) => message.type === 2 && message.content.length === 2)) await tick();
+    const user = agent.context.messages().findLast((message) => message.type === 2);
     expect(user.content.map((block) => block.type)).toEqual(["text", "binary"]);
     expect(Buffer.from(user.content[1].content, "base64").toString()).toBe("data");
     socket.close();
@@ -74,6 +76,10 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
     expect(home.status).toBe(200);
     expect(home.headers.get("content-security-policy")).toContain("default-src");
     expect((await fetch(`${origin(web)}/app.js`)).headers.get("content-type")).toContain("javascript");
+    const copyModule = await fetch(`${origin(web)}/copy-markdown.js`);
+    expect(copyModule.status).toBe(200);
+    expect(copyModule.headers.get("content-type")).toContain("javascript");
+    expect(await copyModule.text()).toContain("selectedMarkdown");
     const logo = await fetch(`${origin(web)}/logo.svg`);
     expect(logo.headers.get("content-type")).toContain("image/svg+xml");
     expect(await logo.text()).toContain("Omoya logo");
@@ -86,6 +92,33 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
   } finally { web.stop(); }
 });
 
+test("completion reconciles final Markdown when assembled text differs from streamed text", async () => {
+  const env = await testEnv();
+  const io = {
+    state: "idle",
+    async write(_context, callbacks) {
+      callbacks.onStart?.({ type: "start" });
+      callbacks.onTextDelta?.({ type: "text_delta", contentIndex: 0, text: "**draft" });
+      return { type: "done", message: { type: 3, content: [{ type: "text", text: "**final** and $x^2$" }] } };
+    },
+    async close() { this.state = "closed"; },
+  };
+  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const session = new AgentSession(agent);
+  const packets = [];
+  session.addSink((packet) => packets.push(packet));
+  try {
+    agent.send(messageUser("hello"));
+    await agent.run();
+    const delta = packets.find((packet) => packet.type === "turn.delta");
+    const history = packets.find((packet) => packet.type === "turn.end")?.history;
+    expect(delta.text).toBe("**draft");
+    expect(history?.at(-1)).toMatchObject({ kind: "text", text: "**final** and $x^2$", done: true });
+    expect(renderMarkdown(history.at(-1).text)).toContain("<strong>final</strong>");
+    expect(renderMarkdown(history.at(-1).text)).toContain('role="math"');
+  } finally { session.dispose(); }
+});
+
 test("a running turn reports live activity (Stop/composer state) without an agent switch", async () => {
   const env = await testEnv();
   let release;
@@ -96,7 +129,7 @@ test("a running turn reports live activity (Stop/composer state) without an agen
       callbacks.onTextDelta?.({ type: "text", text: "working reply" });
       return await new Promise((resolve) => { release = () => { callbacks.onDone?.({ type: "done" }); resolve({ type: "done" }); }; });
     },
-    async kill() { this.state = "closed"; },
+    async close() { this.state = "closed"; },
   };
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
@@ -168,9 +201,9 @@ test("an agent is ready at connection time so settings work before chat, and cha
   } finally { web.stop(); }
 });
 
-test("session logging settings update persisted agents; an anonymous agent opts in by starting a saved session", async () => {
+test("session logging settings update persisted agents; an agent that is not logged opts in and logs the same conversation", async () => {
   const env = await testEnv();
-  const saved = new Agent({ env, model: "p/m", context: [], session: "web-session", createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const saved = new Agent({ env, model: "p/m", context: [], contextId: "web-session", createIO: () => scriptedIO([[{ type: "done" }]]) });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: saved }) });
   const received = [];
   try {
@@ -179,7 +212,7 @@ test("session logging settings update persisted agents; an anonymous agent opts 
     expect(received.find((m) => m.type === "settings")?.sessionSave).toBe(true);
     socket.send(JSON.stringify({ type: "settings.session-save", on: false }));
     await tick();
-    expect(saved.sessionSave).toBe(false);
+    expect(saved.context.save).toBe(false);
     expect(received.findLast((m) => m.type === "settings")?.sessionSave).toBe(false);
     socket.close();
   } finally { web.stop(); }
@@ -191,26 +224,30 @@ test("session logging settings update persisted agents; an anonymous agent opts 
   try {
     const socket = await connect(anonymousWeb, anonymousReceived);
     await tick();
-    expect(anonymousReceived.find((m) => m.type === "settings")?.sessionSave).toBeUndefined();
+    expect(anonymousReceived.find((m) => m.type === "settings")?.sessionSave).toBe(false);
+    const transcript = anonymous.context;
+    const transcriptLength = transcript.length;
     socket.send(JSON.stringify({ type: "settings.session-save", on: true }));
-    // The toggle is always accessible: opting in on an anonymous (Ghost)
-    // agent starts a SAVED session — the transcript continues persisted.
+    // The toggle is always accessible: opting in on an agent that is not
+    // logged logs ITS conversation — the transcript continues persisted.
     // Wait for the server's response instead of a bare tick: session
     // creation can take longer than one tick.
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && anonymousReceived.findLast((m) => m.type === "settings")?.sessionSave !== true) await tick();
-    expect(anonymous.session?.save).toBe(true);
+    expect(anonymous.context.save).toBe(true);
+    expect(anonymous.context).toBe(transcript); // the same conversation, now saved — not a fresh one
+    expect(anonymous.context.messages()).toHaveLength(transcriptLength);
     expect(anonymousReceived.findLast((m) => m.type === "settings")?.sessionSave).toBe(true);
     const listed = anonymousReceived.findLast((m) => m.type === "sessions")?.agents?.find((a) => a.id === anonymous.name);
-    expect(listed?.session).toBe(anonymous.session.id);
+    expect(listed?.session).toBe(anonymous.context.id);
     socket.close();
   } finally { anonymousWeb.stop(); }
 });
 
-test("web sessions are saved by default; --session anon stays a Ghost", async () => {
+test("web sessions are saved by default; --session anon starts not logged", async () => {
   const savedEnv = await testEnv();
   const savedWeb = await serve({ port: 0, env: savedEnv, createSession: async () => ({
-    agent: new Agent({ env: savedEnv, model: "p/m", context: [], session: crypto.randomUUID(), createIO: () => scriptedIO([[{ type: "done" }]]) }),
+    agent: new Agent({ env: savedEnv, model: "p/m", context: [], contextId: crypto.randomUUID(), createIO: () => scriptedIO([[{ type: "done" }]]) }),
   }) });
   const received = [];
   try {
@@ -225,10 +262,10 @@ test("web sessions are saved by default; --session anon stays a Ghost", async ()
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && !received.some((m) => m.type === "turn.end")) await tick();
     const agent = savedWeb.env.agents()[0];
-    expect(agent.session.dir.replace(/^\.\//, "")).toBe(`${savedEnv.settingsDir}/sessions`.replace(/^\.\//, ""));
+    expect(agent.context.dir.replace(/^\.\//, "")).toBe(`${savedEnv._settingsDir}/sessions`.replace(/^\.\//, ""));
     // The live-turn flush is yielded to the event loop (Agent._flushLive):
     // poll until the JSONL lands instead of assuming a synchronous write.
-    const readFiles = () => readdirSync(agent.session.dir).filter((name) => name.endsWith(".jsonl"));
+    const readFiles = () => readdirSync(agent.context.dir).filter((name) => name.endsWith(".jsonl"));
     while (Date.now() < deadline && readFiles().length === 0) await tick();
     expect(readFiles().length).toBe(1);
     socket.close();
@@ -240,7 +277,7 @@ test("web sessions are saved by default; --session anon stays a Ghost", async ()
   try {
     const socket = await connect(ghostWeb, ghostReceived);
     await tick(60);
-    expect(ghostReceived.find((m) => m.type === "hello")?.agent?.session).toBeNull();
+    expect(ghostReceived.find((m) => m.type === "hello")?.agent?.logged).toBe(false);
     socket.close();
   } finally { ghostWeb.stop(); }
 });
@@ -252,13 +289,13 @@ test("tool-call response events stream as distinct wire packets", async () => {
     async write(_context, callbacks) {
       callbacks.onStart?.({ type: "start" });
       callbacks.onThinkingDelta?.({ type: "thinking", text: "reasoning" });
-      callbacks.onToolcallStart?.({ type: "toolCall", text: "read" });
-      callbacks.onToolcallDelta?.({ type: "toolCall", delta: " README.md" });
-      callbacks.onToolcallEnd?.({ type: "toolCall" });
+      callbacks.onToolCallStart?.({ type: "toolCall", text: "read" });
+      callbacks.onToolCallDelta?.({ type: "toolCall", delta: " README.md" });
+      callbacks.onToolCallEnd?.({ type: "toolCall" });
       callbacks.onDone?.({ type: "done" });
       return { type: "done" };
     },
-    async kill() { this.state = "closed"; },
+    async close() { this.state = "closed"; },
   };
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
@@ -321,7 +358,7 @@ test("statusSnapshot() carries the provider's plan/quota report (mirrors tui-app
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const session = new AgentSession(agent);
   expect(session.statusSnapshot().plan).toBeNull();
-  agent.enqueue(userMessage("hi"));
+  agent.send(messageUser("hi"));
   io.planUsage = { quotas: { requests: { total: 500, remaining: 470 } } };
   await agent.run();
   expect(session.statusSnapshot().plan).toEqual({ quotas: { requests: { total: 500, remaining: 470 } } });
@@ -359,7 +396,7 @@ test("closing the browser leaves its server-owned agent running", async () => {
         resolve({ type: "done" });
       }; });
     },
-    async kill() { this.state = "closed"; },
+    async close() { this.state = "closed"; },
   };
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
@@ -390,7 +427,7 @@ test("queued web messages can be unqueued for editing before the active turn set
       callbacks.start?.({ type: "start" });
       return await new Promise((resolve) => { release = () => resolve({ type: "done" }); });
     },
-    async kill() { this.state = "closed"; },
+    async close() { this.state = "closed"; },
   };
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
@@ -425,7 +462,7 @@ test("queued messages clear and enter the stream when the active turn delivers t
       callbacks.onDone?.({ type: "done" });
       return { type: "done" };
     },
-    async kill() { this.state = "closed"; },
+    async close() { this.state = "closed"; },
   };
   const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
@@ -450,12 +487,12 @@ test("queued messages clear and enter the stream when the active turn delivers t
 test("context inspection separates viewer block types and tool display", async () => {
   const env = await testEnv();
   const agent = scripted(env, 0, "idle");
-  agent.context.push(
+  agent.context.update((messages) => { messages.push(
     { type: 1, content: [{ type: "text", text: "system" }] },
     { type: 2, content: [{ type: "text", text: "user" }] },
     { type: 3, content: [{ type: "thinking", text: "thought" }, { type: "text", text: "reply" }, { type: "toolCall", name: "read", arguments: {} }] },
     { type: 4, name: "read", content: [{ type: "text", text: "answer" }], display: ["display"] },
-  );
+  ); return true; });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -477,11 +514,11 @@ test("context inspection separates viewer block types and tool display", async (
 test("context deletion removes selected messages through the web protocol", async () => {
   const env = await testEnv();
   const agent = scripted(env, 0, "idle");
-  agent.context.push(
+  agent.context.update((messages) => { messages.push(
     { type: 2, content: [{ type: "text", text: "first" }] },
     { type: 2, content: [{ type: "text", text: "second" }] },
     { type: 2, content: [{ type: "text", text: "third" }] },
-  );
+  ); return true; });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -490,7 +527,7 @@ test("context deletion removes selected messages through the web protocol", asyn
     socket.send(JSON.stringify({ type: "context.delete", messageIndexes: [0, 2] }));
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && agent.context.length !== 1) await tick();
-    expect(agent.context.map((message) => message.content[0].text)).toEqual(["second"]);
+    expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["second"]);
     expect(received.findLast((m) => m.type === "context")?.blocks).toHaveLength(1);
     socket.close();
   } finally { web.stop(); }
@@ -498,11 +535,11 @@ test("context deletion removes selected messages through the web protocol", asyn
 
 test("the web protocol exposes context inspection/editing and direct tool calls", async () => {
   const env = await testEnv();
-  env.registerTool("echo", async ({ value }) => ({ content: [{ type: "text", text: String(value) }] }), {
+  env.toolAdd("echo", async ({ value }) => ({ content: [{ type: "text", text: String(value) }] }), {
     description: "Returns the supplied value.", inputSchema: { type: "object", properties: { value: { type: "string" } } }, safe: true,
   });
   const agent = scripted(env, 0, "idle");
-  agent.append({ type: 2, content: [{ type: "text", text: "before" }] });
+  agent.context.append({ type: 2, content: [{ type: "text", text: "before" }] });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -513,8 +550,8 @@ test("the web protocol exposes context inspection/editing and direct tool calls"
     while (Date.now() < deadline && !received.some((m) => m.type === "context")) await tick();
     expect(received.findLast((m) => m.type === "context")?.blocks[0].content[0].text).toBe("before");
     socket.send(JSON.stringify({ type: "context.edit-text", messageIndex: 0, blockIndex: 0, text: "after" }));
-    while (Date.now() < deadline && agent.context[0].content[0].text !== "after") await tick();
-    expect(agent.context[0].content[0].text).toBe("after");
+    while (Date.now() < deadline && agent.context.at(0).content[0].text !== "after") await tick();
+    expect(agent.context.at(0).content[0].text).toBe("after");
     socket.send(JSON.stringify({ type: "tool.call", name: "echo", args: { value: "tool result" } }));
     while (Date.now() < deadline && !JSON.stringify(received).includes("tool result")) await tick();
     expect(JSON.stringify(received)).toContain("tool result");
@@ -524,10 +561,10 @@ test("the web protocol exposes context inspection/editing and direct tool calls"
 
 test("web startup replaces an invalid last model with the first available combo alphabetically", async () => {
   const env = await testEnv();
-  env.endpoints.p.models = { m: {} };
-  env.endpoints.zed = { provider: "test", url: "test://zed", models: { omega: {} } };
-  env.endpoints.alpha = { provider: "test", url: "test://alpha", models: { beta: {}, alpha: {} } };
-  writeFileSync(`${env.settingsDir}/last-model.json`, JSON.stringify({ endpoint: "p", model: "removed" }));
+  env._endpoints.p.models = { m: {} };
+  env._endpoints.zed = { provider: "test", url: "test://zed", models: { omega: {} } };
+  env._endpoints.alpha = { provider: "test", url: "test://alpha", models: { beta: {}, alpha: {} } };
+  writeFileSync(`${env._settingsDir}/last-model.json`, JSON.stringify({ endpoint: "p", model: "removed" }));
   const web = await serve({ port: 0, env, session: { kind: "anonymous" } });
   const received = [];
   try {
@@ -541,8 +578,8 @@ test("web startup replaces an invalid last model with the first available combo 
 
 test("the model menu lists clean endpoint/model combos, never completion noise", async () => {
   const env = await testEnv();
-  env.endpoints.acme = { provider: "test", url: "test://script" };
-  env.authSet("acme", { token: "t", models: { "acme-pro": null, "acme-mini": null } });
+  env._endpoints.acme = { provider: "test", url: "test://script" };
+  authSetOf(env, "acme", { token: "t", models: { "acme-pro": null, "acme-mini": null } });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
   const received = [];
   try {
@@ -559,23 +596,23 @@ test("the model menu lists clean endpoint/model combos, never completion noise",
   } finally { web.stop(); }
 });
 
-test("session.fork turns Ghost mode into a saved branch", async () => {
+test("session.fork branches under the new id and keeps the logging setting", async () => {
   const env = await testEnv();
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env, 0, "idle") }) });
   const received = [];
   try {
     const socket = await connect(web, received);
     await tick();
-    expect(received.find((m) => m.type === "hello")?.agent?.session).toBeNull();
+    expect(received.find((m) => m.type === "hello")?.agent?.logged).toBe(false);
     socket.send(JSON.stringify({ type: "session.fork", id: "web-branch" }));
     const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && !received.findLast((m) => m.type === "hello")?.agent?.session) await tick();
-    expect(received.findLast((m) => m.type === "hello")?.agent?.session).toBe("web-branch");
+    while (Date.now() < deadline && received.findLast((m) => m.type === "hello")?.agent?.session !== "web-branch") await tick();
+    expect(received.findLast((m) => m.type === "hello")?.agent).toMatchObject({ session: "web-branch", logged: false });
     socket.close();
   } finally { web.stop(); }
 });
 
-test("session.new replaces the viewed agent with a fresh Ghost agent", async () => {
+test("session.new replaces the viewed agent with a fresh one", async () => {
   const env = await testEnv();
   const agents = [];
   const web = await serve({ port: 0, env, createSession: async () => {
@@ -592,7 +629,7 @@ test("session.new replaces the viewed agent with a fresh Ghost agent", async () 
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && agents.length < 2) await tick();
     expect(first.closed).toBe(true);
-    expect(agents[1].session).toBeNull();
+    expect(agents[1].context.save).toBe(false);
     expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
     socket.close();
   } finally { web.stop(); }
@@ -610,15 +647,15 @@ test("resuming a saved session replaces the viewed agent", async () => {
   try {
     const socket = await connect(web, received);
     await tick();
-    const originalList = Agent.SessionStore.listAsync;
-    Agent.SessionStore.listAsync = async () => [{ id: "saved", preview: "saved", messages: 0 }];
+    const originalList = Agent.Context.listAsync;
+    Agent.Context.listAsync = async () => [{ id: "saved", preview: "saved", messages: 0 }];
     try {
       socket.send(JSON.stringify({ type: "session.resume", id: "saved" }));
       const deadline = Date.now() + 4000;
       while (Date.now() < deadline && agents.length < 2) await tick();
       expect(agents[0].closed).toBe(true);
       expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
-    } finally { Agent.SessionStore.listAsync = originalList; }
+    } finally { Agent.Context.listAsync = originalList; }
     socket.close();
   } finally { web.stop(); }
 });
@@ -627,7 +664,7 @@ test("saved sessions rename and delete by id from the sidebar", async () => {
   const env = await testEnv();
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env, 0, "idle") }) });
   const received = [];
-  const Store = Agent.SessionStore;
+  const Store = Agent.Context;
   const original = { listAsync: Store.listAsync, renameById: Store.renameById, deleteById: Store.deleteById };
   const calls = [];
   Store.listAsync = async () => [{ id: "saved", preview: "saved", messages: 1 }];
@@ -648,17 +685,44 @@ test("saved sessions rename and delete by id from the sidebar", async () => {
   } finally { Object.assign(Store, original); web.stop(); }
 });
 
+test("deleting a live saved session closes its agent and moves all viewers before deleting its file", async () => {
+  const env = await testEnv();
+  const agents = [];
+  const web = await serve({ port: 0, env, createSession: async () => {
+    const agent = new Agent({ env, model: "p/m", contextId: agents.length ? `replacement-${agents.length}` : "target", createIO: () => scriptedIO([[{ type: "done" }]]) });
+    agents.push(agent);
+    if (agents.length === 1) { agent.context.append(messageUser("keep this conversation")); agent.context.flush(); }
+    return { agent };
+  } });
+  const first = [], second = [];
+  try {
+    const a = await connect(web, first);
+    const b = await connect(web, second);
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !first.some((m) => m.type === "sessions" && m.recent.some((s) => s.id === "target" && s.live))) await tick();
+    expect(first.findLast((m) => m.type === "sessions").recent).toContainEqual(expect.objectContaining({ id: "target", live: true }));
+    a.send(JSON.stringify({ type: "session.delete", id: "target" }));
+    while (Date.now() < deadline && !first.some((m) => m.type === "command.result" && m.text.includes("session deleted"))) await tick();
+    expect(agents[0].closed).toBe(true);
+    expect(first.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
+    expect(second.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[2].name);
+    expect(first.findLast((m) => m.type === "sessions")?.recent.some((s) => s.id === "target")).toBe(false);
+    expect(readdirSync(env.settings.sessions).some((name) => name.includes("target"))).toBe(false);
+    a.close(); b.close();
+  } finally { web.stop(); }
+});
+
 test("switching sessions keeps the current model unless the session stored its own", async () => {
   const env = await testEnv();
   const web = await serve({ port: 0, env, model: { model: "p1/launch" } });
   const received = [];
   const hellos = () => received.filter((m) => m.type === "hello");
   const nextHello = async (count) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && hellos().length < count) await tick(); return hellos().at(-1)?.agent; };
-  const stored = (id, settings) => { const store = new Agent.SessionStore({ id, dir: Agent.sessionDir(env), origin: env.cwd, settings }); store.append({ type: 2, content: [{ type: "text", text: id }] }); store.close(); };
+  const stored = (id, settings) => { const store = new Agent.Context({ id, dir: env.settings.sessions, origin: env.cwd, settings }); store.append({ type: 2, content: [{ type: "text", text: id }] }); store.close(); };
   try {
     const socket = await connect(web, received);
     expect(await nextHello(1)).toMatchObject({ endpoint: "p1", model: "launch" });
-    env.agents()[0].setModel("p2/picked"); // the user switched models since launch
+    env.agents()[0].modelSet("p2/picked"); // the user switched models since launch
     socket.send(JSON.stringify({ type: "session.new" }));
     expect(await nextHello(2)).toMatchObject({ endpoint: "p2", model: "picked" }); // not the launch last-model
     stored("with-model", { endpoint: "x", model: "own" });
@@ -718,7 +782,7 @@ test("session.close closes an open agent and replaces its attached view", async 
 test("attaching to an agent replays context user messages as history blocks", async () => {
   const env = await testEnv();
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "seeded reply"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [userMessage("context-only question")], createIO: () => io });
+  const agent = new Agent({ env, model: "p/m", context: [messageUser("context-only question")], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -751,7 +815,7 @@ test("re-entering an agent replays a response streamed while it was in the backg
   const paused = new Promise((resolve) => { release = resolve; });
   const firstIO = {
     state: "idle",
-    async kill() {},
+    async close() {},
     async write(_context, callbacks) {
       callbacks.onStart?.({ type: "start" });
       callbacks.onTextDelta?.({ type: "text", text: "before switch " });
@@ -866,7 +930,7 @@ test("every SPA asset the page references is served (no dangling module paths)",
   const env = await testEnv();
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
   try {
-    for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/text-safe.js", "/format.js", "/favicon.svg", "/logo.svg"]) {
+    for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/markdown/browser.js", "/markdown/math.js", "/markdown/inline.js", "/read-preview.js", "/text-safe.js", "/format.js", "/favicon.svg", "/logo.svg"]) {
       const response = await fetch(`${origin(web)}${path}`);
       expect([path, response.status]).toEqual([path, 200]);
     }
@@ -886,28 +950,52 @@ test("protocol validates the TUI-parity packets", () => {
   expect(parseClientMessage(JSON.stringify({ type: "chat.continue" }))).toEqual({ type: "chat.continue" });
 });
 
-test("agents are renamed, delegation is set, and the theme persists to the shared tui.theme", async () => {
-  const env = await testEnv();
-  env.settings.tui = { themes: { night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } } } };
+test("agents are renamed, delegation is set, and the web theme persists independently of tui.theme", async () => {
+  const env = await testEnv({ theme: "night", tui: { theme: "default", themes: { night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } } } } });
   const agent = scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
     const socket = await connect(web, received);
-    await tick();
+    expect(await until(() => received.some((m) => m.type === "settings"))).toBe(true);
+    expect(received.findLast((m) => m.type === "settings").prefs.activeTheme).toBe("night");
     socket.send(JSON.stringify({ type: "agent.rename", name: "scribe" }));
     socket.send(JSON.stringify({ type: "settings.spawn", value: false }));
     socket.send(JSON.stringify({ type: "settings.theme", name: "night" }));
-    expect(await until(() => received.some((m) => m.type === "settings" && m.prefs?.activeTheme === "night"))).toBe(true);
+    expect(await until(() => env.settings.web.theme === "night" && agent.name === "scribe" && agent.spawnPermission === false)).toBe(true);
     expect(agent.name).toBe("scribe");
     expect(agent.spawnPermission).toBe(false);
-    expect(env.settings.tui.theme).toBe("night");
+    expect(env.settings.web.theme).toBe("night");
+    expect(env.settings.tui.theme).toBe("default");
+    expect(await until(() => { try { return JSON.parse(readFileSync(`${env._settingsDir}/settings.json`, "utf8")).web?.theme === "night"; } catch { return false; } })).toBe(true);
     expect(received.findLast((m) => m.type === "settings").prefs.themeModes.night).toBe("dark");
     expect(received.some((m) => m.type === "agent" && m.agent.name === "scribe")).toBe(true);
     const css = await (await fetch(`${origin(web)}/themes.css`)).text();
     expect(css).toContain('.theme-card[data-theme="night"]{');
     socket.send(JSON.stringify({ type: "settings.theme", name: "system" }));
-    expect(await until(() => env.settings.tui.theme === "default")).toBe(true);
+    expect(await until(() => env.settings.web.theme === "system")).toBe(true);
+    expect(env.settings.tui.theme).toBe("default");
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("dual-mode theme CSS merges inherited shared roles and mode colors per swatch", async () => {
+  const env = await testEnv();
+  env.settings.tui = { themes: {
+    base: { text: { fg: "#eeeeee" }, background: { bg: "#123456" }, dark: { background: { bg: "#000000" } } },
+    child: { parent: "base", text: { bold: true }, light: { text: { bg: "#abcdef" } }, dark: { text: { bg: "#654321" } } },
+  } };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  try {
+    const css = await (await fetch(`${origin(web)}/themes.css`)).text();
+    expect(css).toContain(':root[data-theme="child"][data-mode="light"]{--page:#123456;--surface:#123456;--surface-2:#123456;--fg:#eeeeee}');
+    expect(css).toContain(':root[data-theme="child"][data-mode="dark"]{--page:#000000;--surface:#000000;--surface-2:#000000;--fg:#eeeeee}');
+    expect(css).toContain('.theme-card[data-theme="child"][data-mode="dark"]{--page:#000000;');
+    expect(css).toContain('.theme-card[data-theme="child"][data-mode="light"]{--page:#123456;');
+    const received = [];
+    const socket = await connect(web, received);
+    expect(await until(() => received.some((m) => m.type === "settings"))).toBe(true);
+    expect(received.findLast((m) => m.type === "settings").prefs.dualThemes).toContain("child");
     socket.close();
   } finally { web.stop(); }
 });
@@ -916,16 +1004,14 @@ test("agents are renamed, delegation is set, and the theme persists to the share
 // always runs a connection test and a model listing.
 class LoginProtocol {
   static provider = { label: "Login", capabilities: {} };
-  constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-  async login({ token }) { return { type: "api_key", token }; }
-  async testConnection() { return { models: 1 }; }
-  async models() { const models = { "model-1": { label: "Model 1" } }; this.aiio.authSet({ models }); return models; }
-  async close() {}
+  static login({ token }) { return { type: "api_key", token }; }
+  static async testConnection() { return { models: 1 }; }
+  static async models() { return { "model-1": { label: "Model 1" } }; }
 }
 
 test("endpoints are listed, signed in (direct form) and signed out over the wire", async () => {
   const env = await testEnv();
-  env.registerProvider("wire", LoginProtocol);
+  providerAdd(env, "wire", LoginProtocol);
   const agent = scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
@@ -940,10 +1026,10 @@ test("endpoints are listed, signed in (direct form) and signed out over the wire
     expect(received.filter((m) => m.type === "error")).toEqual([]);
     expect(agent.endpoint).toBe("added");
     expect(agent.model).toBe("model-1");
-    expect(env.endpointNames()).toContain("added");
+    expect(namesOf(env)).toContain("added");
     socket.send(JSON.stringify({ type: "endpoint.logout", name: "added" }));
     expect(await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint removed: added")))).toBe(true);
-    expect(env.endpointNames()).not.toContain("added");
+    expect(namesOf(env)).not.toContain("added");
     expect(agent.endpoint).toBeUndefined();
     socket.close();
   } finally { web.stop(); }
@@ -1006,4 +1092,22 @@ test("collapsed-preview rows come from each theme's <role>.preview.maxRows (TUI 
     expect(rows.broken.tool).toBe(7); // invalid values fall back
     socket.close();
   } finally { web.stop(); }
+});
+
+test("a failed response replays as an error block; retracting it resyncs the browser", async () => {
+  const env = await testEnv({ retry: { attempts: 1 } });
+  const failed = { type: 3, content: [], error: "socket hang up" };
+  const io = scriptedIO([[{ type: "start" }, { type: "error", error: "socket hang up", kind: "network", message: failed }], [{ type: "start" }, ...TEXT(0, "answer"), { type: "done" }]]);
+  const agent = new Agent({ env, model: "p/m", context: [Context.messageUser("go")], createIO: () => io });
+  const session = new AgentSession(agent);
+  const sent = [];
+  session.addSink((packet) => sent.push(packet));
+  await agent.run();
+  expect(session.historySnapshot().at(-1)).toMatchObject({ kind: "error", text: "socket hang up", retry: true });
+
+  await agent.run(); // continue without a reply: the failed response is retracted
+  const resync = sent.find((packet) => packet.type === "history");
+  expect(resync.history.some((block) => block.kind === "error")).toBe(false);
+  expect(session.historySnapshot().some((block) => block.kind === "error")).toBe(false);
+  session.dispose();
 });

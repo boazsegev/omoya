@@ -4,8 +4,9 @@
 // current context — no tombstones, no change log; resume loads the
 // rewritten file directly.
 import { describe, expect, test, afterEach } from "bun:test";
+import { resolve } from "node:path";
 import { rmSync, readFileSync } from "node:fs";
-import { SessionStore } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, USER, TEXT } from "./fakes.js";
 
@@ -16,7 +17,7 @@ const lines = (file) => readFileSync(file, "utf8").trim().split("\n").map(JSON.p
   .filter((record) => record?.type !== "session-metadata"); // the first, origin line
 
 function sessionWithHistory(id = "edit") {
-  const store = new SessionStore({ id, dir: ROOT });
+  const store = new Context({ id, dir: ROOT });
   store.append(USER("q1"));
   store.append({ type: 3, content: [{ type: "text", text: "a1" }], providerId: "resp-1" });
   store.append(USER("q2"));
@@ -39,9 +40,9 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
     expect(edited.providerId).toBeUndefined();
     expect(lines(store.file)[1]).toEqual({ type: 3, content: [{ type: "text", text: "a1-edited" }] });
 
-    const resumed = SessionStore.resume({ id: "edit", dir: ROOT });
-    expect(resumed.context[1]).toEqual({ type: 3, content: [{ type: "text", text: "a1-edited" }] });
-    expect(resumed.context).toHaveLength(4);
+    const resumed = Context.resume({ id: "edit", dir: ROOT });
+    expect(resumed.at(1)).toEqual({ type: 3, content: [{ type: "text", text: "a1-edited" }] });
+    expect(resumed.messages()).toHaveLength(4);
   });
 
   test("editBlock rewrites the containing message", () => {
@@ -63,8 +64,8 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
       { type: 3, content: [{ type: "text", text: "a1" }], providerId: "resp-1" },
     ]);
 
-    const resumed = SessionStore.resume({ id: "edit", dir: ROOT });
-    expect(resumed.context).toEqual([
+    const resumed = Context.resume({ id: "edit", dir: ROOT });
+    expect(resumed.messages()).toEqual([
       USER("q1"),
       { type: 3, content: [{ type: "text", text: "a1" }], providerId: "resp-1" },
     ]);
@@ -76,9 +77,9 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
     store.flush();
     expect(lines(store.file)).toHaveLength(3);
 
-    const resumed = SessionStore.resume({ id: "edit", dir: ROOT });
-    expect(resumed.context).toHaveLength(3);
-    expect(resumed.context.at(-1)).toEqual(USER("q2"));
+    const resumed = Context.resume({ id: "edit", dir: ROOT });
+    expect(resumed.messages()).toHaveLength(3);
+    expect(resumed.at(-1)).toEqual(USER("q2"));
   });
 
   test("a mixed sequence persists exactly the live context", () => {
@@ -89,29 +90,28 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
     store.rollback(2);
     store.flush();
 
-    const resumed = SessionStore.resume({ id: "edit", dir: ROOT });
-    expect(resumed.context).toEqual(store.context);
-    expect(resumed.context).toEqual([USER("q1-edited"), { type: 3, content: [{ type: "text", text: "a1" }], providerId: "resp-1" }]);
-    expect(lines(store.file)).toEqual(resumed.context); // file == live context
+    const resumed = Context.resume({ id: "edit", dir: ROOT });
+    expect(resumed.messages()).toEqual(store.messages());
+    expect(resumed.messages()).toEqual([USER("q1-edited"), { type: 3, content: [{ type: "text", text: "a1" }], providerId: "resp-1" }]);
+    expect(lines(store.file)).toEqual(resumed.messages()); // file == live context
   });
 
-  test("Agent delegates edits to its session (file rewritten), in-memory only without one", async () => {
-    const env = await testEnv();
+  test("agent.context edits rewrite a logged file; a memory-only context just changes", async () => {
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
     const agent = new Agent({
-      env, model: "p/m", session: "agent-edit", sessionDir: ROOT,
-      context: [USER("hi")], createIO: () => io,
+      env, model: "p/m", contextId: "agent-edit", context: [USER("hi")], createIO: () => io,
     });
     await agent.run();
-    agent.edit(0, USER("hi-edited"));
-    agent.session.flush();
-    const records = lines(agent.session.file);
+    agent.context.edit(0, USER("hi-edited"));
+    agent.context.flush();
+    const records = lines(agent.context.file);
     expect(records[0]).toEqual(USER("hi-edited"));
     expect(records.every((m) => m.op === undefined)).toBe(true); // no change log
-    expect(agent.context[0]).toEqual(USER("hi-edited"));
+    expect(agent.context.at(0)).toEqual(USER("hi-edited"));
 
     const plain = new Agent({ env, model: "p/m", context: [USER("x")] });
-    plain.edit(0, USER("x-edited"));
-    expect(plain.context[0]).toEqual(USER("x-edited")); // no crash, no file
+    plain.context.edit(0, USER("x-edited"));
+    expect(plain.context.at(0)).toEqual(USER("x-edited")); // no crash, no file
   });
 });

@@ -57,7 +57,7 @@ export function buildApiLinks(data) {
   return {
     /** Resolve a mention to {slug, hash}, scoped to the mentioning module.
      *  A dotted mention that matches nothing exactly falls back to its
-     *  longest known PREFIX (`Agent.EVENT.START` → `Agent.EVENT`). */
+     *  longest known PREFIX (`Agent.EVENT.REQUEST_START` → `Agent.EVENT`). */
     resolve(mention, moduleName) {
       const bare = bareCandidates.get(mention);
       const direct = mention.includes(".")
@@ -91,7 +91,7 @@ export function apiNavLinks(data) {
  * Link known API mentions inside rendered markdown HTML. Operates on
  * ALREADY-RENDERED html (never raw source) and rewrites only `<code>`
  * spans whose whole text is one identifier path (`onEvent`, `Env.onEvent`,
- * `Agent.SessionStore.append`): those are exactly the API-point mentions.
+ * `Env.HttpStatusError.constructor`): those are exactly the API-point mentions.
  * A span inside an existing <a> is left alone (lookahead up to the tag end).
  * Links are root-relative: pages deploy as extensionless clean URLs
  * (`/api/env`), where relative `./env/` would resolve to `/env` — outside
@@ -211,15 +211,15 @@ ${layers}
 <h2>Built-in IO modes</h2>
 <p>${connectors}</p>
 <h2>Environment auto-detection</h2>
-<p>At startup <a href="/api/env/#Env-detectEndpoints"><code>Env.detectEndpoints()</code></a> lets every loaded provider probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection.</p>
+<p>At startup <a href="/api/env/#Env-endpointsDetect"><code>Env.endpointsDetect()</code></a> lets every loaded provider probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection. Dynamic model discovery may take time; configuring an API-key endpoint lets the model list be cached for later use.</p>
 <table>
   <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
   <tbody>
     <tr><td><code>OPENAI_API_KEY</code> (+ optional <code>OPENAI_BASE_URL</code>)</td><td><code>openai</code> (OpenAI Responses)</td></tr>
     <tr><td><code>AZURE_OPENAI_API_KEY</code> (+ required <code>AZURE_OPENAI_BASE_URL</code>)</td><td><code>azure-openai</code> (OpenAI Responses)</td></tr>
     <tr><td><code>XAI_API_KEY</code></td><td><code>xai</code> (OpenAI Responses)</td></tr>
-    <tr><td><code>MOONSHOT_API_KEY</code> (+ optional <code>MOONSHOT_BASE_URL</code>)</td><td><code>kimi</code> (Moonshot platform)</td></tr>
-    <tr><td><code>KIMI_API_KEY</code></td><td><code>kimi-coding</code> (Kimi for Coding relay)</td></tr>
+    <tr><td><code>MOONSHOT_API_KEY</code> (+ optional <code>MOONSHOT_BASE_URL</code>)</td><td><code>moonshot</code> (Kimi Platform)</td></tr>
+    <tr><td><code>KIMI_API_KEY</code></td><td><code>kimi</code> (Kimi Platform; Kimi Code subscription requires separate sign-in)</td></tr>
     <tr><td><code>ANTHROPIC_API_KEY</code> or <code>ANTHROPIC_AUTH_TOKEN</code> (+ optional <code>ANTHROPIC_BASE_URL</code>)</td><td><code>anthropic</code> (Anthropic Messages)</td></tr>
     <tr><td>Ollama server probe, <code>http://localhost:11434/api/tags</code></td><td><code>ollama</code></td></tr>
     <tr><td>LM Studio server probe, <code>http://localhost:1234/v1/models</code></td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>

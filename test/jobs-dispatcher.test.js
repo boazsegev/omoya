@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import * as fs from "node:fs/promises";
-import { dispatchJobs, ensureJobsLayout, initializeJobs, disableJobs, loadTaskState, parseTask, statePath, createTaskState, admitOccurrence, recordAttempt, saveTaskState } from "../lib/jobs.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
+import { ensureJobsLayout, initializeJobs, disableJobs } from "../lib/jobs/lifecycle.js";
+import { loadTaskState, statePath, createTaskState, admitOccurrence, recordAttempt, saveTaskState } from "../lib/jobs/state.js";
+import { parseTask } from "../lib/jobs/tasks.js";
 
 const roots = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });
@@ -30,6 +33,34 @@ describe("best-effort dispatcher", () => {
     await dispatchJobs(root, { clock: () => 11 }); expect((await state(root, "b.md", recurring)).occurrences[0].attempts[0]).toMatchObject({ outcome: "completed", session: "test-session" });
     expect(JSON.parse(await fs.readFile(paths.lastRun, "utf8")).errors).toEqual([]);
   });
+  test("returns only this scan's outcomes, problems and error-log path; a failure logs its task file, reason, outcome and session", async () => {
+    const { root, paths } = await fixture({ "a.md": recurring });
+    const clean = await dispatchJobs(root, { clock: () => 5, executor: async () => ({ outcome: "completed" }) });
+    expect(Object.keys(clean).sort()).toEqual(["errors", "outcomes", "warnings"]);
+    const result = await dispatchJobs(root, { clock: () => 60_010, executor: async () => ({ outcome: "failed", session: "job-s1", message: "provider refused the request" }) });
+    expect(Object.keys(result).sort()).toEqual(["errors", "log", "outcomes", "warnings"]);
+    expect(result.log).toMatch(/^ai-jobs\/errors\/\d{4}-\d{2}-\d{2}\.md$/);
+    expect(result.errors).toEqual([{ id: "a.md", filename: "a.md", code: "JOBS_EXECUTOR_FAILED", message: "provider refused the request", outcome: "failed", session: "job-s1" }]);
+    const log = await fs.readFile(join(root, result.log), "utf8");
+    expect(log).toContain("— a.md — JOBS_EXECUTOR_FAILED\n\nprovider refused the request\n\n- Outcome: failed\n- Session: job-s1\n");
+    expect(JSON.parse(await fs.readFile(paths.lastRun, "utf8"))).toMatchObject({ outcomes: result.outcomes, errors: result.errors });
+  });
+  test("a job's warning is logged whatever the outcome, never fails the scan, and is not repeated when it is the error", async () => {
+    const { root, paths } = await fixture({ "a.md": recurring, "b.md": recurring });
+    const warning = { code: "JOBS_MODEL_UNLISTED", message: 'job model "gone/x" is not listed; using the run default or last-model.json' };
+    const result = await dispatchJobs(root, { clock: () => 10, executor: async (task) => task.id === "a.md"
+      ? { outcome: "completed", session: "job-a", warning }
+      : { outcome: "blocked", session: "job-b", code: warning.code, message: warning.message, warning } });
+    expect(result.outcomes).toEqual([{ id: "a.md", outcome: "completed" }, { id: "b.md", outcome: "blocked" }]);
+    expect(result.warnings).toEqual([{ id: "a.md", filename: "a.md", ...warning, outcome: "completed", session: "job-a" }]);
+    expect(result.errors.map((item) => [item.id, item.code])).toEqual([["b.md", "JOBS_MODEL_UNLISTED"]]);
+    const log = await fs.readFile(join(root, result.log), "utf8");
+    expect(log).toContain(`— a.md — JOBS_MODEL_UNLISTED (warning)\n\n${warning.message}\n\n- Outcome: completed\n- Session: job-a\n`);
+    expect(log.match(/JOBS_MODEL_UNLISTED/g)).toHaveLength(2);
+    expect(JSON.parse(await fs.readFile(paths.lastRun, "utf8")).warnings).toEqual(result.warnings);
+    const onlyWarning = await dispatchJobs(root, { clock: () => 60_010, executor: async () => ({ outcome: "completed", warning }) });
+    expect(onlyWarning.errors).toEqual([]); expect(onlyWarning.log).toBe(result.log);
+  });
   test("default executor blocks without a selected model instead of faking success", async () => {
     const { root } = await fixture({ "a.md": "a" });
     const result = await dispatchJobs(root, { execution: { environment: { dir: root, settingsDir: null } } });
@@ -48,7 +79,7 @@ describe("best-effort dispatcher", () => {
   test("corrupt state stops execution and records error", async () => {
     const { root, paths } = await fixture({ "a.md": "a" }); await fs.writeFile(statePath(root, "a.md"), "{");
     const result = await dispatchJobs(root, { executor: async () => { throw new Error("must not run"); } });
-    expect(result.errors[0].code).toBe("JOBS_STATE_READ"); expect(JSON.parse(await fs.readFile(paths.lastRun, "utf8"))).toEqual(result);
+    expect(result.errors[0].code).toBe("JOBS_STATE_READ"); expect(JSON.parse(await fs.readFile(paths.lastRun, "utf8"))).toMatchObject({ outcomes: result.outcomes, errors: result.errors });
   });
   test("retains exactly 64 run diagnostics and includes parser rejections", async () => {
     const { root, paths } = await fixture({ "empty.md": "# " });
@@ -81,9 +112,9 @@ describe("best-effort dispatcher", () => {
     const saved = await state(root, "a.md", files["a.md"]);
     expect(saved.occurrences.map((item) => item.status)).toEqual(["coalesced", "consumed"]);
     const rollback = await dispatchJobs(root, { clock: clock("2026-09-14T10:00:00Z"), executor: async () => { throw new Error("rollback must not run"); } });
-    expect(rollback.due).toEqual([]); expect(rollback.errors).toEqual([]);
+    expect(rollback.outcomes).toEqual([]); expect(rollback.errors).toEqual([]);
     const repeat = await dispatchJobs(root, { clock: clock("2026-09-14T14:00:00Z"), executor: async () => { throw new Error("history must not replay"); } });
-    expect(repeat.due).toEqual([]); expect(repeat.errors).toEqual([]);
+    expect(repeat.outcomes).toEqual([]); expect(repeat.errors).toEqual([]);
   });
   test("excluded elapsed days never execute even when a prior due occurrence is stranded", async () => {
     const source = "---\nschedule:\n  every: 1h\n  days: weekdays\n---\nfiltered";
@@ -94,7 +125,7 @@ describe("best-effort dispatcher", () => {
     await saveTaskState(root, saved);
     const sunday = new Date(2026, 8, 13, 23, 45).getTime();
     const excluded = await dispatchJobs(root, { clock: () => sunday, executor: async () => { throw new Error("excluded day must not run"); } });
-    expect(excluded.due).toEqual([]); expect(excluded.errors).toEqual([]);
+    expect(excluded.outcomes).toEqual([]); expect(excluded.errors).toEqual([]);
     const monday = new Date(2026, 8, 14, 0, 45).getTime();
     const seen = [];
     const resumed = await dispatchJobs(root, { clock: () => monday, executor: async (task) => { seen.push(task.occurrence.scheduledAt); } });
@@ -104,7 +135,8 @@ describe("best-effort dispatcher", () => {
   test("calendar disable/re-enable and schedule edits preserve consumed history without replay", async () => {
     const source = (time, enabled = true) => `---\nenabled: ${enabled}\nschedule:\n  at: ["${time} GMT"]\n---\nprompt`;
     const { root, paths } = await fixture({ "calendar.md": source("09:00") });
-    const executeAt = (time) => dispatchJobs(root, { clock: () => Date.parse(time), executor: async () => ({ outcome: "completed" }) });
+    // The run log (not the return value) records what was due.
+    const executeAt = async (time) => { await dispatchJobs(root, { clock: () => Date.parse(time), executor: async () => ({ outcome: "completed" }) }); return JSON.parse(await fs.readFile(paths.lastRun, "utf8")); };
     await executeAt("2026-09-14T10:00:00Z");
     await fs.writeFile(join(paths.tasks, "calendar.md"), source("09:00", false));
     expect((await executeAt("2026-09-16T10:00:00Z")).due).toEqual([]);
@@ -134,7 +166,10 @@ describe("best-effort dispatcher", () => {
     const running = dispatchJobs(root, { clock: () => 10, executor: async () => { prepared = await state(root, "task.md", recurring); await disableJobs(root); return { outcome }; } });
     const result = await running;
     expect(prepared.occurrences[0].attempts[0]).toMatchObject({ outcome: "prepared", archive: expect.stringMatching(/^runs\//) });
-    expect(result.errors).toContainEqual({ id: "task.md", code: "JOBS_FINALIZE_UNAVAILABLE", message: "attempt finalization is unavailable" });
+    const finalize = result.errors.find((item) => item.code === "JOBS_FINALIZE_UNAVAILABLE");
+    expect(finalize).toMatchObject({ id: "task.md", filename: "task.md" });
+    expect(finalize.message).toStartWith(`the attempt could not be recorded as ${outcome}: `);
+    expect(finalize.message).not.toContain(root);
     expect(await fs.exists(paths.root)).toBeFalse(); expect(await fs.exists(paths.disabled)).toBeTrue();
     const disabled = JSON.parse(await fs.readFile(join(paths.disabled, "state", "task.md.json"), "utf8"));
     expect(disabled.occurrences[0].attempts[0].outcome).toBe("prepared");

@@ -15,7 +15,7 @@ source checkout is noted as a short variant where relevant.
 
 | Example | Purpose | Requirements |
 |---|---|---|
-| [`headless-agent/`](headless-agent/) | Embed the library: build an `Agent` over `Agent.Env.create()`, enqueue a user message, and stream `Agent.EVENT` lifecycle events from a Bun ESM script. | Bun, `bun add omoya`, and a **configured provider/model** (see its README). Reading the script is safe; running it without a provider fails fast with a clear message. |
+| [`headless-agent/`](headless-agent/) | Embed the library: build an `Agent` over `Agent.Env.create()`, send and await a user message, and stream `Agent.EVENT` lifecycle events from a Bun ESM script. | Bun, `bun add omoya`, and a **configured provider/model** (see its README). Reading the script is safe; running it without a provider fails fast with a clear message. |
 | [`custom-tool/`](custom-tool/) | Author a custom tool module — a documented `toolDescription()` plus a harmless `wordCount` function — and load it through Omoya's trusted tool roots. | Bun and Omoya (package install or source checkout). No provider needed to inspect the tool with `om-tool`. |
 | [`web-chat/`](web-chat/) | Launch Omoya's built-in browser chat SPA with the documented `om --serve` CLI command, with loopback security notes. | Bun, Omoya, and a configured provider/model for actual chat. |
 

@@ -4,16 +4,19 @@
 // cleanup on edit, tombstone/rewrite events in the session log when
 // one is wired, plain in-memory mutation otherwise.
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createCommands as createAppCommands } from "../lib/app/tui/commands.js";
+import { createCommands as createAppCommands, COMMANDS } from "../lib/app/tui/commands.js";
+import { createApp } from "../lib/app/tui/app.js";
 import { Agent } from "../lib/agent.js";
+import { endpointOf, namesOf, toolEntry, toolStatusSet } from "./env-internals.js";
 
 /** copy defaults to a harmless stub — createCommands requires one
  *  injected (parity with app.js's own production wiring); tests that
  *  care about the clipboard path pass their own and override it. */
 const createCommands = (options) => createAppCommands({ copy: () => false, ...options });
-import { SessionStore, findSessionFile } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
 import { testEnv } from "./fakes.js";
 
 const USER = (text, extra = {}) => ({ type: 2, content: [{ type: "text", text }], ...extra });
@@ -21,24 +24,25 @@ const ASSISTANT = (text, extra = {}) => ({ type: 3, content: [{ type: "text", te
 
 /** Agent over a seeded context + captured command logs. */
 async function setup(context, { session = false } = {}) {
-  const env = await testEnv();
+  const dir = mkdtempSync("./ai-tmp/commands-");
+  const env = await testEnv({ sessions: resolve(dir) });
   const lines = [];
   const options = { env, model: "fake/m", context };
   if (session) {
-    options.session = new SessionStore({
+    options.context = new Context({
       id: "commands-test",
-      dir: mkdtempSync("./ai-tmp/commands-"),
-      context,
+      dir: resolve(dir),
+      messages: context,
     });
   }
   const agent = new Agent(options);
-  agent.session?.flush?.();
+  agent.context.flush();
   const commands = createCommands({ agent, log: (l) => lines.push(l) });
   return { agent, commands, lines };
 }
 
 const events = (agent) =>
-  readFileSync(agent.session.file, "utf8").trim().split("\n").map(JSON.parse)
+  readFileSync(agent.context.file, "utf8").trim().split("\n").map(JSON.parse)
     .filter((record) => record?.type !== "session-metadata"); // the first, origin line
 
 describe("cli-commands: /context-edit through Context", () => {
@@ -49,11 +53,11 @@ describe("cli-commands: /context-edit through Context", () => {
     ]);
     expect(await commands.handle("/context-edit 0 rewritten question")).toBe(true);
 
-    expect(agent.context[0]).toEqual({
+    expect(agent.context.at(0)).toEqual({
       type: 2,
       content: [{ type: "text", text: "rewritten question" }],
     }); // rebuilt from recognized fields: responseId/cacheId gone
-    expect(agent.context[1]).toEqual(ASSISTANT("answer")); // untouched
+    expect(agent.context.at(1)).toEqual(ASSISTANT("answer")); // untouched
     expect(lines).toEqual(["edited message 0"]);
   });
 
@@ -65,7 +69,7 @@ describe("cli-commands: /context-edit through Context", () => {
     const { agent, commands } = await setup([USER("q"), toolResult]);
     await commands.handle("/context-edit 1 new body");
 
-    expect(agent.context[1]).toEqual({
+    expect(agent.context.at(1)).toEqual({
       type: 4, callId: "c1", name: "file-read",
       content: [{ type: "text", text: "new body" }],
     });
@@ -82,10 +86,10 @@ describe("cli-commands: /context-edit through Context", () => {
     const { agent, commands, lines } = await setup([USER("q"), message]);
     await commands.handle("/context-edit 1 0 new thought");
 
-    expect(agent.context[1].content[0]).toEqual({
+    expect(agent.context.at(1).content[0]).toEqual({
       type: "thinking", text: "new thought", signature: "sig-1",
     });
-    expect(agent.context[1].content[1]).toEqual({ type: "text", text: "answer" });
+    expect(agent.context.at(1).content[1]).toEqual({ type: "text", text: "answer" });
     expect(lines).toEqual(["edited block 1.0"]);
   });
 
@@ -96,7 +100,7 @@ describe("cli-commands: /context-edit through Context", () => {
     await commands.handle("/context-edit 9 text");
     await commands.handle("/context-edit 0");
 
-    expect(agent.context[1]).toEqual(call); // unchanged
+    expect(agent.context.at(1)).toEqual(call); // unchanged
     expect(lines[0]).toContain("only text/thinking blocks edit");
     expect(lines[1]).toContain("no message at index 9");
     expect(lines[2]).toContain("usage: /context-edit");
@@ -105,12 +109,58 @@ describe("cli-commands: /context-edit through Context", () => {
   test("edit rewrites the session file on flush", async () => {
     const { agent, commands } = await setup([USER("original"), ASSISTANT("answer")], { session: true });
     await commands.handle("/context-edit 0 rewritten");
-    agent.session.flush();
+    agent.context.flush();
 
     const records = events(agent);
     expect(records[0]).toEqual(USER("rewritten"));
     expect(records).toHaveLength(2); // no change log — the file IS the context
-    agent.session.close();
+    agent.context.close();
+  });
+});
+
+describe("cli-commands: context argument completion over a real Context", () => {
+  // agent.context is a Context INSTANCE (length/at/messages()), not an
+  // array — the /context-edit and /context-rollback arg candidates used
+  // to call .map on it and crash the TUI the moment the cursor moved
+  // into an argument position.
+  const appStubEnv = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const typeDraft = (app, text) => {
+    let model = app.init().model;
+    for (let i = 1; i <= text.length; i++) {
+      const value = text.slice(0, i);
+      model = app.update(model, { type: "input.change", value, caret: value.length }).model;
+    }
+    return model;
+  };
+
+  const completes = async (draft, expected) => {
+    const { agent } = await setup([USER("question"), ASSISTANT("answer")]);
+    const app = createApp(agent, { env: appStubEnv });
+    const model = typeDraft(app, draft);
+    expect(() => app.view(model)).not.toThrow();
+    expect(model.input.completions).toEqual(expected);
+    agent.context.close();
+  };
+
+  test("/context-edit with the cursor in an argument position completes indexes", async () => {
+    await completes("/context-edit ", ["0", "1"]);
+  });
+
+  // A fully typed valid index is COMPLETE (input-controller's exact-match
+  // rule closes the chooser) — the proof is that reaching it never threw.
+  test("/context-edit <typed-index> reaches a complete argument without crashing", async () => {
+    await completes("/context-edit 1", []);
+  });
+
+  test("/context-rollback with the cursor in an argument position completes indexes", async () => {
+    await completes("/context-rollback ", ["0", "1"]);
+  });
+
+  test("an empty context offers no index candidates (and never crashes)", async () => {
+    const { agent } = await setup([]);
+    const app = createApp(agent, { env: appStubEnv });
+    expect(typeDraft(app, "/context-edit ").input.completions).toEqual([]);
+    agent.context.close();
   });
 });
 
@@ -120,13 +170,13 @@ describe("cli-commands: /context-rollback and /context-pop tombstones", () => {
       USER("one"), ASSISTANT("a1"), USER("two"), ASSISTANT("a2"),
     ]);
     await commands.handle("/context-rollback 2");
-    expect(agent.context.map((m) => m.content[0].text)).toEqual(["one", "a1"]);
+    expect(agent.context.messages().map((m) => m.content[0].text)).toEqual(["one", "a1"]);
     await commands.handle("/context-pop");
-    expect(agent.context.map((m) => m.content[0].text)).toEqual(["one"]);
-    agent.context.push(USER("two"));
-    agent.context.push(USER("three"));
+    expect(agent.context.messages().map((m) => m.content[0].text)).toEqual(["one"]);
+    agent.context.update((messages) => { messages.push(USER("two")); return true; });
+    agent.context.update((messages) => { messages.push(USER("three")); return true; });
     await commands.handle("/context-pop 2");
-    expect(agent.context.map((m) => m.content[0].text)).toEqual(["one"]);
+    expect(agent.context.messages().map((m) => m.content[0].text)).toEqual(["one"]);
     expect(lines).toEqual([
       "rolled back 2 message(s); context now 2",
       "popped 1 message(s); context now 1",
@@ -141,13 +191,13 @@ describe("cli-commands: /context-rollback and /context-pop tombstones", () => {
     );
     await commands.handle("/context-rollback 2");
     await commands.handle("/context-pop");
-    agent.session.flush();
+    agent.context.flush();
 
     expect(events(agent)).toEqual([USER("one")]); // truncated in place, no tombstones
 
-    const replayed = SessionStore.resume({ id: agent.session.id, dir: agent.session.dir });
-    expect(replayed.context).toEqual([USER("one")]);
-    agent.session.close();
+    const replayed = Context.resume({ id: agent.context.id, dir: agent.context.dir });
+    expect(replayed.messages()).toEqual([USER("one")]);
+    agent.context.close();
     replayed.close();
   });
 
@@ -161,7 +211,7 @@ describe("cli-commands: /context-rollback and /context-pop tombstones", () => {
     const { agent, commands, lines } = await setup([USER("one")]);
     await commands.handle("/context-rollback");
     await commands.handle("/context-rollback x");
-    expect(agent.context).toHaveLength(1);
+    expect(agent.context.messages()).toHaveLength(1);
     expect(lines[0]).toContain("usage: /context-rollback");
     expect(lines[1]).toContain("non-negative integer");
   });
@@ -173,23 +223,22 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
     const { Env } = await import("../lib/env.js");
     const { readLastCombo } = await import("../lib/cli.js");
     const dir = mkdtempSync("./ai-tmp/commands-model-");
-    const env = new Env({ dir, cwd: dir, settings: {
+    class Wire {
+      static provider = {};
+      static async models() { return { "live-1": null }; }
+    }
+    // Env.create collects every endpoint's live list in the background
+    const env = await Env.create({ dir, cwd: dir, settingsDir: dir, providers: { wire: Wire }, settings: {
       providers: {
-        fake: { provider: "wire", url: "http://fake" },
+        fake: { provider: "wire", url: "http://fake", models: { m1: {} } },
         fake2: { provider: "wire", url: "http://fake2" },
       },
       fake2: { models: { "cached-2": null, "ns/lyricist": null } },
-    } });
-    class Wire {
-      static provider = {};
-      constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-      async models() { return { "live-1": null }; }
-      async close() {}
-    }
-    env.registerProvider("wire", Wire);
+    } }, { tools: false, detect: false });
+    await env.modelsReady;
     // A populated catalog is authoritative: selection must reject ids outside
     // it, while the test's intended explicit selections remain valid.
-    env.endpoints.fake2.models = { "cached-2": {}, "ns/lyricist": {}, "custom:m": {} };
+    env._endpoints.fake2.models = { "cached-2": {}, "ns/lyricist": {}, "custom:m": {} };
     const lines = [];
     const agent = new Agent({ env, model: "fake/m1", context });
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
@@ -215,7 +264,7 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
 
   test("refuses unknown models and persists only verified explicit combos", async () => {
     const { agent, commands, env, readLastCombo, lines } = await setupEndpoints();
-    env.endpoints.fake.models = { m1: {} };
+    env._endpoints.fake.models = { m1: {} };
     await commands.handle("/endpoint-model whatever:9b");
     expect([agent.endpoint, agent.model]).toEqual(["fake", "m1"]);
     expect(lines.at(-1)).toContain("unknown model");
@@ -237,86 +286,89 @@ describe("cli-commands: /context-system appends a system message", () => {
   test("/context-system <text> on one line", async () => {
     const { agent, commands, lines } = await setup([]);
     expect(await commands.handle("/context-system be terse")).toBe(true);
-    expect(agent.context).toEqual([{ type: 1, content: [{ type: "text", text: "be terse" }] }]);
+    expect(agent.context.messages()).toEqual([{ type: 1, content: [{ type: "text", text: "be terse" }] }]);
     expect(lines).toEqual(["system message added; context now 1"]);
   });
 
   test("/context-system with a multi-line body preserves newlines, not tokenized", async () => {
     const { agent, commands } = await setup([]);
     await commands.handle("/context-system\nline one\nline two");
-    expect(agent.context[0].content[0].text).toBe("line one\nline two");
+    expect(agent.context.at(0).content[0].text).toBe("line one\nline two");
   });
 
   test("same-line text plus continuation lines both contribute", async () => {
     const { agent, commands } = await setup([]);
     await commands.handle("/context-system be nice\nand also helpful");
-    expect(agent.context[0].content[0].text).toBe("be nice\nand also helpful");
+    expect(agent.context.at(0).content[0].text).toBe("be nice\nand also helpful");
   });
 
   test("/context-system with no text at all is a usage error, nothing appended", async () => {
     const { agent, commands, lines } = await setup([]);
     await commands.handle("/context-system");
-    expect(agent.context).toHaveLength(0);
+    expect(agent.context.messages()).toHaveLength(0);
     expect(lines[0]).toContain("usage: /context-system");
   });
 
   test("system message persists to the session file like any message", async () => {
     const { agent, commands } = await setup([USER("q")], { session: true });
     await commands.handle("/context-system be terse");
-    agent.session.flush();
+    agent.context.flush();
     expect(events(agent)).toEqual([
       USER("q"),
       { type: 1, content: [{ type: "text", text: "be terse" }] },
     ]);
-    agent.session.close();
+    agent.context.close();
   });
 
   test("a LONE system message persists nothing (a system-only session is an unstarted conversation)", async () => {
     const { agent, commands } = await setup([], { session: true });
     await commands.handle("/context-system be terse");
-    agent.session.flush();
-    expect(existsSync(agent.session.file)).toBe(false);
-    agent.session.close();
+    agent.context.flush();
+    expect(existsSync(agent.context.file)).toBe(false);
+    agent.context.close();
   });
 });
 
 describe("cli-commands: /session-fork", () => {
   test("/session-fork with no id forks into a random-UUID session holding the full context", async () => {
     const { agent, commands, lines } = await setup([USER("q"), ASSISTANT("a")], { session: true });
-    const oldFile = agent.session.file;
+    const oldFile = agent.context.file;
     await commands.handle("/session-fork");
 
-    expect(agent.session.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(agent.session.file).not.toBe(oldFile);
-    expect(lines[0]).toContain(`forked into session: ${agent.session.id}`);
+    expect(agent.context.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(agent.context.file).not.toBe(oldFile);
+    expect(lines[0]).toContain(`forked into session: ${agent.context.id}`);
     // the fork holds the whole context; the original file is untouched
     expect(events(agent)).toEqual([USER("q"), ASSISTANT("a")]);
-    agent.session.close();
+    agent.context.close();
   });
 
   test("/session-fork <id> names the new session", async () => {
     const { agent, commands, lines } = await setup([USER("q")], { session: true });
     await commands.handle("/session-fork my-copy");
-    expect(agent.session.id).toBe("my-copy");
+    expect(agent.context.id).toBe("my-copy");
     expect(lines[0]).toContain("my-copy");
-    agent.session.close();
+    agent.context.close();
   });
 
-  test("/session-fork false forks into a hidden (anonymous, unpersisted) session", async () => {
+  test("/session-fork false forks into a session that is not logged", async () => {
     const { agent, commands, lines } = await setup([USER("q")], { session: true });
     await commands.handle("/session-fork false");
-    expect(agent.session).toBeNull();
-    expect(lines[0]).toContain("anonymous");
-    expect(agent.context).toEqual([USER("q")]); // context kept in memory
+    expect(agent.context.save).toBe(false);
+    expect(lines[0]).toContain("not logged (memory only)");
+    expect(agent.context.messages()).toEqual([USER("q")]); // context kept in memory
   });
 
-  test("/session-fork on an in-memory agent starts persisting under the new id", async () => {
-    const { agent, commands, lines } = await setup([USER("q")]);
-    expect(agent.session).toBeNull();
+  test("/session-fork on a session that is not logged keeps it so under the new id; logging then writes it", async () => {
+    const { agent, commands } = await setup([USER("q")]);
+    expect(agent.context.save).toBe(false);
     await commands.handle("/session-fork named");
-    expect(agent.session.id).toBe("named");
+    expect(agent.context.id).toBe("named");
+    expect(agent.context.save).toBe(false);
+    await commands.handle("/agent-session-save true");
+    agent.context.flush();
     expect(events(agent)).toEqual([USER("q")]);
-    agent.session.close();
+    agent.context.close();
   });
 });
 
@@ -346,13 +398,13 @@ describe("cli-commands: /agent-thinking", () => {
 
   test("setThinking propagates to live provider connections (think option)", async () => {
     const { agent } = await setup([]);
-    const io = { state: "idle", options: {}, setOption(k, v) { this.options[k] = v; }, async write() { return { type: "done" }; }, async kill() {} };
+    const io = { state: "idle", options: {}, settingsSet(k, v) { this.options[k] = v; }, async write() { return { type: "done" }; }, async kill() {} };
     agent._io.set("fake", io);
-    agent.setThinking("low");
+    agent.thinkingSet("low");
     expect(io.options.think).toBe("low");
-    agent.setThinking("none");
+    agent.thinkingSet("none");
     expect(io.options.think).toBe(false);
-    agent.setThinking(undefined);
+    agent.thinkingSet(undefined);
     expect("think" in io.options ? io.options.think : undefined).toBe(undefined);
   });
 });
@@ -384,6 +436,35 @@ describe("cli-commands: /help and exit commands", () => {
   });
 });
 
+describe("cli-commands: every claimed command is truly wired", () => {
+  // The router's graceful fallbacks ("unknown command", "not available")
+  // exist for hooks a FRONT END legitimately omits (line-repl has no
+  // menu) — a CLAIMED command must never land on one: it would swallow
+  // a same-named user prompt while doing nothing. /session-switch and
+  // /session-unlink once sat in COMMANDS with no case at all (removed —
+  // switching lives in the ^X Peers menu; unlinking is /session-new
+  // false), and /context-compact's onCompact went unwired in app.js.
+  test("no COMMANDS entry resolves to the unknown-command or not-available fallback", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "fake/m", context: [USER("seed")] });
+    const lines = [];
+    const noop = async () => {};
+    const commands = createCommands({
+      agent, log: (l) => lines.push(l),
+      onExit: noop, onMenu: noop, onReload: noop, onFillInput: noop,
+      onContinue: noop, onCompact: noop, onLogin: noop, onReseat: (id) => agent.contextNew(id),
+    });
+    for (const command of COMMANDS) {
+      lines.length = 0;
+      expect(await commands.handle(command)).toBe(true);
+      const out = lines.join("\n");
+      expect(out).not.toContain("unknown command");
+      expect(out).not.toContain("not available");
+      expect(out).not.toContain("not on a TTY");
+    }
+  });
+});
+
 describe("cli-commands: command line routing", () => {
   test("non-command lines pass through to the REPL as user turns", async () => {
     const { commands } = await setup([]);
@@ -404,7 +485,7 @@ describe("cli-commands: command line routing", () => {
     expect(lines[0]).toContain("usage: /context-rollback");
     lines.length = 0;
     expect(await commands.handle("/context-s hello")).toBe(true); // -> /context-system hello
-    expect(agent.context).toEqual([{ type: 1, content: [{ type: "text", text: "hello" }] }]);
+    expect(agent.context.messages()).toEqual([{ type: 1, content: [{ type: "text", text: "hello" }] }]);
   });
 
   test("an ambiguous partial command is left unresolved (reported as unknown)", async () => {
@@ -416,7 +497,7 @@ describe("cli-commands: command line routing", () => {
   test("a namespace-INSIDE partial resolves when it matches exactly one command (/po → /context-pop)", async () => {
     const { agent, commands } = await setup([USER("one"), USER("two")]);
     expect(await commands.handle("/po")).toBe(true); // -> /context-pop
-    expect(agent.context).toEqual([USER("one")]); // the last message popped
+    expect(agent.context.messages()).toEqual([USER("one")]); // the last message popped
   });
 
   test("an ambiguous namespace-inside partial is left unresolved", async () => {
@@ -463,7 +544,7 @@ describe("cli-commands: /continue (top-level — never /context-continue)", () =
 
 describe("cli-commands: //<name> loads a custom prompt into the input area", () => {
   function writePrompt(env, filename, frontmatter, body) {
-    const dir = join(env.dir, "prompts");
+    const dir = join(env._dir, "prompts");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, filename), `---\n${frontmatter}\n---\n${body}\n`);
   }
@@ -476,7 +557,7 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
     const commands = createCommands({ agent, onFillInput: (text) => { filled = text; } });
     expect(await commands.handle("//greet")).toBe(true);
     expect(filled).toBe("hello there");
-    expect(agent.context).toEqual([]); // never submitted
+    expect(agent.context.messages()).toEqual([]); // never submitted
   });
 
   test("//<name> <data> appends the trailing text as its own line", async () => {
@@ -529,7 +610,7 @@ describe("cli-commands: /context-edit with no arguments (move the last message i
       onChanged: () => changed++, onFillInput: (t) => filled.push(t),
     });
     expect(await commands.handle("/context-edit")).toBe(true);
-    expect(agent.context).toEqual([USER("one")]); // popped
+    expect(agent.context.messages()).toEqual([USER("one")]); // popped
     expect(filled).toEqual(["draft answer"]); // moved into the input
     expect(changed).toBe(1); // the TUI re-renders from the active context
     expect(lines).toEqual(["last message moved into the input for editing"]);
@@ -542,9 +623,9 @@ describe("cli-commands: /context-edit with no arguments (move the last message i
     const lines = [];
     const commands = createCommands({ agent, log: (l) => lines.push(l) });
     await commands.handle("/context-edit");
-    agent.append(toolOnly);
+    agent.context.append(toolOnly);
     await commands.handle("/context-edit");
-    expect(agent.context).toEqual([toolOnly]); // untouched
+    expect(agent.context.messages()).toEqual([toolOnly]); // untouched
     expect(lines[0]).toContain("nothing to edit");
     expect(lines[1]).toContain("no text to edit");
   });
@@ -572,14 +653,14 @@ describe("cli-commands: context mutations fire onChanged (the TUI re-renders)", 
     await commands.handle("/context-edit 0 edited");
     await commands.handle("/context-pop");
     await commands.handle("/context-rollback 1");
-    expect(agent.context.map((m) => m.content[0].text)).toEqual(["edited"]);
+    expect(agent.context.messages().map((m) => m.content[0].text)).toEqual(["edited"]);
     expect(changed).toBe(3);
   });
 
   test("/context-rollback with the message COUNT is out of range (indexes only), with guidance", async () => {
     const { agent, commands, lines } = await setup([USER("one"), ASSISTANT("a1")]);
     await commands.handle("/context-rollback 2"); // 2 messages: valid indexes 0..1
-    expect(agent.context).toHaveLength(2); // untouched (used to be a silent no-op)
+    expect(agent.context.messages()).toHaveLength(2); // untouched (used to be a silent no-op)
     expect(lines[0]).toContain("no message at index 2");
     expect(lines[0]).toContain("/context-rollback 0 clears all");
     expect(lines[0]).toContain("/session-delete!");
@@ -604,8 +685,8 @@ describe("cli-commands: /agent-name", () => {
 describe("cli-commands: /agent-safe", () => {
   const setup = async () => {
     const env = await testEnv();
-    env.registerTool("reader", () => {}, { description: "r", inputSchema: {}, safe: true });
-    env.registerTool("writer", () => {}, { description: "w", inputSchema: {} });
+    env.toolAdd("reader", () => {}, { description: "r", inputSchema: {}, safe: true });
+    env.toolAdd("writer", () => {}, { description: "w", inputSchema: {} });
     const agent = new Agent({ env, model: "fake/m", context: [] });
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
@@ -628,15 +709,15 @@ describe("cli-commands: /agent-safe", () => {
 });
 
 describe("cli-commands: /agent-session-save", () => {
-  test("shows and switches SessionStore saving", async () => {
+  test("shows and switches Context saving", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", session: "storage", createIO: () => null });
+    const agent = new Agent({ env, model: "p/m", contextId: "storage", createIO: () => null });
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     await commands.handle("/agent-session-save");
     await commands.handle("/agent-session-save false");
     expect(lines).toEqual(["session save: true", "session save: false"]);
-    expect(agent.sessionSave).toBe(false);
+    expect(agent.context.save).toBe(false);
   });
 });
 
@@ -672,97 +753,97 @@ describe("cli-commands: /agent-status (context details, tools + live status, MCP
       ASSISTANT("a1"),
       USER("q2"),
     ]);
-    agent.env.registerTool("demo-tool", () => "ok",
+    agent.env.toolAdd("demo-tool", () => "ok",
       { description: "a demo tool", inputSchema: {} });
-    agent.env.updateToolStatus("demo-tool", { runs: 3 });
-    agent.env.updateToolStatus("demo-tool", { active: 1 }); // merges
+    toolStatusSet(agent.env, "demo-tool", { runs: 3 });
+    toolStatusSet(agent.env, "demo-tool", { active: 1 }); // merges
 
     expect(await commands.handle("/agent-status")).toBe(true);
     const out = lines.join("\n");
     expect(out).toContain("status: fake/m (thinking: provider default)");
-    expect(out).toContain("session: anonymous");
+    expect(out).toContain(`session: ${agent.context.id} — not logged (memory only)`);
     expect(out).toContain("context: 3 message(s) — 0 system, 2 user, 1 assistant, 0 tool result(s)");
     expect(out).toContain("demo-tool — a demo tool status: {\"runs\":3,\"active\":1}");
     expect(out).toContain("MCP servers: none");
   });
 
-  test("Env.updateToolStatus stores the merged status on the tool entry; unknown tools throw", async () => {
+  test("Env.toolStatusSet stores the merged status on the tool entry; unknown tools throw", async () => {
     const { agent } = await setup([]);
-    agent.env.registerTool("t", () => "", { description: "", inputSchema: {} });
-    const status = agent.env.updateToolStatus("t", { servers: ["a", "b"] });
+    agent.env.toolAdd("t", () => "", { description: "", inputSchema: {} });
+    const status = toolStatusSet(agent.env, "t", { servers: ["a", "b"] });
     expect(status).toEqual({ servers: ["a", "b"] });
-    expect(agent.env.toolEntry("t").status).toEqual({ servers: ["a", "b"] });
-    agent.env.updateToolStatus("t", { active: 2 });
-    expect(agent.env.toolEntry("t").status).toEqual({ servers: ["a", "b"], active: 2 });
-    expect(() => agent.env.updateToolStatus("nope", {})).toThrow(/unknown tool/);
+    expect(toolEntry(agent.env, "t").status).toEqual({ servers: ["a", "b"] });
+    toolStatusSet(agent.env, "t", { active: 2 });
+    expect(toolEntry(agent.env, "t").status).toEqual({ servers: ["a", "b"], active: 2 });
+    expect(() => toolStatusSet(agent.env, "nope", {})).toThrow(/unknown tool/);
   });
 });
 
 describe("cli-commands: /session-new and /session-delete!", () => {
   test("/session-new starts an empty session; the old session file stays on disk", async () => {
     const { agent, commands, lines } = await setup([USER("one"), ASSISTANT("a1")], { session: true });
-    const oldFile = agent.session.file;
-    agent.session.flush();
+    const oldFile = agent.context.file;
+    agent.context.flush();
     expect(await commands.handle("/session-new")).toBe(true);
-    expect(agent.context).toEqual([]); // fresh, empty context
-    expect(agent.session.id).not.toBe("commands-test"); // a new session id
+    expect(agent.context.messages()).toEqual([]); // fresh, empty context
+    expect(agent.context.id).not.toBe("commands-test"); // a new session id
     expect(readFileSync(oldFile, "utf8")).toContain("one"); // old snapshot preserved
     expect(lines[0]).toContain("new session:");
-    agent.session.close();
+    agent.context.close();
   });
 
-  test("/session-new <id> names the session; /session-new false goes anonymous", async () => {
+  test("/session-new <id> names the session; /session-new false is not logged", async () => {
     const { agent, commands, lines } = await setup([], { session: true });
     await commands.handle("/session-new my-test-session");
-    expect(agent.session.id).toBe("my-test-session");
+    expect(agent.context.id).toBe("my-test-session");
     expect(lines[0]).toContain("my-test-session");
     await commands.handle("/session-new false");
-    expect(agent.session).toBeNull(); // anonymous: nothing persisted
-    expect(agent.context).toEqual([]);
-    expect(lines[1]).toContain("anonymous");
+    expect(agent.context.save).toBe(false); // nothing persisted
+    expect(agent.context.messages()).toEqual([]);
+    expect(lines[1]).toContain("not logged (memory only)");
   });
 
   test("/new is a flat alias of /session-new; /anon of /session-new false", async () => {
     const { agent, commands, lines } = await setup([], { session: true });
     await commands.handle("/new named-via-alias");
-    expect(agent.session.id).toBe("named-via-alias");
+    expect(agent.context.id).toBe("named-via-alias");
     expect(lines[0]).toContain("named-via-alias");
     await commands.handle("/anon");
-    expect(agent.session).toBeNull(); // anonymous: nothing persisted
-    expect(agent.context).toEqual([]);
-    expect(lines[1]).toContain("anonymous");
+    expect(agent.context.save).toBe(false); // nothing persisted
+    expect(agent.context.messages()).toEqual([]);
+    expect(lines[1]).toContain("not logged (memory only)");
     // a bare /new starts a fresh RANDOM session
     const { agent: agent2, commands: commands2 } = await setup([], { session: true });
     await commands2.handle("/new");
-    expect(agent2.session.id).not.toBe("commands-test");
-    agent2.session.close();
+    expect(agent2.context.id).not.toBe("commands-test");
+    agent2.context.close();
   });
 
   test("/session-delete! clears the context; the emptied session's file is REMOVED (recreated by new messages)", async () => {
     const { agent, commands, lines } = await setup([USER("one"), ASSISTANT("a1")], { session: true });
-    agent.session.flush();
+    agent.context.flush();
     expect(await commands.handle("/session-delete!")).toBe(true);
-    expect(agent.context).toEqual([]);
-    expect(agent.session.id).toBe("commands-test"); // same session restarted
+    expect(agent.context.messages()).toEqual([]);
+    expect(agent.context.id).toBe("commands-test"); // same session restarted
     // an empty session has NO file — the stale one is gone, nothing
     // empty is written in its place
-    expect(existsSync(agent.session.file)).toBe(false);
+    expect(existsSync(agent.context.file)).toBe(false);
     expect(lines[0]).toContain("cleared 2 message(s)");
     // the next message recreates the file under the SAME session id
-    agent.session.append(USER("after the clear"));
-    agent.session.flush();
-    const replayed = SessionStore.resume({ id: "commands-test", dir: agent.session.dir });
-    expect(replayed.context).toEqual([USER("after the clear")]);
-    agent.session.close();
+    agent.context.append(USER("after the clear"));
+    agent.context.flush();
+    const replayed = Context.resume({ id: "commands-test", dir: agent.context.dir });
+    expect(replayed.messages()).toEqual([USER("after the clear")]);
+    agent.context.close();
     replayed.close();
   });
 
   test("/session-delete! on an empty context is a clean restart, not an error", async () => {
     const { agent, commands, lines } = await setup([], { session: true });
     await commands.handle("/session-delete!");
-    expect(agent.context).toEqual([]);
+    expect(agent.context.messages()).toEqual([]);
     expect(lines[0]).toContain("cleared 0 message(s)");
-    agent.session.close();
+    agent.context.close();
   });
 
   test("/session-new calls onReset (the view returns to its startup state) instead of onChanged, when wired", async () => {
@@ -797,25 +878,25 @@ describe("cli-commands: /session-new and /session-delete!", () => {
 describe("cli-commands: /session-name", () => {
   test("renames the session: the file takes the proper name, the old name's file is gone", async () => {
     const { agent, commands, lines } = await setup([USER("one"), ASSISTANT("a1")], { session: true });
-    const oldFile = agent.session.file;
-    agent.session.flush();
+    const oldFile = agent.context.file;
+    agent.context.flush();
     expect(await commands.handle("/session-name my-proper-name")).toBe(true);
-    expect(agent.session.id).toBe("my-proper-name");
-    expect(agent.session.file).toContain("my-proper-name.jsonl"); // date + uuid8 prefix, then the new name
+    expect(agent.context.id).toBe("my-proper-name");
+    expect(agent.context.file).toContain("my-proper-name.jsonl"); // date + uuid8 prefix, then the new name
     expect(existsSync(oldFile)).toBe(false); // the old name's file moved
-    expect(readFileSync(agent.session.file, "utf8")).toContain('"id":"my-proper-name"');
-    expect(readFileSync(agent.session.file, "utf8")).toContain("one"); // the content moved along
+    expect(readFileSync(agent.context.file, "utf8")).toContain('"id":"my-proper-name"');
+    expect(readFileSync(agent.context.file, "utf8")).toContain("one"); // the content moved along
     expect(lines[0]).toContain("session renamed: my-proper-name");
     // and it resumes under the new name
-    const replayed = SessionStore.resume({ id: "my-proper-name", dir: agent.session.dir });
-    expect(replayed.context).toHaveLength(2);
-    agent.session.close();
+    const replayed = Context.resume({ id: "my-proper-name", dir: agent.context.dir });
+    expect(replayed.messages()).toHaveLength(2);
+    agent.context.close();
     replayed.close();
   });
 
-  test("refuses a taken name, an invalid one, a reserved spelling, and an anonymous session", async () => {
+  test("refuses a taken name, an invalid one, and a reserved spelling; names a session that is not logged", async () => {
     const { agent, commands, lines } = await setup([USER("one")], { session: true });
-    agent.session.flush();
+    agent.context.flush();
     await commands.handle("/session-name other");
     await commands.handle("/session-name commands-test"); // would clobber the old file? it's gone — wait, it moved
     expect(lines.join("")).toContain("renamed: commands-test"); // the old file moved away, so the name is free
@@ -828,9 +909,9 @@ describe("cli-commands: /session-name", () => {
     expect(lines.at(-1)).toContain("usage"); // two words = a usage error
     await commands.handle("/session-name bad/name");
     expect(lines.at(-1)).toContain("invalid session name");
-    await commands.handle("/session-new false"); // anonymous
+    await commands.handle("/session-new false"); // not logged
     await commands.handle("/session-name whatever");
-    expect(lines.at(-1)).toContain("anonymous session has no file to name");
+    expect(lines.at(-1)).toContain("session renamed: whatever — not logged (memory only)");
   });
 });
 
@@ -861,7 +942,7 @@ describe("cli-commands: /context-copy", () => {
     });
     await commands.handle("/context-copy");
     expect(lines[0]).toContain("no assistant response");
-    agent.append(ASSISTANT("now there is one"));
+    agent.context.append(ASSISTANT("now there is one"));
     await commands.handle("/context-copy");
     expect(lines[1]).toContain("clipboard unavailable");
   });
@@ -878,9 +959,9 @@ describe("cli-commands: /context-edit interactive routing (onEditMode)", () => {
     await commands.handle("/context-edit");
     await commands.handle("/context-edit 0");
     expect(entered).toEqual([1, 0]); // default: the last message
-    expect(agent.context).toEqual([USER("one"), ASSISTANT("two")]); // the hook owns editing
+    expect(agent.context.messages()).toEqual([USER("one"), ASSISTANT("two")]); // the hook owns editing
     await commands.handle("/context-edit 0 rewritten");
-    expect(agent.context[0].content[0].text).toBe("rewritten"); // direct form untouched
+    expect(agent.context.at(0).content[0].text).toBe("rewritten"); // direct form untouched
   });
 });
 
@@ -898,16 +979,16 @@ describe("cli-commands: /context-clear-thoughts", () => {
       THINKING_ASSISTANT("reasoning two", "answer two"),
     ]);
     expect(await commands.handle("/context-clear-thoughts")).toBe(true);
-    expect(agent.context[1].content).toEqual([{ type: "text", text: "answer one" }]);
-    expect(agent.context[3].content).toEqual([{ type: "text", text: "answer two" }]);
+    expect(agent.context.at(1).content).toEqual([{ type: "text", text: "answer one" }]);
+    expect(agent.context.at(3).content).toEqual([{ type: "text", text: "answer two" }]);
     expect(lines[0]).toContain("cleared thinking blocks from 2 message(s)");
   });
 
   test("with no thinking blocks anywhere, reports it and leaves the context untouched", async () => {
     const { agent, commands, lines } = await setup([USER("q1"), ASSISTANT("a1")]);
-    const before = JSON.stringify(agent.context);
+    const before = JSON.stringify(agent.context.messages());
     expect(await commands.handle("/context-clear-thoughts")).toBe(true);
-    expect(JSON.stringify(agent.context)).toBe(before);
+    expect(JSON.stringify(agent.context.messages())).toBe(before);
     expect(lines[0]).toContain("no thinking blocks");
   });
 
@@ -919,6 +1000,16 @@ describe("cli-commands: /context-clear-thoughts", () => {
 });
 
 describe("cli-commands: /context-compact", () => {
+  test("/compact forwards focus including continuation lines to onCompact", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
+    const focuses = [];
+    const commands = createCommands({ agent, onCompact: async (focus) => focuses.push(focus) });
+    await commands.handle("/compact prioritize code\nthen tests");
+    await commands.handle("/context-compact highlight errors");
+    expect(focuses).toEqual(["prioritize code\nthen tests", "highlight errors"]);
+  });
+
   test("routes to onCompact with no arguments", async () => {
     const env = await testEnv();
     const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
@@ -949,11 +1040,11 @@ describe("cli-commands: /context-compact", () => {
 describe("cli-commands: /endpoint-logout", () => {
   test("/endpoint-logout <endpoint> removes the endpoint and clears a combo pointing at it", async () => {
     const { agent, commands, lines } = await setup([USER("q")]);
-    agent.env.endpoints.acme = { provider: "fake", url: "http://x" };
+    agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
     agent.endpoint = "acme";
     agent.model = "m";
     expect(await commands.handle("/endpoint-logout acme")).toBe(true);
-    expect(agent.env.endpoint("acme")).toBeUndefined();
+    expect(endpointOf(agent.env, "acme")).toBeUndefined();
     expect(agent.endpoint).toBeUndefined();
     expect(agent.model).toBeUndefined();
     expect(lines[0]).toContain("endpoint removed: acme");
@@ -962,8 +1053,8 @@ describe("cli-commands: /endpoint-logout", () => {
 
   test("/endpoint-logout on an endpoint the combo doesn't use keeps the combo", async () => {
     const { agent, commands, lines } = await setup([]);
-    agent.env.endpoints.acme = { provider: "fake", url: "http://x" };
-    agent.env.endpoints.other = { provider: "fake", url: "http://y" };
+    agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
+    agent.env._endpoints.other = { provider: "fake", url: "http://y" };
     agent.endpoint = "other";
     await commands.handle("/endpoint-logout acme");
     expect(agent.endpoint).toBe("other");
@@ -976,21 +1067,21 @@ describe("cli-commands: /endpoint-logout", () => {
     await commands.handle("/endpoint-logout nope");
     expect(lines.some((l) => l.includes("usage: /endpoint-logout <endpoint>"))).toBe(true);
     expect(lines.some((l) => l.includes('unknown endpoint "nope"'))).toBe(true);
-    expect(agent.env.endpointNames()).toEqual(expect.arrayContaining(["fake", "p", "test"]));
+    expect(namesOf(agent.env)).toEqual(expect.arrayContaining(["fake", "p", "test"]));
   });
 });
 
 describe("cli-commands: /session-delete-all!", () => {
   async function setupSessions() {
-    const env = await testEnv();
     const dir = mkdtempSync("./ai-tmp/commands-sessions-");
+    const env = await testEnv({ sessions: resolve(dir) });
     const lines = [];
     const agent = new Agent({
-      env, model: "fake/m", context: [],
-      session: new SessionStore({ id: "live", dir, context: [], origin: env.cwd }),
+      env, model: "fake/m",
+      context: new Context({ id: "live", dir, messages: [], origin: env.cwd }),
     });
     for (const id of ["one", "two"]) {
-      const store = new SessionStore({ id, dir, origin: env.cwd });
+      const store = new Context({ id, dir, origin: env.cwd });
       store.append(USER("q"));
       store.close();
     }
@@ -1000,25 +1091,25 @@ describe("cli-commands: /session-delete-all!", () => {
 
   test("asks for confirmation; only 'Delete all' deletes every session file", async () => {
     const { agent, commands, lines, dir } = await setupSessions();
-    agent.setQuestion({ ask: async () => [{ labels: ["Cancel"] }] });
+    agent.questionSet({ ask: async () => [{ labels: ["Cancel"] }] });
     await commands.handle("/session-delete-all!");
     expect(lines[0]).toContain("cancelled");
-    expect(findSessionFile(dir, "one")).not.toBeUndefined();
+    expect(Context.fileOf({ dir: dir, id: "one" })).not.toBeUndefined();
 
-    agent.setQuestion({ ask: async (qs) => {
+    agent.questionSet({ ask: async (qs) => {
       expect(qs[0].header).toBe("Sessions");
       expect(qs[0].question).toContain("ALL 2 session file(s)");
       return [{ labels: ["Delete all"] }];
     } });
     await commands.handle("/session-delete-all!");
     expect(lines.at(-1)).toContain("deleted 2 session file(s)");
-    expect(findSessionFile(dir, "one")).toBeUndefined();
-    expect(findSessionFile(dir, "two")).toBeUndefined();
+    expect(Context.fileOf({ dir: dir, id: "one" })).toBeUndefined();
+    expect(Context.fileOf({ dir: dir, id: "two" })).toBeUndefined();
   });
 
   test("an empty folder and a missing bridge report cleanly", async () => {
     const { agent, commands, lines } = await setupSessions();
-    agent.setQuestion({ ask: async () => [{ labels: ["Delete all"] }] });
+    agent.questionSet({ ask: async () => [{ labels: ["Delete all"] }] });
     await commands.handle("/session-delete-all!"); // deletes the two
     await commands.handle("/session-delete-all!"); // nothing left
     expect(lines.at(-1)).toContain("no session files");

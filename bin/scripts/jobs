@@ -1,11 +1,9 @@
 #!/usr/bin/env bun
-/** Thin operator CLI. Local lifecycle never constructs Env or touches host scheduling. */
+/** Thin operator CLI: maps argv to the Jobs façade and prints short notes.
+ * Problems are logged by the library in ai-jobs/errors/, not printed here. */
 import { NAMES } from "../../lib/namespace.js";
-import { dispatchJobs } from "../../lib/jobs/dispatcher.js";
-import { initializeJobs, disableJobs } from "../../lib/jobs/lifecycle.js";
-import { jobsStatus } from "../../lib/jobs/status.js";
+import Jobs from "../../lib/jobs.js";
 import CLI from "../../lib/cli.js";
-import { foregroundJobsDaemon } from "../../lib/jobs/daemon.js";
 
 const name = `${NAMES.pr}-jobs`;
 const help = `${name} — project-local Jobs
@@ -15,65 +13,78 @@ Actions also accept --init, --disable, --status, --run.
 init      Enable local Jobs; idempotent. Never starts a daemon.
 disable   Rename ai-jobs to ai-jobs-disabled preserving bytes; a prepared attempt may strand.
 run       One best-effort scan; never initializes or repairs. Restore then scan reconciles stranded work without replay. Optional --model fallback.
-status    Read-only folder and outcome projection; never starts a daemon.
+status    Read-only folder and outcome projection (JSON); never starts a daemon.
 Manual run and task CRUD do not require a daemon. Foreground stays attached.
-Daemon scans immediately, then five minutes after child completion and exits when ai-jobs is absent or damaged.
+Daemon scans immediately, then five minutes after each scan completes, and exits when ai-jobs is absent or damaged. Stopping it cancels the running job.
 No locks or singleton ownership exist: concurrent runs, CRUD, daemons, archival and disable may duplicate work or lose updates.
-JSON goes to stdout; diagnostics to stderr. Failure/refusal exits 1, cancellation 130.
+Actions print short notes; problems and warnings are logged readably in ai-jobs/errors/YYYY-MM-DD.md (the scan record: ai-jobs/last-run.json, runs/). Failure/refusal exits 1, cancellation 130.
 Tasks live in ai-jobs/tasks. Removing tasks does not cancel running work.
 `;
-function publicResult(value) {
-  if (!value || typeof value !== "object") return value;
-  const { projectRoot, paths, ...result } = value;
-  return result;
-}
-function diagnostics(items) {
-  for (const item of items ?? []) process.stderr.write(`${name}: ${item.code ?? "JOBS_ERROR"}: ${item.message ?? "task diagnostic"}\n`);
-}
+const note = (text) => process.stdout.write(`${name}: ${text}\n`);
+const problem = (text) => process.stderr.write(`${name}: ${text}\n`);
+const clock = () => new Date().toLocaleTimeString();
+/** A mistake in this script's own arguments — shown verbatim. */
+class UsageError extends Error {}
+
 function parse(args) {
   const result = {};
   for (let index = 0; index < args.length; index++) {
     const arg = args[index], action = arg.replace(/^--/, "");
     if (["init", "disable", "status", "run"].includes(action) && !result.action) result.action = action;
     else if (arg === "--model" && !result.model && args[index + 1] && !args[index + 1].startsWith("-")) result.model = args[++index];
-    else throw new Error(`unknown flag or action: ${arg}`);
+    else throw new UsageError(`unknown flag or action: ${arg}`);
   }
-  if (!result.action) throw new Error("expected one of init, disable, status, run");
-  if (result.model && result.action !== "run") throw new Error("--model only applies to run");
+  if (!result.action) throw new UsageError("expected one of init, disable, status, run");
+  if (result.model && result.action !== "run") throw new UsageError("--model only applies to run");
   return result;
 }
-async function run(root, model) {
+/** Run `fn(signal)` with Ctrl-C / SIGTERM mapped to cancellation. */
+async function cancellable(fn) {
   const controller = new AbortController(), disarm = CLI.armCancelSignals({ onCancel: () => controller.abort() });
-  let parent;
-  try {
-    const result = await dispatchJobs(root, { execution: { signal: controller.signal, model } });
-    diagnostics(result.errors);
-    process.exitCode = controller.signal.aborted ? CLI.EXIT.cancelled : result.errors.length ? 1 : 0;
-    return result;
-  } finally { disarm(); }
+  try { return { value: await fn(controller.signal), cancelled: controller.signal.aborted }; }
+  finally { disarm(); }
+}
+async function run(root, model) {
+  const { value: { outcomes, errors, warnings, log }, cancelled } = await cancellable((signal) => Jobs.run(root, { execution: { signal, model } }));
+  for (const { id, outcome } of outcomes) note(`${id}: ${outcome}`);
+  if (!outcomes.length && !errors.length && !warnings.length) note("no jobs due");
+  // The error log holds the details; if it could not be written, print them here.
+  const counts = [errors.length ? `${errors.length} problem(s)` : "", warnings.length ? `${warnings.length} warning(s)` : ""].filter(Boolean).join(" and ");
+  if (log) (errors.length ? problem : note)(`${counts} logged in ${log}`);
+  else for (const item of [...errors, ...warnings]) problem(`${item.filename ?? item.id ?? "scan"}: ${item.code}: ${item.message}`);
+  if (cancelled) note("cancelled");
+  process.exitCode = cancelled ? CLI.EXIT.cancelled : errors.length ? 1 : 0;
+}
+async function daemon(root) {
+  const state = (value) => note(value === "running" ? `${clock()} scanning` : `${clock()} waiting 5 min (Ctrl-C to stop)`);
+  await cancellable((signal) => Jobs.daemonRun(root, { signal, state }));
+  note(`${clock()} daemon stopped`);
+}
+async function disable(root) {
+  const { state } = await Jobs.disable(root);
+  note(state === "absent" ? "not initialized; nothing to disable" : state === "disabled" ? "already disabled" : "disabled (ai-jobs -> ai-jobs-disabled)");
+}
+async function status(root) {
+  const result = await Jobs.status(root);
+  for (const item of result.diagnostics) problem(`${item.code}: ${item.message}`);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.eligibility.state !== "enabled") process.exitCode = 1;
 }
 async function main() {
-  const args = process.argv.slice(2);
+  const args = process.argv.slice(2), root = process.cwd();
   if (!args.length || (args.length === 1 && ["--help", "-h", "help"].includes(args[0]))) { process.stdout.write(help); return; }
   if (args[0] === "daemon") {
-    if (args.length !== 2 || args[1] !== "foreground") throw new Error("expected daemon foreground");
-    const controller = new AbortController(), stop = () => controller.abort();
-    process.on("SIGINT", stop); process.on("SIGTERM", stop);
-    try { process.stdout.write(`${JSON.stringify(await foregroundJobsDaemon(process.cwd(), { signal: controller.signal }))}\n`); }
-    finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
-    return;
+    if (args.length !== 2 || args[1] !== "foreground") throw new UsageError("expected daemon foreground");
+    return daemon(root);
   }
-  const { action, model } = parse(args), root = process.cwd();
-  let result;
-  if (action === "init") result = await initializeJobs(root);
-  if (action === "disable") result = await disableJobs(root);
-  if (action === "run") result = await run(root, model);
-  if (action === "status") {
-    result = await jobsStatus(root);
-    if (result.eligibility.state !== "enabled") process.exitCode = 1;
-  }
-  diagnostics(result.diagnostics);
-  process.stdout.write(`${JSON.stringify(publicResult(result))}\n`);
+  const { action, model } = parse(args);
+  if (action === "init") { await Jobs.init(root); note("enabled (ai-jobs/)"); }
+  if (action === "disable") await disable(root);
+  if (action === "run") await run(root, model);
+  if (action === "status") await status(root);
 }
 try { await main(); }
-catch (error) { diagnostics([{ code: error.code, message: error.code && !error.code.startsWith("JOBS_") ? "jobs operation failed" : error.message }]); process.exitCode = 1; }
+catch (error) {
+  problem(error instanceof UsageError ? `${error.message} (see --help)` : `${error.code ? `${error.code}: ` : ""}${error.message}`);
+  process.exitCode = 1;
+}

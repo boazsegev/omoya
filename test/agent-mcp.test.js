@@ -1,18 +1,24 @@
-// test/agent-mcp.test.js — proof for the `mcp` tool (tools/mcp.js):
+// test/agent-mcp.test.js — proof for the built-in `mcp` tool (lib/env/mcp-tools.js):
 // zero-dep stdio JSON-RPC client over settings.mcp — lazy
 // connect + initialize handshake, servers/tools/call actions, error
 // surfaces (isError, unknown server/tool, dead connection), and the
 // in-process connection pool reused across calls.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Env } from "../lib/env.js";
 import { NAMES } from "../lib/namespace.js";
-import { callMcp, mcp } from "../tools/mcp.js";
+import { toolEntry, toolExists, toolNamesSafe, toolSchemas, toolsLoad, toolsRefresh } from "./env-internals.js";
 
 const SERVER = "./test/fixtures/mcp-server.js";
 const ENV_PREFIX = NAMES.NAMESPACE;
 const MCP_CFG_ENV = `${ENV_PREFIX}_MCP_CFG`;
 const MCP_LEAK_ENV = `${ENV_PREFIX}_MCP_LEAK`;
+
+/** The built-in `mcp` tool, called through its Env (context.env). */
+const mcp = (args, context) => context.env.toolCall("mcp", args, context);
+/** One remote call (the action the shortcuts and web.js use). */
+const callMcp = ({ server, tool, arguments: args }, context) => mcp({ action: "call", server, tool, arguments: args }, context);
 
 /** An env with the fixture server configured; the tool context it yields. */
 async function fixtureContext(settings = {}) {
@@ -31,10 +37,10 @@ describe("the mcp tool", () => {
     const before = await mcp({ action: "servers" }, context);
     expect(before).toContain("fixture:");
     expect(before).toContain("not connected");
-    // no servers configured: the configuration hint, never a crash
+    // no servers configured: no tool to call
     const dir = mkdtempSync("./ai-tmp/mcp-");
     const env = new Env({ dir, settingsDir: dir, settings: {} });
-    expect(await mcp({ action: "servers" }, { env })).toMatch(/^No MCP servers are available\. Ask the user/);
+    expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]); // no MCP tools at all
   });
 
   test("tools connects lazily (handshake) and lists the server's tools", async () => {
@@ -44,7 +50,7 @@ describe("the mcp tool", () => {
     expect(out).toContain("echo — Echo the given text back.");
     // the connection now shows as connected, and the report reached the registry status
     expect(await mcp({ action: "servers" }, context)).toContain("connected");
-    expect(context.env.toolEntry("mcp")).toBeUndefined(); // not registered here — direct calls only
+    expect((await context.env.tools()).get("mcp").status).toEqual({ configured: 1, connected: ["fixture"] }); // the pool state
   });
 
   test("call invokes a remote tool and returns its text content", async () => {
@@ -76,12 +82,26 @@ describe("the mcp tool", () => {
   test("the connection pool is reused across calls (one server process)", async () => {
     const { context } = await fixtureContext();
     await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "a" } }, context);
-    const pool = Env.mcpPool;
+    const pool = context.env._mcpPool; // the Env's own client pool
     expect(pool.size).toBeGreaterThan(0);
     const before = [...pool.values()].filter((c) => !c.closed).length;
     await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "b" } }, context);
     const after = [...pool.values()].filter((c) => !c.closed).length;
     expect(after).toBe(before); // the same live connection answered both calls
+  });
+
+  test("env.close() stops every pooled server and writes held settings; a later call reconnects", async () => {
+    const { env, context } = await fixtureContext();
+    await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "a" } }, context);
+    const [conn] = env._mcpPool.values();
+    env.settings.closeProbe = 1; // a held (deferred) settings write
+    env.close();
+    expect(conn.closed).toBe(true);
+    expect(env._mcpPool.size).toBe(0);
+    expect(JSON.parse(readFileSync(join(env._settingsDir, "settings.json"), "utf8")).closeProbe).toBe(1); // on disk already
+    expect(await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "b" } }, context)).toBe("b");
+    env.close(); // idempotent
+    env.close();
   });
 
   test("a dying server rejects the in-flight request and the next call reconnects", async () => {
@@ -95,24 +115,24 @@ describe("the mcp tool", () => {
 
   test("the registry publishes mcp without harness metadata; safe-marked for safe-marked servers", async () => {
     const { env } = await fixtureContext();
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.hasTool("mcp")).toBe(true);
-    const [schema] = env.toolSchemas(["mcp"]);
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolExists(env, "mcp")).toBe(true);
+    const [schema] = toolSchemas(env, ["mcp"]);
     expect(schema.name).toBe("mcp");
     expect(schema.safe).toBeUndefined(); // stripped from the published catalog too
     // the tool IS published in safe mode — the per-SERVER "safe": true
     // config decides what it can reach there (safety is the server's,
     // never the tool's)
-    expect(env.safeToolNames()).toContain("mcp");
+    expect(toolNamesSafe(env)).toContain("mcp");
   });
 });
 
 describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
   test("one shortcut tool is published per configured server, folding in its description", async () => {
     const { env } = await fixtureContext({ mcp: { fixture: { command: process.execPath, args: [SERVER], description: "Test fixture." } } });
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.hasTool("mcp-fixture")).toBe(true);
-    const [schema] = env.toolSchemas(["mcp-fixture"]);
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolExists(env, "mcp-fixture")).toBe(true);
+    const [schema] = toolSchemas(env, ["mcp-fixture"]);
     expect(schema.description).toContain("fixture");
     expect(schema.description).toContain("Test fixture.");
     expect(schema.inputSchema.required).toEqual(["tool"]);
@@ -120,12 +140,12 @@ describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
 
   test("calling the shortcut forwards to the fixed server, no `server` argument needed", async () => {
     const { env } = await fixtureContext();
-    await env.loadTools({ dirs: ["./tools"] });
-    const out = await env.callTool("mcp-fixture", { tool: "echo", arguments: { text: "shortcut" } }, { env });
+    await toolsLoad(env, { dirs: ["./tools"] });
+    const out = await env.toolCall("mcp-fixture", { tool: "echo", arguments: { text: "shortcut" } }, { env });
     expect(out).toBe("shortcut");
   });
 
-  test("an unmarked server's shortcut is absent from the safe view; a safe one is reachable", async () => {
+  test("an unmarked server's shortcut is absent from the safe catalog; a safe one is reachable", async () => {
     const dir = mkdtempSync("./ai-tmp/mcp-");
     const env = new Env({
       dir,
@@ -137,12 +157,12 @@ describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
         },
       },
     });
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.safeToolNames()).toContain("mcp-safe-fixture");
-    expect(env.safeToolNames()).not.toContain("mcp-plain-fixture");
-    expect(await env.safe.callTool("mcp-safe-fixture", { tool: "echo", arguments: { text: "hi" } }, { env: env.safe }))
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolNamesSafe(env)).toContain("mcp-safe-fixture");
+    expect(toolNamesSafe(env)).not.toContain("mcp-plain-fixture");
+    expect(await env.toolCall("mcp-safe-fixture", { tool: "echo", arguments: { text: "hi" } }, { env, safe: true }))
       .toBe("hi");
-    await expect(env.safe.callTool("mcp-plain-fixture", { tool: "echo" }, { env: env.safe }))
+    await expect(env.toolCall("mcp-plain-fixture", { tool: "echo" }, { env, safe: true }))
       .rejects.toThrow(/not available in safe mode/);
   });
 
@@ -153,11 +173,11 @@ describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
       settingsDir: dir,
       settings: { mcp: { fixture: { command: process.execPath, args: [SERVER] } } },
     });
-    await env.loadTools({ dirs: ["./tools"] });
-    expect(env.hasTool("mcp-fixture")).toBe(true);
+    await toolsLoad(env, { dirs: ["./tools"] });
+    expect(toolExists(env, "mcp-fixture")).toBe(true);
     env.settings.mcp = {};
-    await env.refreshTools();
-    expect(env.hasTool("mcp-fixture")).toBe(false);
+    await toolsRefresh(env);
+    expect(toolExists(env, "mcp-fixture")).toBe(false);
   });
 });
 
@@ -176,7 +196,7 @@ describe("the mcp tool — safe mode (the SERVER's config carries the safety dec
         ...extra,
       },
     });
-    return { env, context: { env: env.safe } }; // the SAFE VIEW, as the Agent hands it
+    return { env, context: { env, safe: true } }; // a safe caller's context, as the Agent hands it
   }
 
   test("listings show only safe-marked servers; a safe one connects and answers", async () => {
@@ -203,13 +223,13 @@ describe("the mcp tool — safe mode (the SERVER's config carries the safety dec
 
   test("with no reachable servers listings give the ordinary configuration instruction", async () => {
     const { env } = await fixtureContext(); // fixture is unavailable in this view
-    const safeContext = { env: env.safe };
+    const safeContext = { env, safe: true };
     expect(await mcp({ action: "servers" }, safeContext)).toMatch(/^No MCP servers are available\. Ask the user/);
     expect(await mcp({ action: "tools" }, safeContext)).toMatch(/^No MCP servers are available\. Ask the user/);
   });
 });
 
-describe("the mcp tool — the child environment (tools/guard/env.js)", () => {
+describe("the mcp tool — the child environment (lib/util.js childEnv)", () => {
   test("the config's env additions reach the server; env-refuse strips inherited keys", async () => {
     process.env[MCP_LEAK_ENV] = "top-secret";
     try {

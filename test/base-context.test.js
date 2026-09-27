@@ -1,21 +1,9 @@
 // test/base-context.test.js — proof for lib/context.js
 import { describe, expect, test } from "bun:test";
-import {
-  parseInput,
-  createAssembler,
-  assemblyCallbacks,
-  at,
-  blockAt,
-  editMessage,
-  editBlock,
-  rebuildMessage,
-  rollbackTo,
-  pop,
-  appendMessage,
-  foldContent,
-  mergeableMessages,
-} from "../lib/context.js";
-import Context, { normalizeCallbacks, dispatch } from "../lib/context.js";
+import { messagesParse, assemblerCreate, assemblerCallbacks, messageRebuild, messageAppend } from "../lib/context.js";
+import { at, blockAt, editMessage, editBlock, rollbackTo, pop } from "../lib/context/edit.js";
+import { foldContent, mergeableMessages } from "../lib/context/merge.js";
+import Context, { callbacksNormalize, eventDispatch } from "../lib/context.js";
 
 const ctx = () => [
   { type: 1, content: [{ type: "text", text: "sys" }] },
@@ -25,20 +13,20 @@ const ctx = () => [
 
 describe("CLI-input parsing (delegates to shared grammar)", () => {
   test("parses plain lines to user messages", () => {
-    expect(parseInput("hello there")).toEqual([
+    expect(messagesParse("hello there")).toEqual([
       { type: 2, content: [{ type: "text", text: "hello there" }] },
     ]);
   });
 
   test("parses whole JSON context", () => {
     const input = JSON.stringify(ctx());
-    expect(parseInput(input)).toEqual(ctx());
+    expect(messagesParse(input)).toEqual(ctx());
   });
 });
 
 describe("response-event assembly", () => {
   test("assembles ordered text/thinking/toolCall blocks from deltas", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "start" });
     a.consume({ type: "thinking_start", contentIndex: 0 });
     a.consume({ type: "thinking_delta", contentIndex: 0, text: "let me " });
@@ -47,10 +35,10 @@ describe("response-event assembly", () => {
     a.consume({ type: "text_start", contentIndex: 1 });
     a.consume({ type: "text_delta", contentIndex: 1, text: "Hello" });
     a.consume({ type: "text_end", contentIndex: 1 });
-    a.consume({ type: "toolcall_start", contentIndex: 2, callId: "c1", name: "file-read" });
-    a.consume({ type: "toolcall_delta", contentIndex: 2, arguments: '{"path":' });
-    a.consume({ type: "toolcall_delta", contentIndex: 2, arguments: '"x"}' });
-    a.consume({ type: "toolcall_end", contentIndex: 2 });
+    a.consume({ type: "tool_call_start", contentIndex: 2, callId: "c1", name: "file-read" });
+    a.consume({ type: "tool_call_delta", contentIndex: 2, arguments: '{"path":' });
+    a.consume({ type: "tool_call_delta", contentIndex: 2, arguments: '"x"}' });
+    a.consume({ type: "tool_call_end", contentIndex: 2 });
     a.consume({ type: "done" });
     expect(a.message()).toEqual({
       type: 3,
@@ -63,7 +51,7 @@ describe("response-event assembly", () => {
   });
 
   test("partial message available mid-stream (cancellation contract)", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "start" });
     a.consume({ type: "text_start", contentIndex: 0 });
     a.consume({ type: "text_delta", contentIndex: 0, text: "partial ans" });
@@ -75,7 +63,7 @@ describe("response-event assembly", () => {
   });
 
   test("final text replaces a conflicting streamed block and retains its draft", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "text_start", contentIndex: 0 });
     a.consume({ type: "text_delta", contentIndex: 0, text: "The draft." });
     a.consume({ type: "text_end", contentIndex: 0, text: "The corrected answer." });
@@ -87,14 +75,14 @@ describe("response-event assembly", () => {
   });
 
   test("matching final text does not create a draft or duplicate the text", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "text_delta", contentIndex: 0, text: "Unchanged." });
     a.consume({ type: "text_end", contentIndex: 0, text: "Unchanged." });
     expect(a.message()).toEqual({ type: 3, content: [{ type: "text", text: "Unchanged." }] });
   });
 
   test("final thinking snapshots replace streamed thinking without duplication", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "thinking_start", contentIndex: 0 });
     a.consume({ type: "thinking_delta", contentIndex: 0, text: "draft reasoning" });
     a.consume({ type: "thinking_end", contentIndex: 0, text: "final reasoning" });
@@ -102,7 +90,7 @@ describe("response-event assembly", () => {
   });
 
   test("final snapshots consolidate every text block, including interleaved blocks", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     a.consume({ type: "text_start", contentIndex: 0 });
     a.consume({ type: "text_delta", contentIndex: 0, text: "first draft" });
     a.consume({ type: "thinking_start", contentIndex: 1 });
@@ -123,25 +111,25 @@ describe("response-event assembly", () => {
   });
 
   test("unparseable tool arguments keep raw string", () => {
-    const a = createAssembler();
-    a.consume({ type: "toolcall_start", contentIndex: 0, callId: "c", name: "t" });
-    a.consume({ type: "toolcall_delta", contentIndex: 0, arguments: "{bad" });
-    a.consume({ type: "toolcall_end", contentIndex: 0 });
+    const a = assemblerCreate();
+    a.consume({ type: "tool_call_start", contentIndex: 0, callId: "c", name: "t" });
+    a.consume({ type: "tool_call_delta", contentIndex: 0, arguments: "{bad" });
+    a.consume({ type: "tool_call_end", contentIndex: 0 });
     expect(a.message().content[0].arguments).toBe("{bad");
   });
 
-  test("assemblyCallbacks plugs into normalized routing", () => {
-    const a = createAssembler();
-    const set = normalizeCallbacks(assemblyCallbacks(a));
-    dispatch(set, { type: "start" });
-    dispatch(set, { type: "text_start", contentIndex: 0 });
-    dispatch(set, { type: "text_delta", contentIndex: 0, text: "via callbacks" });
-    dispatch(set, { type: "done" });
+  test("assemblerCallbacks plugs into normalized routing", () => {
+    const a = assemblerCreate();
+    const set = callbacksNormalize(assemblerCallbacks(a));
+    eventDispatch(set, { type: "start" });
+    eventDispatch(set, { type: "text_start", contentIndex: 0 });
+    eventDispatch(set, { type: "text_delta", contentIndex: 0, text: "via callbacks" });
+    eventDispatch(set, { type: "done" });
     expect(a.message().content[0].text).toBe("via callbacks");
   });
 
   test("done adopts a carried final message", () => {
-    const a = createAssembler();
+    const a = assemblerCreate();
     const final = { type: 3, content: [{ type: "text", text: "whole" }] };
     a.consume({ type: "done", message: final });
     expect(a.message()).toBe(final);
@@ -195,7 +183,7 @@ describe("edit with stale identifier cleanup", () => {
   });
 
   test("assistant draft display metadata survives a context edit", () => {
-    const clean = rebuildMessage({
+    const clean = messageRebuild({
       type: 3, draft: "streamed", content: [{ type: "text", text: "final" }],
     });
     expect(clean).toEqual({
@@ -204,13 +192,13 @@ describe("edit with stale identifier cleanup", () => {
   });
 
   test("tool-result linkage is dropped from non-tool-result message edits", () => {
-    expect(rebuildMessage({
+    expect(messageRebuild({
       type: 3, callId: "provider-response-id", name: "stale", error: true, content: [],
     })).toEqual({ type: 3, content: [] });
   });
 
   test("thinking/toolCall block metadata survives (replay data)", () => {
-    const clean = rebuildMessage({
+    const clean = messageRebuild({
       type: 3,
       content: [
         { type: "thinking", text: "t", signature: "sig-abc" },
@@ -226,7 +214,7 @@ describe("edit with stale identifier cleanup", () => {
   });
 
   test("unknown block types pass through untouched", () => {
-    const clean = rebuildMessage({
+    const clean = messageRebuild({
       type: 3,
       content: [{ type: "redacted_thinking", data: "x" }],
     });
@@ -298,12 +286,12 @@ describe("rollback / pop", () => {
   });
 });
 
-describe("append with merging (appendMessage / foldContent)", () => {
+describe("append with merging (messageAppend / foldContent)", () => {
   const user = (text) => ({ type: 2, content: [{ type: "text", text }] });
 
   test("consecutive same-type messages with identical metadata merge into one", () => {
     const c = [user("first")];
-    const stored = appendMessage(c, user("second"));
+    const stored = messageAppend(c, user("second"));
     expect(c).toHaveLength(1);
     expect(stored).toBe(c[0]); // the PREVIOUS message, grown
     expect(c[0].content).toEqual([{ type: "text", text: "first\n\nsecond" }]);
@@ -311,45 +299,45 @@ describe("append with merging (appendMessage / foldContent)", () => {
 
   test("chat user messages are a metadata border and never merge with real user input", () => {
     const c = [user("real user")];
-    appendMessage(c, { ...user("chat"), subtype: "chat" });
-    appendMessage(c, user("next real user"));
+    messageAppend(c, { ...user("chat"), subtype: "chat" });
+    messageAppend(c, user("next real user"));
     expect(c).toHaveLength(3);
     expect(c.map((message) => message.subtype ?? "user")).toEqual(["user", "chat", "user"]);
   });
 
   test("user messages merge only when all non-message metadata match", () => {
     const c = [{ ...user("first"), source: "import" }];
-    appendMessage(c, { ...user("second"), source: "import" });
-    appendMessage(c, { ...user("third"), source: "chat" });
+    messageAppend(c, { ...user("second"), source: "import" });
+    messageAppend(c, { ...user("third"), source: "chat" });
     expect(c).toHaveLength(2);
     expect(c[0].content[0].text).toBe("first\n\nsecond");
   });
 
   test("different types never merge", () => {
     const c = [user("q")];
-    appendMessage(c, { type: 3, content: [{ type: "text", text: "a" }] });
+    messageAppend(c, { type: 3, content: [{ type: "text", text: "a" }] });
     expect(c).toHaveLength(2);
   });
 
   test("metadata RECORDS pass through untouched: no validation, no folding, never merged", () => {
     const record = { type: "note-store", notes: { a: { content: "x" } } };
     const c = [user("q")];
-    const stored = appendMessage(c, record);
+    const stored = messageAppend(c, record);
     expect(stored).toBe(record); // the SAME object, unmerged
     expect(c).toHaveLength(2);
     expect(c[1]).toBe(record);
     // a following message never folds INTO the record (types never match)
-    appendMessage(c, user("next"));
+    messageAppend(c, user("next"));
     expect(c).toHaveLength(3);
     expect(c[2].content[0].text).toBe("next");
     // and a record sits comfortably ahead of messages for later appends
-    appendMessage(c, user("more"));
+    messageAppend(c, user("more"));
     expect(c[2].content[0].text).toBe("next\n\nmore"); // the merge skipped the record
   });
 
   test("system messages merge like any same-type pair", () => {
     const c = [{ type: 1, content: [{ type: "text", text: "s1" }] }];
-    appendMessage(c, { type: 1, content: [{ type: "text", text: "s2" }] });
+    messageAppend(c, { type: 1, content: [{ type: "text", text: "s2" }] });
     expect(c).toHaveLength(1);
     expect(c[0].content[0].text).toBe("s1\n\ns2");
   });
@@ -358,26 +346,26 @@ describe("append with merging (appendMessage / foldContent)", () => {
     const c = [
       { type: 4, callId: "a", name: "t", content: [{ type: "text", text: "r1" }] },
     ];
-    appendMessage(c, { type: 4, callId: "b", name: "t", content: [{ type: "text", text: "r2" }] });
+    messageAppend(c, { type: 4, callId: "b", name: "t", content: [{ type: "text", text: "r2" }] });
     expect(c).toHaveLength(2);
   });
 
   test("messages carrying linkage fields never merge", () => {
     const c = [{ type: 3, callId: "x", content: [{ type: "text", text: "a" }] }];
-    appendMessage(c, { type: 3, content: [{ type: "text", text: "b" }] });
+    messageAppend(c, { type: 3, content: [{ type: "text", text: "b" }] });
     expect(c).toHaveLength(2);
   });
 
   test("adjacent thinking blocks fold across the merge (one logical block)", () => {
     const c = [{ type: 3, content: [{ type: "thinking", text: "part one" }] }];
-    appendMessage(c, { type: 3, content: [{ type: "thinking", text: "part two" }] });
+    messageAppend(c, { type: 3, content: [{ type: "thinking", text: "part two" }] });
     expect(c).toHaveLength(1);
     expect(c[0].content).toEqual([{ type: "thinking", text: "part one\n\npart two" }]);
   });
 
   test("thinking and text blocks stay separate within a merge", () => {
     const c = [{ type: 3, content: [{ type: "thinking", text: "t" }] }];
-    appendMessage(c, { type: 3, content: [{ type: "text", text: "answer" }] });
+    messageAppend(c, { type: 3, content: [{ type: "text", text: "answer" }] });
     expect(c[0].content.map((b) => b.type)).toEqual(["thinking", "text"]);
   });
 
@@ -386,13 +374,13 @@ describe("append with merging (appendMessage / foldContent)", () => {
       type: 3,
       content: [{ type: "toolCall", callId: "1", name: "t", arguments: {} }],
     }];
-    appendMessage(c, { type: 3, content: [{ type: "text", text: "after" }] });
+    messageAppend(c, { type: 3, content: [{ type: "text", text: "after" }] });
     expect(c[0].content.map((b) => b.type)).toEqual(["toolCall", "text"]);
   });
 
   test("the appended message's own adjacent same-sub-type blocks fold", () => {
     const c = [];
-    appendMessage(c, {
+    messageAppend(c, {
       type: 3,
       content: [
         { type: "thinking", text: "a" },
@@ -422,10 +410,10 @@ describe("append with merging (appendMessage / foldContent)", () => {
     // the harness adds no metadata — any extra field is provider data
     // (a cache id, replay info): a provider-defined message border
     const c = [{ type: 2, content: [{ type: "text", text: "one" }], cacheId: "p1" }];
-    appendMessage(c, { type: 2, content: [{ type: "text", text: "two" }] });
+    messageAppend(c, { type: 2, content: [{ type: "text", text: "two" }] });
     expect(c).toHaveLength(2); // the bordered message stays its own unit
     const d = [{ type: 2, content: [{ type: "text", text: "one" }] }];
-    appendMessage(d, { type: 2, content: [{ type: "text", text: "two" }], native: { id: 7 } });
+    messageAppend(d, { type: 2, content: [{ type: "text", text: "two" }], native: { id: 7 } });
     expect(d).toHaveLength(2); // a border on EITHER side blocks the merge
   });
 
@@ -444,9 +432,9 @@ describe("append with merging (appendMessage / foldContent)", () => {
 
   test("user continuations merge: queued messages fold with blank lines", () => {
     const c = [];
-    appendMessage(c, user("first queued"));
-    appendMessage(c, user("second queued"));
-    appendMessage(c, user("third queued"));
+    messageAppend(c, user("first queued"));
+    messageAppend(c, user("second queued"));
+    messageAppend(c, user("third queued"));
     expect(c).toHaveLength(1);
     expect(c[0].content).toEqual([{ type: "text", text: "first queued\n\nsecond queued\n\nthird queued" }]);
   });
@@ -465,17 +453,17 @@ describe("append with merging (appendMessage / foldContent)", () => {
     )).toBe(false); // provider metadata = a border
   });
 
-  test("appendMessage validates its inputs", () => {
-    expect(() => appendMessage("nope", user("x"))).toThrow(TypeError);
-    expect(() => appendMessage([], { content: [] })).toThrow(TypeError);
+  test("messageAppend validates its inputs", () => {
+    expect(() => messageAppend("nope", user("x"))).toThrow(TypeError);
+    expect(() => messageAppend([], { content: [] })).toThrow(TypeError);
   });
 
   test("EMPTY-MESSAGE refusal: an unmergeable empty message never enters the context", () => {
     const c = [user("q")];
     // a bare empty assistant message (a cancel-partial that produced
     // nothing) throws — explicit emptiness is a bug, never a silent drop
-    expect(() => appendMessage(c, { type: 3, content: [] })).toThrow(/empty message/);
-    expect(() => appendMessage(c, { type: 3, content: [{ type: "text", text: "" }] })).toThrow(/empty message/);
+    expect(() => messageAppend(c, { type: 3, content: [] })).toThrow(/empty message/);
+    expect(() => messageAppend(c, { type: 3, content: [{ type: "text", text: "" }] })).toThrow(/empty message/);
     expect(c).toHaveLength(1); // nothing entered
   });
 
@@ -484,18 +472,18 @@ describe("append with merging (appendMessage / foldContent)", () => {
     // the next turn's first deltas produced nothing before the
     // terminal — a pure continuation of the previous assistant
     // message, so it merges away instead of throwing
-    const stored = appendMessage(c, { type: 3, content: [] });
+    const stored = messageAppend(c, { type: 3, content: [] });
     expect(stored).toBe(c[0]);
     expect(c).toHaveLength(1);
     expect(c[0].content).toEqual([{ type: "text", text: "partial ans" }]);
   });
 
   test("hasContent: payload-bearing blocks count; payload-less ones do not", () => {
-    expect(Context.hasContent({ type: 3, content: [] })).toBe(false);
-    expect(Context.hasContent({ type: 3, content: [{ type: "text", text: "" }] })).toBe(false);
-    expect(Context.hasContent({ type: 3, content: [{ type: "thinking", text: "" }] })).toBe(false);
-    expect(Context.hasContent({ type: 3, content: [{ type: "text", text: "x" }] })).toBe(true);
-    expect(Context.hasContent({ type: 3, content: [{ type: "toolCall", callId: "c", name: "n", arguments: "" }] })).toBe(true);
-    expect(Context.hasContent({ type: 2, content: [{ type: "image", mime: "image/png", content: "..." }] })).toBe(true);
+    expect(Context.messageHasContent({ type: 3, content: [] })).toBe(false);
+    expect(Context.messageHasContent({ type: 3, content: [{ type: "text", text: "" }] })).toBe(false);
+    expect(Context.messageHasContent({ type: 3, content: [{ type: "thinking", text: "" }] })).toBe(false);
+    expect(Context.messageHasContent({ type: 3, content: [{ type: "text", text: "x" }] })).toBe(true);
+    expect(Context.messageHasContent({ type: 3, content: [{ type: "toolCall", callId: "c", name: "n", arguments: "" }] })).toBe(true);
+    expect(Context.messageHasContent({ type: 2, content: [{ type: "image", mime: "image/png", content: "..." }] })).toBe(true);
   });
 });

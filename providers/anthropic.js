@@ -26,9 +26,10 @@
  *                  land in ONE user message)
  * Tools: {name, description, input_schema}. `max_tokens` is the
  * model's known output cap (else 64K, the streaming default).
- * Thinking (settings.think): undefined = the model's default (omit);
- * true/low..max = adaptive (summarized display, effort when a level
- * was named); false = disabled (a 400 on always-thinking models).
+ * Thinking (settings.think, already the native mode IO mapped):
+ * undefined = the model's default (omit); low..max = adaptive
+ * (summarized display, that effort); "none" = disabled (a 400 on
+ * always-thinking models).
  *
  * Wire mapping (events -> response events): content_block_start/
  * delta/stop drive text/thinking/toolcall by NATIVE index (signature
@@ -44,45 +45,46 @@
  */
 
 import Context from "../lib/context.js";
-const { MessageType, ContentType, mimetypeOf } = Context;
-import Env from "../lib/env.js";
-const { ProviderError, resolveEffort, registryEffortLevels, singleShot } = Env;
+const { MessageType, ContentType, mimeOf, contentIndexer } = Context;
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1";
 const API_VERSION = "2023-06-01";
 const REGISTRY_URL = "https://models.dev/api.json";
-/** A week: how long a registry snapshot stays fresh. */
+/** A week: how long a registry snapshot stays fresh (process memory). */
 const REGISTRY_TTL = 7 * 24 * 3600 * 1000;
+/** One-shot catalog request: no parked keep-alive socket holds the process open. */
+const ONE_SHOT = { connection: "close" };
 /** The streaming default output cap when the model's own is unknown. */
 const DEFAULT_MAX_TOKENS = 64000;
-const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+/** Native thinking modes, least -> max: "none" disables, the rest are efforts. */
+const THINKING_MODES = ["none", "low", "medium", "high", "xhigh", "max"];
 
 /** The static OFFLINE fallback for the Anthropic preset (the live
  *  /models list and the models.dev registry both refresh over it). */
-export const ANTHROPIC_MODELS = {
-  "claude-fable-5-1": { label: "Claude Fable 5.1", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-fable-5": { label: "Claude Fable 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-5": { label: "Claude Opus 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-8": { label: "Claude Opus 4.8", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-7": { label: "Claude Opus 4.7", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-6": { label: "Claude Opus 4.6", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-sonnet-5": { label: "Claude Sonnet 5", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-sonnet-4-6": { label: "Claude Sonnet 4.6", reasoning: true, contextWindow: 1000000, maxTokens: 128000 },
-  "claude-haiku-4-5": { label: "Claude Haiku 4.5", reasoning: true, contextWindow: 200000, maxTokens: 64000 },
+const ANTHROPIC_MODELS = {
+  "claude-fable-5-1": { label: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-fable-5": { label: "Claude Fable 5", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-opus-5": { label: "Claude Opus 5", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-opus-4-8": { label: "Claude Opus 4.8", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-opus-4-7": { label: "Claude Opus 4.7", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-opus-4-6": { label: "Claude Opus 4.6", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-sonnet-5": { label: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-sonnet-4-6": { label: "Claude Sonnet 4.6", contextWindow: 1000000, maxTokens: 128000 },
+  "claude-haiku-4-5": { label: "Claude Haiku 4.5", contextWindow: 200000, maxTokens: 64000 },
 };
 
 /** Third-party services exposing an Anthropic-compatible /messages
  *  route (no GET /models: static lists, verified by a 1-token POST). */
 const DEEPSEEK_MODELS = {
-  "deepseek-chat": { label: "DeepSeek Chat", reasoning: false, contextWindow: 131072, maxTokens: 8192 },
-  "deepseek-reasoner": { label: "DeepSeek Reasoner", reasoning: true, contextWindow: 131072, maxTokens: 65536 },
+  "deepseek-chat": { label: "DeepSeek Chat", thinking: [], contextWindow: 131072, maxTokens: 8192 },
+  "deepseek-reasoner": { label: "DeepSeek Reasoner", contextWindow: 131072, maxTokens: 65536 },
 };
 const ZAI_MODELS = {
-  "glm-4.6": { label: "GLM 4.6", reasoning: true, contextWindow: 204800, maxTokens: 131072 },
-  "glm-4.5": { label: "GLM 4.5", reasoning: true, contextWindow: 131072, maxTokens: 98304 },
+  "glm-4.6": { label: "GLM 4.6", contextWindow: 204800, maxTokens: 131072 },
+  "glm-4.5": { label: "GLM 4.5", contextWindow: 131072, maxTokens: 98304 },
 };
 const MINIMAX_MODELS = {
-  "MiniMax-M2": { label: "MiniMax M2", reasoning: true, contextWindow: 204800, maxTokens: 131072 },
+  "MiniMax-M2": { label: "MiniMax M2", contextWindow: 204800, maxTokens: 131072 },
 };
 
 /**
@@ -95,6 +97,7 @@ const MINIMAX_MODELS = {
 const ENV_KEY = "ANTHROPIC_API_KEY";
 const ENV_BEARER = "ANTHROPIC_AUTH_TOKEN";
 const ENV_URL = "ANTHROPIC_BASE_URL";
+const ENV_WORKSPACE = "ANTHROPIC_WORKSPACE_ID";
 
 /* -------------------------------------------------------------- auth */
 
@@ -106,6 +109,9 @@ function isBearer(auth) {
 /** The request headers for one endpoint's credentials. */
 function authHeaders(auth = {}) {
   const headers = { "anthropic-version": API_VERSION };
+  if (/^wrkspc_/.test(auth.workspaceId ?? "")) {
+    headers["anthropic-workspace-id"] = auth.workspaceId;
+  }
   const token = auth.token;
   if (!token) return headers;
   if (isBearer(auth)) {
@@ -121,9 +127,9 @@ function authHeaders(auth = {}) {
 /** Convert normalized context to a /messages request. */
 function context2msg(context, aiio = this.aiio) {
   const settings = aiio?.settings ?? {};
+  const model = aiio?.modelCurrent;
+  const meta = settings.models?.[model] ?? presetOf(this.constructor, this.baseUrl)?.models?.[model];
   const headers = { "content-type": "application/json", ...authHeaders(settings.auth) };
-  const model = aiio?.currentModel;
-  const meta = settings.models?.[model] ?? endpointPreset(this)?.models?.[model];
   const body = {
     model,
     max_tokens: Number.isFinite(meta?.maxTokens)
@@ -153,7 +159,7 @@ function context2msg(context, aiio = this.aiio) {
       input_schema: tool.inputSchema ? collapseAnyOf(tool.inputSchema) : { type: "object", properties: {} },
     }));
   }
-  Object.assign(body, thinkingOptions(settings.think, meta));
+  Object.assign(body, thinkingOptions(settings.think));
   return [headers, body];
 }
 
@@ -193,21 +199,15 @@ function collapseAnyOf(schema) {
 }
 
 /**
- * The thinking request options for one `think` setting: undefined
- * omits (the model's default — always-on on the Fable tier), false
- * disables, true/a level word turns adaptive thinking on with a
- * summarized display (the TUI shows it), a level word also sets the
- * effort — the nearest one the model accepts (its registry levels,
- * else every Anthropic effort).
+ * The thinking request options for one native mode: undefined omits
+ * (the model's default — always-on on the Fable tier), "none"
+ * disables, an effort turns adaptive thinking on with a summarized
+ * display (the TUI shows it) at that effort.
  */
-function thinkingOptions(think, meta) {
-  if (think === undefined || think === null) return {};
-  if (think === false || think === "none") return { thinking: { type: "disabled" } };
-  const out = { thinking: { type: "adaptive", display: "summarized" } };
-  if (typeof think === "string") {
-    out.output_config = { effort: resolveEffort(think, { levels: meta?.reasoningLevels ?? EFFORT_LEVELS }) };
-  }
-  return out;
+function thinkingOptions(think) {
+  if (typeof think !== "string") return {};
+  if (think === "none") return { thinking: { type: "disabled" } };
+  return { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: think } };
 }
 
 /** One context message -> one wire message (nil when nothing to send). */
@@ -248,14 +248,14 @@ function toMessage(message) {
     if (block?.type === ContentType.Text) {
       if (block.text) content.push({ type: "text", text: block.text });
     } else if (block?.type === ContentType.Image ||
-        (block?.type === ContentType.Binary && String(mimetypeOf(block) ?? "").startsWith("image/"))) {
+        (block?.type === ContentType.Binary && String(mimeOf(block) ?? "").startsWith("image/"))) {
       if (typeof block.content !== "string" || block.content === "") continue;
       content.push({
         type: "image",
-        source: { type: "base64", media_type: mimetypeOf(block) ?? "image/png", data: block.content },
+        source: { type: "base64", media_type: mimeOf(block) ?? "image/png", data: block.content },
       });
     } else if (block?.type === ContentType.Binary && typeof block.content === "string" && block.content !== "") {
-      const mimetype = mimetypeOf(block);
+      const mimetype = mimeOf(block);
       if (mimetype === "application/pdf") {
         // PDF support rides inline base64 — no upload needed, no beta
         // header required (see providers/anthropic.js header comment).
@@ -279,10 +279,9 @@ function toMessage(message) {
         // supported ... must be converted to text or PDF first") — this
         // provider cannot do that conversion, so refuse clearly instead
         // of sending a request the endpoint will 400 on model-invisibly.
-        throw new ProviderError(
-          "provider",
+        throw Object.assign(new Error(
           `Claude's document blocks only accept PDF or plain-text files; convert "${filenameOf(block, mimetype)}" (${mimetype ?? "unknown type"}) to one of those first, or attach it as an image if it is one`,
-        );
+        ), { kind: "provider" });
       }
     }
   }
@@ -331,17 +330,15 @@ function msg2events(msg, state = {}, aiio) {
   const type = msg?.type;
   if (type === "error" || msg?.error) {
     const error = msg.error?.message ?? msg.error ?? "Anthropic request failed";
-    return [{ type: "error", error: String(error), native: msg }];
+    const text = String(error);
+    const actionable = /not scoped to a workspace[\s\S]*anthropic-workspace-id/i.test(text) ||
+      /anthropic-workspace-id is required when authenticating with an identity-linked API key/i.test(text)
+      ? WORKSPACE_REQUIRED : text;
+    return [{ type: "error", error: actionable, native: msg }];
   }
   state.blocks ??= new Map(); // native index -> mirror block
-  state.indexes ??= new Map(); // native index -> contentIndex
-  const alloc = (key) => {
-    if (!state.indexes.has(key)) {
-      state.indexes.set(key, state.nextIndex ?? 0);
-      state.nextIndex = (state.nextIndex ?? 0) + 1;
-    }
-    return state.indexes.get(key);
-  };
+  state.index ??= contentIndexer(); // native content-block index -> contentIndex
+  const alloc = (key) => state.index.of(key);
 
   if (type === "message_start") {
     const usage = msg.message?.usage ?? {};
@@ -349,7 +346,7 @@ function msg2events(msg, state = {}, aiio) {
     state.inputTokens = countInput(usage);
     // the exact context consumption the endpoint measured (cache
     // reads and creation are context too — input_tokens excludes them)
-    if (Number.isFinite(state.inputTokens)) io?.setContextUsage?.({ used: state.inputTokens });
+    if (Number.isFinite(state.inputTokens)) io?.contextUsageSet?.({ used: state.inputTokens });
     return [];
   }
   if (type === "content_block_start") {
@@ -370,7 +367,7 @@ function msg2events(msg, state = {}, aiio) {
     if (block.type === "tool_use") {
       state.blocks.set(index, { kind: "tool_use", callId: block.id, name: block.name, json: "" });
       return [{
-        type: "toolcall_start",
+        type: "tool_call_start",
         contentIndex: alloc(index),
         callId: block.id ?? `anthropic-${index}`,
         name: block.name,
@@ -398,7 +395,7 @@ function msg2events(msg, state = {}, aiio) {
     }
     if (delta.type === "input_json_delta" && mirror.kind === "tool_use") {
       mirror.json += delta.partial_json ?? "";
-      return [{ type: "toolcall_delta", contentIndex: alloc(index), arguments: delta.partial_json ?? "" }];
+      return [{ type: "tool_call_delta", contentIndex: alloc(index), arguments: delta.partial_json ?? "" }];
     }
     return [];
   }
@@ -410,7 +407,7 @@ function msg2events(msg, state = {}, aiio) {
     if (mirror.kind === "thinking") return [{ type: "thinking_end", contentIndex: alloc(index) }];
     if (mirror.kind === "tool_use") {
       mirror.input = parseArguments(mirror.json);
-      return [{ type: "toolcall_end", contentIndex: alloc(index), arguments: mirror.input }];
+      return [{ type: "tool_call_end", contentIndex: alloc(index), arguments: mirror.input }];
     }
     return [];
   }
@@ -464,30 +461,48 @@ function mirrorMessage(state) {
 
 /* ------------------------------------------------ models + verification */
 
-/** The endpoint's own preset entry (URL match on knownEndpoints). */
-function endpointPreset(connection) {
-  return (connection?.constructor?.knownEndpoints ?? []).find(
-    (entry) => String(entry.url ?? "").replace(/\/$/, "") === connection?.baseUrl);
+/** The preset entry for one base URL (URL match on the class's knownEndpoints). */
+function presetOf(Protocol, baseUrl) {
+  return (Protocol?.knownEndpoints ?? []).find(
+    (entry) => String(entry.url ?? "").replace(/\/$/, "") === baseUrl);
+}
+
+const baseUrlOf = (url) => String(url ?? ANTHROPIC_URL).replace(/\/$/, "");
+
+/** Registry snapshots per registry URL + provider (process lifetime, REGISTRY_TTL). */
+const registryCache = new Map();
+
+/** A registry entry's native thinking modes: [] for a non-reasoning model,
+ *  "none" + its declared efforts, or undefined (every mode). */
+function registryThinking(entry) {
+  if (entry?.reasoning !== true) return [];
+  const efforts = (Array.isArray(entry.reasoning_options) ? entry.reasoning_options : [])
+    .filter((option) => option?.type === "effort" && Array.isArray(option.values))
+    .flatMap((option) => option.values);
+  const modes = THINKING_MODES.filter((mode) => mode === "none" || efforts.includes(mode));
+  return modes.length > 1 ? modes : undefined;
+}
+
+/** The in-memory registry snapshot for a preset (no download), or {}. */
+function registrySnapshot(preset) {
+  const registry = preset?.registry;
+  return registryCache.get(`${registry?.url} ${registry?.provider}`)?.models ?? {};
 }
 
 /**
  * The models.dev registry's model map for this endpoint's preset —
  * the AUTO-DETECTION channel for newly released models (the registry
- * updates independently of this code). Snapshots cache in the
- * endpoint's auth namespace for REGISTRY_TTL; a failed fetch falls
- * back to the cached snapshot, then to {}.
+ * updates independently of this code). A failed fetch falls back to
+ * the last snapshot, then to {}.
  */
-async function registryModels(connection) {
-  const registry = endpointPreset(connection)?.registry;
+async function registryModels(preset, signal) {
+  const registry = preset?.registry;
   if (!registry?.url || !registry?.provider) return {};
-  const settings = connection.aiio?.settings ?? {};
-  const cache = settings.registry;
-  if (cache && typeof cache === "object" && cache.models &&
-      Date.now() - (cache.fetchedAt ?? 0) < REGISTRY_TTL) {
-    return cache.models;
-  }
+  const key = `${registry.url} ${registry.provider}`;
+  const cache = registryCache.get(key);
+  if (cache && Date.now() - cache.fetchedAt < REGISTRY_TTL) return cache.models;
   try {
-    const response = await fetch(registry.url, singleShot({ signal: connection.aiio?.requestSignal }));
+    const response = await fetch(registry.url, { headers: ONE_SHOT, signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
     const models = body?.[registry.provider]?.models;
@@ -495,27 +510,25 @@ async function registryModels(connection) {
     const mapped = {};
     for (const [id, m] of Object.entries(models)) {
       if (!m || typeof m !== "object") continue;
-      const reasoningLevels = registryEffortLevels(m);
+      const thinking = registryThinking(m);
       mapped[id] = {
         label: m.name ?? id,
-        reasoning: m.reasoning === true,
-        ...(reasoningLevels ? { reasoningLevels } : {}),
+        ...(thinking ? { thinking } : {}),
         ...(Number.isFinite(m.limit?.context) ? { contextWindow: m.limit.context } : {}),
         ...(Number.isFinite(m.limit?.output) ? { maxTokens: m.limit.output } : {}),
       };
     }
     if (Object.keys(mapped).length === 0) throw new Error("registry held no models");
-    connection.aiio?.authSet?.({ registry: { fetchedAt: Date.now(), models: mapped } });
+    registryCache.set(key, { fetchedAt: Date.now(), models: mapped });
     return mapped;
   } catch {
-    return cache?.models && typeof cache.models === "object" ? cache.models : {};
+    return cache?.models ?? {};
   }
 }
 
 /** Does the endpoint verify by a 1-token POST (no GET /models route)? */
-function verifiesByMessage(connection) {
-  const settings = connection.aiio?.settings ?? {};
-  return (settings.verify ?? endpointPreset(connection)?.verify) === "messages";
+function verifiesByMessage(preset, settings) {
+  return (settings?.verify ?? preset?.verify) === "messages";
 }
 
 /** One Anthropic /models entry -> the model map value. */
@@ -527,10 +540,51 @@ function mapLiveModel(model) {
     : true; // every current Claude model thinks
   return {
     label: model.display_name ?? model.id,
-    reasoning,
+    ...(reasoning ? {} : { thinking: [] }),
     ...(Number.isFinite(model.max_input_tokens) ? { contextWindow: model.max_input_tokens } : {}),
     ...(Number.isFinite(model.max_tokens) ? { maxTokens: model.max_tokens } : {}),
   };
+}
+
+const WORKSPACE_REQUIRED = "This API key works across workspaces; set ANTHROPIC_WORKSPACE_ID to a wrkspc_… ID from Console → Settings → Workspaces (or log in with a workspace ID).";
+
+function errorText(error) {
+  return String(error?.body ?? error?.message ?? "");
+}
+
+function workspaceRequired(error) {
+  return error?.status === 400 && (
+    /not scoped to a workspace[\s\S]*anthropic-workspace-id/i.test(errorText(error)) ||
+    /anthropic-workspace-id is required when authenticating with an identity-linked API key/i.test(errorText(error))
+  );
+}
+
+function workspaceInvalid(error) {
+  return error?.status === 400 && /anthropic-workspace-id header must be a valid workspace ID/i.test(errorText(error));
+}
+
+/** Classify this credential with exactly one GET /models request. */
+async function workspaceMode(baseUrl, auth = {}, signal) {
+  const configured = auth.workspaceId;
+  if (configured !== undefined && !/^wrkspc_/.test(configured)) {
+    throw new Error("ANTHROPIC_WORKSPACE_ID must be a wrkspc_… workspace ID");
+  }
+  const response = await fetch(`${baseUrl}/models?limit=1000`, { headers: { ...authHeaders(auth), ...ONE_SHOT }, signal });
+  if (!response.ok) {
+    const error = await statusError(response);
+    if (configured && workspaceInvalid(error)) {
+      throw new Error("ANTHROPIC_WORKSPACE_ID is not a valid workspace for this key");
+    }
+    if (!configured && workspaceRequired(error)) throw new Error(WORKSPACE_REQUIRED);
+    throw error;
+  }
+  const body = await response.json();
+  if (!Array.isArray(body.data)) throw new Error("malformed model catalog");
+  const models = {};
+  for (const model of body.data) {
+    if (typeof model?.id === "string" && model.id !== "") models[model.id] = mapLiveModel(model);
+  }
+  return { mode: configured ? "configured" : "scoped", models };
 }
 
 /**
@@ -539,33 +593,24 @@ function mapLiveModel(model) {
  * On failure, registry/static/cache provide the fallback.
  * Message-verified presets have no list route: static + registry +
  * cache only.
+ * @this {Function} the registered provider class
  */
-async function models() {
-  const settings = this.aiio?.settings ?? {};
+async function models({ url, auth, settings = {}, signal } = {}) {
+  const baseUrl = baseUrlOf(url);
+  const preset = presetOf(this, baseUrl);
+  const byMessage = verifiesByMessage(preset, settings);
   let live = null;
-  if (!verifiesByMessage(this)) {
-    try {
-      const response = await fetch(`${this.baseUrl}/models?limit=1000`, singleShot({
-        headers: authHeaders(settings.auth),
-        signal: this.aiio?.requestSignal,
-      }));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await response.json();
-      if (!Array.isArray(body.data)) throw new Error("malformed model catalog");
-      live = {};
-      for (const model of body.data) {
-        if (typeof model?.id !== "string" || model.id === "") continue;
-        live[model.id] = mapLiveModel(model);
-      }
-    } catch {
-      live = null; // offline: registry + static + cached below
-    }
+  if (!byMessage) {
+    try { live = (await workspaceMode(baseUrl, auth, signal)).models; }
+    catch { live = null; }
   }
-  const registry = live === null ? await registryModels(this) : {};
-  const staticModels = endpointPreset(this)?.models ?? {};
+  // A failed live request returns to the static catalog plus any
+  // registry snapshot already in memory — never another blocking download.
+  const registry = byMessage ? await registryModels(preset, signal)
+    : live === null ? registrySnapshot(preset) : {};
+  const staticModels = preset?.models ?? {};
   const cached = settings.models && typeof settings.models === "object" && !Array.isArray(settings.models)
-    ? settings.models
-    : {};
+    ? settings.models : {};
   const ids = live
     ? Object.keys(live)
     : [...new Set([...Object.keys(staticModels), ...Object.keys(registry), ...Object.keys(cached)])];
@@ -574,14 +619,10 @@ async function models() {
     const merged = { ...cached[id], ...staticModels[id], ...registry[id], ...live?.[id] };
     map[id] = {
       label: live?.[id]?.label ?? registry[id]?.label ?? staticModels[id]?.label ?? cached[id]?.label ?? id,
-      reasoning: merged.reasoning === true,
-      ...(Array.isArray(merged.reasoningLevels) ? { reasoningLevels: merged.reasoningLevels } : {}),
+      ...(Array.isArray(merged.thinking) ? { thinking: merged.thinking } : {}),
       ...(Number.isFinite(merged.contextWindow) ? { contextWindow: merged.contextWindow } : {}),
       ...(Number.isFinite(merged.maxTokens) ? { maxTokens: merged.maxTokens } : {}),
     };
-  }
-  if (live !== null || Object.keys(registry).length > 0) {
-    this.aiio?.authSet?.({ models: map });
   }
   return map;
 }
@@ -600,18 +641,20 @@ async function statusError(response) {
  * API lists models (GET /models — a dead key is a 401 here); a
  * message-verified preset (third-party /messages routes without a
  * list) sends a 1-token request to its first known model instead.
+ * @this {Function} the registered provider class
  * @returns {Promise<{models: number}>}
  */
-async function testConnection() {
-  const settings = this.aiio?.settings ?? {};
-  if (verifiesByMessage(this)) {
-    const known = { ...endpointPreset(this)?.models, ...settings.models };
+async function testConnection({ url, auth, settings = {}, signal } = {}) {
+  const baseUrl = baseUrlOf(url);
+  const preset = presetOf(this, baseUrl);
+  if (verifiesByMessage(preset, settings)) {
+    const known = { ...preset?.models, ...settings.models };
     const model = Object.keys(known)[0];
     if (!model) throw new Error("no model to verify with: the endpoint declares none");
-    const response = await fetch(`${this.baseUrl}/messages`, {
+    const response = await fetch(`${baseUrl}/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders(settings.auth) },
-      signal: this.aiio?.requestSignal,
+      headers: { "content-type": "application/json", ...authHeaders(auth) },
+      signal,
       body: JSON.stringify({
         model,
         max_tokens: 1,
@@ -625,13 +668,8 @@ async function testConnection() {
     }
     return { models: Object.keys(known).length };
   }
-  const response = await fetch(`${this.baseUrl}/models?limit=1000`, singleShot({
-    headers: authHeaders(settings.auth),
-    signal: this.aiio?.requestSignal,
-  }));
-  if (!response.ok) throw await statusError(response);
-  const body = await response.json();
-  return { models: Array.isArray(body.data) ? body.data.length : 0 };
+  const classified = await workspaceMode(baseUrl, auth, signal);
+  return { models: Object.keys(classified.models).length };
 }
 
 /** `anthropic-ratelimit-unified-<window>-utilization` — one per Claude
@@ -664,17 +702,21 @@ function unifiedWindowQuotas(headers) {
   headers.forEach((value, name) => {
     const match = UNIFIED_WINDOW.exec(name);
     if (!match) return;
+    const windowSeconds = parseWindowSeconds(match[1]);
+    // Only named durations are subscription allowances. Other unified
+    // values (for example `overage`) are account-policy metadata, not a
+    // user-actionable time window, and would make the plan a third detail.
+    if (!Number.isFinite(windowSeconds)) return;
     const spent = Number(value);
     if (!Number.isFinite(spent)) return;
     const usedPct = Math.min(100, Math.max(0, Math.round(spent * 100)));
     const reset = headers.get?.(`anthropic-ratelimit-unified-${match[1]}-reset`);
-    const windowSeconds = parseWindowSeconds(match[1]);
     quotas[match[1]] = {
       total: 100, used: usedPct, remaining: 100 - usedPct,
       ...(reset ? { reset } : {}),
       // the window's full cycle length — lets a consumer show elapsed
       // time / a countdown alongside the usage percentage above
-      ...(Number.isFinite(windowSeconds) ? { windowSeconds } : {}),
+      windowSeconds,
     };
   });
   return quotas;
@@ -682,11 +724,12 @@ function unifiedWindowQuotas(headers) {
 
 /**
  * Plan/quota reporting: the `anthropic-ratelimit-*` response headers
- * (requests, tokens, input-tokens, output-tokens — each with limit /
+ * (requests, total tokens, input tokens, output tokens — each with limit /
  * remaining / reset — API-key metering) plus the subscription-session
  * `anthropic-ratelimit-unified-*` windows (see unifiedWindowQuotas)
- * into the plan-usage channel. Only what the endpoint publishes is
- * reported.
+ * into the plan-usage channel. The plan readout deliberately has two
+ * details: API keys retain requests + total tokens (input/output are subsets);
+ * OAuth retains duration-named allowance windows (normally 5h + 7d).
  */
 function reportPlanUsage(headers, aiio = this?.aiio) {
   const get = (name) => headers?.get?.(name) ?? undefined;
@@ -697,7 +740,6 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
   const quotas = unifiedWindowQuotas(headers);
   const families = [
     ["requests", "requests"], ["tokens", "tokens"],
-    ["input-tokens", "inputTokens"], ["output-tokens", "outputTokens"],
   ];
   for (const [wire, key] of families) {
     const quota = {
@@ -707,35 +749,26 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     };
     if (Object.keys(quota).length > 0) quotas[key] = quota;
   }
-  if (Object.keys(quotas).length > 0) aiio?.setPlanUsage?.({ quotas });
+  if (Object.keys(quotas).length > 0) aiio?.planUsageSet?.({ quotas });
 }
 
-/** Persist an Anthropic API key supplied by a login wizard. */
-async function login(input = {}) {
-  const token = input.token ?? this.aiio?.settings?.auth?.token;
+/** The auth record an Anthropic API-key login stores. */
+function login(input = {}, { settings } = {}) {
+  const token = input.token ?? settings?.auth?.token;
   if (!token) {
     const error = new Error("Anthropic login requires an API key");
     error.kind = "auth";
     throw error;
   }
   if (/^sk-ant-oat/.test(token)) throw new Error("Claude subscription OAuth tokens require the claude provider");
-  const auth = { type: "api_key", token };
-  this.aiio?.authSet?.({ auth }, input);
-  return auth;
+  const workspaceId = input.workspaceId ?? settings?.auth?.workspaceId;
+  if (workspaceId !== undefined && !/^wrkspc_/.test(workspaceId)) {
+    throw new Error("Anthropic workspace ID must start with wrkspc_");
+  }
+  return { type: "api_key", token, ...(workspaceId ? { workspaceId } : {}) };
 }
 
 /* --------------------------------------------------- web capabilities */
-
-/**
- * The settings gate every server-side web capability checks first:
- * `web.provider === false` opts OUT of provider web backends (the
- * caller then falls through to MCP/package routing). App-level
- * settings live on the ENV (aiio.settings is only the endpoint's
- * namespaced view), so the handler reads aiio.env.settings.
- */
-function providerWebDisabled(aiio) {
-  return aiio?.env?.settings?.web?.provider === false;
-}
 
 /**
  * Anthropic hosts the server tools ONLY on its own API. Third-party
@@ -766,37 +799,22 @@ function apiWire(aiio, body) {
  * through; the result is never fabricated.
  */
 async function serverToolRequest(aiio, wire, tool, prompt, { signal, deadline }) {
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener?.("abort", onAbort, { once: true });
-  let timer;
-  if (Number.isFinite(deadline)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
-    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
-    timer?.unref?.();
-  }
-  try {
-    const [headers, payload] = wire(aiio, {
-      model: aiio.currentModel,
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
-      tools: [{ ...tool }],
-    });
-    const response = await fetch(`${String(aiio.url).replace(/\/$/, "")}/messages`, {
-      method: "POST", headers, signal: controller.signal, body: JSON.stringify(payload),
-    });
-    if (!response.ok) throw await statusError(response);
-    const body = await response.json();
-    return (body?.content ?? [])
-      .filter((block) => block?.type === "text" && typeof block.text === "string")
-      .map((block) => block.text)
-      .join("");
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.("abort", onAbort);
-  }
+  const [headers, payload] = wire(aiio, {
+    model: aiio.modelCurrent,
+    max_tokens: 1024,
+    messages: [{ role: "user", content: prompt }],
+    tools: [{ ...tool }],
+  });
+  // Shared deadline/connect discipline: raced deadline + 3s connect fail-fast.
+  const response = await aiio.fetch(`${String(aiio.url).replace(/\/$/, "")}/messages`, {
+    method: "POST", headers, signal, body: JSON.stringify(payload),
+  }, { deadline });
+  if (!response.ok) throw await statusError(response);
+  const body = await response.json();
+  return (body?.content ?? [])
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("");
 }
 
 /** The documented web_search server tool (docs.claude.com, verified
@@ -808,31 +826,29 @@ const WEB_SEARCH_TOOL = { type: "web_search_20250305", name: "web_search", max_u
 const WEB_FETCH_TOOL = { type: "web_fetch_20250910", name: "web_fetch", max_uses: 1 };
 
 /**
- * The provider-side `web-search` / `web-fetch` capabilities (the path
- * tools/web.js takes first via Agent.callProviderCapability), bound to a
- * dialect's server-tool wire. Undefined = unsupported → MCP/package.
+ * The provider tools `web-search` / `web-fetch` (they shadow the
+ * package tools of the same names), bound to a dialect's server-tool
+ * wire. Undefined = unsupported here → the package tool's MCP/local path.
  * @param {(aiio: object, body: object) => [object, object]} [wire]
  */
-export function webCapabilities(wire = apiWire) {
+function webTools(wire = apiWire) {
   return {
-    "web-search": async function ({ aiio, args, signal, deadline }) {
-      if (providerWebDisabled(aiio)) return undefined;
+    "web-search": { function: async ({ aiio, args, signal, deadline }) => {
       if (!anthropicHosted(aiio)) return undefined;
       const query = String(args?.query ?? "").trim();
       if (query === "") return undefined;
       return serverToolRequest(aiio, wire, WEB_SEARCH_TOOL,
         `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet from the page.`,
         { signal, deadline });
-    },
-    "web-fetch": async function ({ aiio, args, signal, deadline }) {
-      if (providerWebDisabled(aiio)) return undefined;
+    } },
+    "web-fetch": { function: async ({ aiio, args, signal, deadline }) => {
       if (!anthropicHosted(aiio)) return undefined;
       const url = String(args?.url ?? "").trim();
       if (url === "") return undefined;
       return serverToolRequest(aiio, wire, WEB_FETCH_TOOL,
         `Fetch ${url} and answer with the page's main content as clean Markdown, preserving its headings and links.`,
         { signal, deadline });
-    },
+    } },
   };
 }
 
@@ -841,10 +857,9 @@ export default class AnthropicProvider {
   static provider = {
     label: "Anthropic (Claude)",
     capabilities: {
-      tools: true,
-      thinking: true,
       streaming: true,
-      ...webCapabilities(),
+      thinking: THINKING_MODES,
+      tools: webTools(),
     },
   };
 
@@ -885,19 +900,30 @@ export default class AnthropicProvider {
     },
   ];
 
-  static async detectEndpoints({ endpoints = {} } = {}) {
+  /** Create Anthropic-hosted web tool handlers with dialect-specific request framing. */
+  static webTools(wire) { return webTools(wire); }
+
+  static async detect({ endpoints = {} } = {}) {
     const found = {};
     if (endpoints.anthropic) return found;
     const key = process.env[ENV_KEY];
     const bearer = process.env[ENV_BEARER];
+    const workspaceId = process.env[ENV_WORKSPACE];
     const url = process.env[ENV_URL] || ANTHROPIC_URL;
-    if (typeof key === "string" && key !== "") {
-      found.anthropic = { provider: "anthropic", url, dynamic: true, auth: { type: "api_key", token: key } };
-    } else if (typeof bearer === "string" && bearer !== "") {
-      found.anthropic = { provider: "anthropic", url, dynamic: true, auth: { type: "bearer", token: bearer } };
-    }
+    let auth;
+    if (typeof key === "string" && key !== "") auth = { type: "api_key", token: key };
+    else if (typeof bearer === "string" && bearer !== "") auth = { type: "bearer", token: bearer };
+    if (!auth) return found;
+    if (typeof workspaceId === "string" && workspaceId !== "") auth.workspaceId = workspaceId;
+    found.anthropic = {
+      provider: "anthropic", url, dynamic: true, auth, models: ANTHROPIC_MODELS,
+    };
     return found;
   }
+
+  static async models(options) { return models.call(this, options); }
+  static async testConnection(options) { return testConnection.call(this, options); }
+  static login(input, context) { return login(input, context); }
 
   constructor(url = ANTHROPIC_URL, aiio) {
     this.baseUrl = String(url).replace(/\/$/, "");
@@ -907,8 +933,5 @@ export default class AnthropicProvider {
 
   context2msg(context, aiio = this.aiio) { return context2msg.call(this, context, aiio); }
   msg2events(message, state, aiio = this.aiio) { return msg2events.call(this, message, state, aiio); }
-  async models() { return models.call(this); }
-  async testConnection() { return testConnection.call(this); }
   reportPlanUsage(headers, aiio = this.aiio) { return reportPlanUsage.call(this, headers, aiio); }
-  async login(input) { return login.call(this, input); }
 }

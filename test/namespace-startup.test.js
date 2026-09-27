@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import Env from "../lib/env.js";
 import { NAMES } from "../lib/namespace.js";
+import { toolRoots, toolsLoad } from "./env-internals.js";
 
 const roots = [];
 afterEach(() => {
@@ -14,9 +15,8 @@ describe("namespace migration startup", () => {
   test("importing the library and loading package tools stays below 256 MiB RSS", async () => {
     const script = `
       import API from "./lib/index.js";
-      const env = new API.Env({ dir: "./ai-tmp", cwd: "./ai-tmp", settingsDir: null, settings: {} });
-      await env.loadTools();
-      process.stdout.write(JSON.stringify({ rss: process.memoryUsage().rss, tools: env.toolNames().length }));
+      const env = await API.Env.create({ dir: "./ai-tmp", cwd: "./ai-tmp", settingsDir: null, settings: {} }, { models: false });
+      process.stdout.write(JSON.stringify({ rss: process.memoryUsage().rss, tools: (await env.tools()).size }));
     `;
     const proc = Bun.spawn([process.execPath, "-e", script], {
       stdout: "pipe", stderr: "pipe", env: { ...process.env },
@@ -40,9 +40,9 @@ describe("namespace migration startup", () => {
     process.env[strayName] = root;
     try {
       const env = new Env({ dir: "./ai-tmp", cwd: "./ai-tmp", settingsDir: null, settings: {} });
-      expect(env.defaultToolRoots()).not.toContain(root);
+      expect(toolRoots(env)).not.toContain(root);
       // contract: the package's own tools load (which tools exist is content)
-      await expect(env.loadTools()).resolves.not.toHaveLength(0);
+      await expect(toolsLoad(env)).resolves.not.toHaveLength(0);
     } finally {
       if (saved === undefined) delete process.env[strayName];
       else process.env[strayName] = saved;

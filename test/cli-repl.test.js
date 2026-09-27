@@ -10,7 +10,7 @@ import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, afterEach, beforeAll, afterAll } from "bun:test";
 import { appAlias, binName, cli } from "./bin-names.js";
 import { writeFileSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
-import { findSessionFile } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
 
 // The REPL persists state in the project root (last-model.json, and
 // auth-ollama.json when a live models() refresh lands). Preserve the
@@ -210,9 +210,9 @@ describe("the TUI REPL: one long-lived Agent across turns", () => {
   });
 
   test("--url without --model never restores last-model (no configuration, no memory)", async () => {
-    // A stored combo for an UNCONFIGURED endpoint is no selection: last-model
-    // memory belongs to configured endpoints only, so the REPL starts
-    // model-less even with --url pointing at a live server.
+    // A stored combo for an UNAVAILABLE endpoint is no selection: --url
+    // alone does not register an endpoint, so the REPL starts model-less
+    // even with --url pointing at a live server.
     writeFileSync(`${SPAWN_SETTINGS}/last-model.json`, JSON.stringify({ endpoint: "ollama", model: "last-m" }) + "\n");
     const { requests, url } = scriptServer(["answer"], { models: [{ name: "m" }] });
     const { stderr, exit } = await runRepl({
@@ -260,7 +260,7 @@ describe("ai REPL: session persistence", () => {
     // been said): the file itself may since have moved once the first
     // real message named it (see lib/agent/session.js's module doc) —
     // find it by id, the STABLE identity, rather than trusting that path
-    const file = findSessionFile(`${SPAWN_SETTINGS}/${NAMES.sessionsDir}`, id);
+    const file = Context.fileOf({ dir: `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`, id: id });
     expect(file).not.toBeUndefined();
     expect(existsSync(file)).toBe(true);
     const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
@@ -276,7 +276,7 @@ describe("ai REPL: session persistence", () => {
     rmSync(file, { force: true });
   });
 
-  test('--session 0 and --session false are anonymous: nothing is written', async () => {
+  test('--session 0 and --session false are not logged: nothing is written', async () => {
     for (const value of ["0", "false"]) {
       // A fresh settings dir per spawn: a startup model-catalog refresh on a
       // live local server would otherwise cache its real model list into a
@@ -292,7 +292,7 @@ describe("ai REPL: session persistence", () => {
         settingsDir,
       });
         expect(exit).toBe(0);
-      expect(stderr).toContain("session: anonymous (not persisted)");
+      expect(stderr).toContain("not logged (memory only)");
       expect(stderr).not.toContain("resume with");
       expect(requests).toHaveLength(1); // the turn still ran
       const after = existsSync(dir) ? readdirSync(dir) : [];
@@ -303,7 +303,7 @@ describe("ai REPL: session persistence", () => {
   test("--session <id> writes the JSONL mirror; a second REPL --resume continues it", async () => {
     const sessionId = `cli-repl-${process.pid}`;
     const dir = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-    const stale = findSessionFile(dir, sessionId);
+    const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
     const first = scriptServer(["answer one"], { models: [{ name: "m" }] });
@@ -325,7 +325,7 @@ describe("ai REPL: session persistence", () => {
     // a chosen --session id finalizes the file's name at construction
     // (see lib/agent/session.js) — only the uuid8 disambiguator is
     // unknown ahead of time, so find it by id rather than the path
-    const file = findSessionFile(dir, sessionId);
+    const file = Context.fileOf({ dir: dir, id: sessionId });
     expect(file).not.toBeUndefined();
     expect(existsSync(file)).toBe(true);
     const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
@@ -355,7 +355,7 @@ describe("ai REPL: session persistence", () => {
   test("command tombstones are flushed immediately — they survive ^C at the prompt", async () => {
     const sessionId = `cli-repl-flush-${process.pid}`;
     const dir = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-    const stale = findSessionFile(dir, sessionId);
+    const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
     const { url } = scriptServer(["answer one"], { models: [{ name: "m" }] });
@@ -377,7 +377,7 @@ describe("ai REPL: session persistence", () => {
         .filter((record) => record?.type !== "session-metadata"); // the first, origin line
     };
     await until(() => {
-      file = findSessionFile(dir, sessionId);
+      file = Context.fileOf({ dir: dir, id: sessionId });
       return file !== undefined && readFileSync(file, "utf8").includes("answer one");
     });
     const keep = readRecords().length - 1; // drop just the assistant answer, keep everything up to the user's question
@@ -399,7 +399,7 @@ describe("ai REPL: SIGINT cancellation via lib/signals.js", () => {
   test("SIGINT mid-response renders + persists the partial, then the REPL continues", async () => {
     const sessionId = `cli-repl-cancel-${process.pid}`;
     const dir = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-    const stale = findSessionFile(dir, sessionId);
+    const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
     // stream one partial frame, then hang forever
@@ -431,7 +431,7 @@ describe("ai REPL: SIGINT cancellation via lib/signals.js", () => {
     let file;
     for (let i = 0; i < 50 && !log.includes('"par"'); i++) {
       await Bun.sleep(100);
-      file = findSessionFile(dir, sessionId);
+      file = Context.fileOf({ dir: dir, id: sessionId });
       if (file !== undefined) log = readFileSync(file, "utf8");
     }
     proc.stdin.end(); // EOF: the REPL exits cleanly after cancellation
@@ -457,7 +457,7 @@ describe("the TUI: --help contract and usage errors (matching the io/agent CLIs)
       "usage:", "stdin:", "stdout:", "stderr:",
       "--model <endpoint>/<model>", "--session", "--resume", "--tools",
       "/endpoint-model", "/context-edit", "/context-rollback", "/context-pop", "exit codes:",
-      "anonymous", "last-used",
+      "not logged", "last-used",
     ]) {
       expect(stdout).toContain(expected);
     }

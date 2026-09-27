@@ -1,11 +1,10 @@
 /**
  * providers/kimi.js — Kimi (Moonshot AI) protocol plugin: the OpenAI
  * CHAT-COMPLETIONS dialect (POST {url}/chat/completions, SSE chunks)
- * — the Responses dialect (lib/env/openai.js defaults) does not apply
- * to Moonshot. Transport, model listing (/models is OpenAI-shaped),
- * login, and connection verification ride the completed OpenAI
- * defaults; this plugin owns the two translators, the metadata
- * surface, and environment detection.
+ * — the Responses dialect (IO's OpenAI defaults) does not apply to
+ * Moonshot. The HTTP transport, login, and connection verification ride
+ * the completed OpenAI defaults; this plugin owns the two translators,
+ * the model catalog, the metadata surface, and environment detection.
  *
  * Wire mapping (context -> /chat/completions):
  *   system/user  -> {role, content} (text blocks joined; image blocks
@@ -24,16 +23,27 @@
  * streams thinking blocks (kimi-k2-thinking), delta.content streams
  * text, delta.tool_calls stream by `index` (id/name on the first
  * piece, argument fragments after — the assembler parses the
- * accumulated string at toolcall_end). The trailing usage chunk
+ * accumulated string at tool_call_end). The trailing usage chunk
  * (empty choices) maps prompt/completion tokens into the usage
  * envelope; a stream that ends without one gets a synthesized done.
  */
 
 import { createHash } from "node:crypto";
 import Context from "../lib/context.js";
-const { MessageType, ContentType, mimetypeOf } = Context;
-import Env from "../lib/env.js";
-const { ProviderError, HttpStatusError, classifyError, depletionError, singleShot, defaultSend } = Env;
+const { MessageType, ContentType, mimeOf, contentIndexer } = Context;
+
+/** A plain classifiable error (IO maps `kind`/`status` onto its taxonomy). */
+const failure = (kind, message) => Object.assign(new Error(message), { kind });
+
+/** A failed HTTP response as a plain classifiable error (status and body ride along). */
+async function statusError(response) {
+  const body = await response.text().catch(() => "");
+  return Object.assign(new Error(`HTTP ${response.status} ${response.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`),
+    { status: response.status, body });
+}
+
+/** One-shot catalog request: no parked keep-alive socket holds the process open. */
+const ONE_SHOT = { connection: "close" };
 
 /**
  * A 403 body that unmistakably names the CREDENTIAL itself, not a
@@ -49,42 +59,41 @@ const KIMI_URL = "https://api.moonshot.ai/v1";
 const KIMI_CN_URL = "https://api.moonshot.cn/v1";
 const KIMI_CODING_URL = "https://api.kimi.com/coding/v1";
 const REGISTRY_URL = "https://models.dev/api.json";
-/** A week: how long a registry snapshot stays fresh. */
+/** A week: how long a registry snapshot stays fresh (process memory). */
 const REGISTRY_TTL = 7 * 24 * 3600 * 1000;
 
 /** The static OFFLINE fallback for the platform presets (the live
  *  /models list and the models.dev registry both refresh over it). */
 const PLATFORM_MODELS = {
-  "kimi-k2-0905-preview": { label: "Kimi K2 (0905)", reasoning: false, contextWindow: 262144, maxTokens: 262144 },
-  "kimi-k2-0711-preview": { label: "Kimi K2 (0711)", reasoning: false, contextWindow: 131072, maxTokens: 16384 },
-  "kimi-k2-turbo-preview": { label: "Kimi K2 Turbo", reasoning: false, contextWindow: 262144, maxTokens: 262144 },
-  "kimi-k2-thinking": { label: "Kimi K2 Thinking", reasoning: true, contextWindow: 262144, maxTokens: 262144 },
-  "kimi-k2-thinking-turbo": { label: "Kimi K2 Thinking Turbo", reasoning: true, contextWindow: 262144, maxTokens: 262144 },
-  "kimi-k2.5": { label: "Kimi K2.5", reasoning: true, contextWindow: 262144, maxTokens: 262144 },
-  "kimi-latest": { label: "Kimi Latest", reasoning: false, contextWindow: 131072 },
-  "moonshot-v1-8k": { label: "Moonshot v1 8K", reasoning: false, contextWindow: 8192 },
-  "moonshot-v1-32k": { label: "Moonshot v1 32K", reasoning: false, contextWindow: 32768 },
-  "moonshot-v1-128k": { label: "Moonshot v1 128K", reasoning: false, contextWindow: 131072 },
+  "kimi-k2-0905-preview": { label: "Kimi K2 (0905)", contextWindow: 262144, maxTokens: 262144 },
+  "kimi-k2-0711-preview": { label: "Kimi K2 (0711)", contextWindow: 131072, maxTokens: 16384 },
+  "kimi-k2-turbo-preview": { label: "Kimi K2 Turbo", contextWindow: 262144, maxTokens: 262144 },
+  "kimi-k2-thinking": { label: "Kimi K2 Thinking", contextWindow: 262144, maxTokens: 262144 },
+  "kimi-k2-thinking-turbo": { label: "Kimi K2 Thinking Turbo", contextWindow: 262144, maxTokens: 262144 },
+  "kimi-k2.5": { label: "Kimi K2.5", contextWindow: 262144, maxTokens: 262144 },
+  "kimi-latest": { label: "Kimi Latest", contextWindow: 131072 },
+  "moonshot-v1-8k": { label: "Moonshot v1 8K", contextWindow: 8192 },
+  "moonshot-v1-32k": { label: "Moonshot v1 32K", contextWindow: 32768 },
+  "moonshot-v1-128k": { label: "Moonshot v1 128K", contextWindow: 131072 },
 };
 
 /** The static OFFLINE fallback for the coding subscription endpoint. */
 const CODING_MODELS = {
-  "kimi-for-coding": { label: "Kimi for Coding", reasoning: true, contextWindow: 262144, maxTokens: 32768 },
-  "kimi-for-coding-highspeed": { label: "Kimi for Coding (highspeed)", reasoning: true, contextWindow: 262144, maxTokens: 32768 },
-  "k3": { label: "Kimi K3", reasoning: true, contextWindow: 1048576, maxTokens: 131072 },
-  "k3-256k": { label: "Kimi K3 (256K)", reasoning: true, contextWindow: 262144, maxTokens: 131072 },
+  "kimi-for-coding": { label: "Kimi for Coding", contextWindow: 262144, maxTokens: 32768 },
+  "kimi-for-coding-highspeed": { label: "Kimi for Coding (highspeed)", contextWindow: 262144, maxTokens: 32768 },
+  "k3": { label: "Kimi K3", contextWindow: 1048576, maxTokens: 131072 },
+  "k3-256k": { label: "Kimi K3 (256K)", contextWindow: 262144, maxTokens: 131072 },
 };
 
 /**
- * Environment auto-configuration (pi's naming): MOONSHOT_API_KEY
- * configures the platform endpoint, KIMI_API_KEY the coding endpoint,
- * with no login at all; MOONSHOT_BASE_URL overrides the platform base
- * URL. Every discovery is DYNAMIC: never persisted, re-detected
- * every startup.
+ * Environment auto-configuration: both MOONSHOT_API_KEY and KIMI_API_KEY
+ * are platform keys (Kimi Code subscription keys use a separate console).
+ * MOONSHOT_BASE_URL overrides the MOONSHOT_API_KEY endpoint only.
+ * Every discovery is DYNAMIC: never persisted, re-detected at startup.
  */
 const ENV_ENDPOINTS = [
-  { name: "kimi", env: "MOONSHOT_API_KEY", url: KIMI_URL, urlEnv: "MOONSHOT_BASE_URL" },
-  { name: "kimi-coding", env: "KIMI_API_KEY", url: KIMI_CODING_URL },
+  { name: "moonshot", env: "MOONSHOT_API_KEY", url: KIMI_URL, urlEnv: "MOONSHOT_BASE_URL" },
+  { name: "kimi", env: "KIMI_API_KEY", url: KIMI_URL },
 ];
 
 /* ------------------------------------------------ outgoing: context2msg */
@@ -95,7 +104,7 @@ function context2msg(context, aiio = this.aiio) {
   const headers = { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
   const body = {
-    model: aiio?.currentModel,
+    model: aiio?.modelCurrent,
     messages: [],
     stream: true,
     stream_options: { include_usage: true },
@@ -179,7 +188,7 @@ function toMessages(message) {
   // descriptors until send() replaces them with Kimi file references.
   const content = [];
   for (const block of message?.content ?? []) {
-    const mimetype = mimetypeOf(block);
+    const mimetype = mimeOf(block);
     if (block?.type === ContentType.Text && block.text) {
       content.push({ type: "text", text: String(block.text) });
     } else if ((block?.type === ContentType.Image ||
@@ -219,11 +228,11 @@ function filenameOf(block, mimetype) {
  *  /files/{id}[/content] 404s). A non-image binary there gets a clear
  *  endpoint-named refusal instead of a cryptic provider error; images
  *  still ride as image_url. */
-async function send(message) {
+async function send(message, base) {
   const [headers, body] = Array.isArray(message) ? message : [undefined, message];
   if (!supportsFiles(this)) assertNoBinary(body, this);
   const prepared = await uploadFiles(this, headers ?? {}, body);
-  return defaultSend(this, [headers, prepared]);
+  return base([headers, prepared]);
 }
 
 /** True for the platform endpoints (file upload + extraction); false for the
@@ -241,10 +250,8 @@ function assertNoBinary(body, connection) {
     if (!Array.isArray(message?.content)) continue;
     for (const part of message.content) {
       if (part?.type !== "file" || !part.file?.data) continue;
-      throw new ProviderError(
-        "provider",
-        `the ${connection.baseUrl} endpoint cannot accept file attachments (its chat API rejects the "file" part type and exposes no file extraction); attach images, or use a Moonshot platform endpoint (api.moonshot.ai) for documents`,
-      );
+      throw failure("provider",
+        `the ${connection.baseUrl} endpoint cannot accept file attachments (its chat API rejects the "file" part type and exposes no file extraction); attach images, or use a Moonshot platform endpoint (api.moonshot.ai) for documents`);
     }
   }
 }
@@ -292,10 +299,10 @@ async function uploadFile(connection, headers, file) {
     body: form,
     signal: connection.aiio?.requestSignal,
   });
-  if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
+  if (!response.ok) throw await statusError(response);
   const result = await response.json();
   if (typeof result?.id !== "string" || result.id === "") {
-    throw new ProviderError("malformed", "Kimi file upload returned no file id");
+    throw failure("malformed", "Kimi file upload returned no file id");
   }
   const extracted = await fetchExtractedContent(connection, uploadHeaders, result.id);
   return { type: "text", text: `[${file.filename}]\n${extracted}` };
@@ -309,7 +316,7 @@ async function fetchExtractedContent(connection, headers, fileId) {
     headers,
     signal: connection.aiio?.requestSignal,
   });
-  if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
+  if (!response.ok) throw await statusError(response);
   return response.text();
 }
 
@@ -334,14 +341,9 @@ function msg2events(msg, state = {}, aiio) {
     return [{ type: "error", error: String(msg.error.message ?? msg.error), native: msg }];
   }
   const events = [];
-  const alloc = (key) => {
-    state.indexes ??= new Map();
-    if (!state.indexes.has(key)) {
-      state.indexes.set(key, state.nextIndex ?? 0);
-      state.nextIndex = (state.nextIndex ?? 0) + 1;
-    }
-    return state.indexes.get(key);
-  };
+  // a thinking/text segment that resumes after a tool call is a NEW block;
+  // a tool call keeps one block across its chunks (keyed by stream index)
+  const index = (state.index ??= contentIndexer());
   const closeThinking = () => {
     if (state.thinkingOpen) {
       events.push({ type: "thinking_end", contentIndex: state.thinkIndex });
@@ -357,17 +359,17 @@ function msg2events(msg, state = {}, aiio) {
   // tool calls have no explicit end chunk: a call closes when the next
   // one starts, when content follows, or at finish_reason
   const closeCalls = () => {
-    for (const index of state.openCalls ?? []) {
-      events.push({ type: "toolcall_end", contentIndex: index }); // the assembler parses the accumulated string
+    for (const block of state.openCalls?.values() ?? []) {
+      events.push({ type: "tool_call_end", contentIndex: block }); // the assembler parses the accumulated string
     }
-    state.openCalls = new Set();
+    state.openCalls = new Map(); // stream index -> contentIndex
   };
 
   const choice = msg?.choices?.[0];
   const delta = choice?.delta;
   if (typeof delta?.reasoning_content === "string" && delta.reasoning_content !== "") {
     if (!state.thinkingOpen) {
-      state.thinkIndex = alloc("thinking");
+      state.thinkIndex = index.next();
       state.thinkingOpen = true;
       events.push({ type: "thinking_start", contentIndex: state.thinkIndex });
     }
@@ -377,7 +379,7 @@ function msg2events(msg, state = {}, aiio) {
     closeThinking();
     closeCalls();
     if (!state.textOpen) {
-      state.textIndex = alloc("text");
+      state.textIndex = index.next();
       state.textOpen = true;
       events.push({ type: "text_start", contentIndex: state.textIndex });
     }
@@ -388,15 +390,13 @@ function msg2events(msg, state = {}, aiio) {
     closeText();
     for (const call of delta.tool_calls) {
       const key = call.index ?? 0;
-      state.openCalls ??= new Set();
+      const block = index.of(`call:${key}`);
+      state.openCalls ??= new Map();
       if (!state.openCalls.has(key)) {
-        state.openCalls.add(key);
-        const index = alloc(`call:${key}`);
-        state.callIndexes ??= new Map();
-        state.callIndexes.set(key, index);
+        state.openCalls.set(key, block);
         events.push({
-          type: "toolcall_start",
-          contentIndex: index,
+          type: "tool_call_start",
+          contentIndex: block,
           callId: call.id ?? `kimi-${key}`,
           name: call.function?.name,
           arguments: "",
@@ -404,7 +404,7 @@ function msg2events(msg, state = {}, aiio) {
       }
       const args = call.function?.arguments;
       if (typeof args === "string" && args !== "") {
-        events.push({ type: "toolcall_delta", contentIndex: state.callIndexes.get(key), arguments: args });
+        events.push({ type: "tool_call_delta", contentIndex: block, arguments: args });
       }
     }
   }
@@ -422,7 +422,7 @@ function msg2events(msg, state = {}, aiio) {
     closeCalls();
     // the exact context consumption the endpoint measured
     if (Number.isFinite(msg.usage.prompt_tokens)) {
-      io?.setContextUsage?.({ used: msg.usage.prompt_tokens });
+      io?.contextUsageSet?.({ used: msg.usage.prompt_tokens });
     }
     events.push({
       type: "done",
@@ -437,31 +437,30 @@ function msg2events(msg, state = {}, aiio) {
   return events;
 }
 
-/** The endpoint's own preset entry (URL match on knownEndpoints). */
-function endpointPreset(connection) {
-  return (connection?.constructor.knownEndpoints ?? []).find(
-    (entry) => String(entry.url ?? "").replace(/\/$/, "") === connection.baseUrl);
+/** The preset entry for one base URL (URL match on the class's knownEndpoints). */
+function presetOf(Protocol, baseUrl) {
+  return (Protocol?.knownEndpoints ?? []).find(
+    (entry) => String(entry.url ?? "").replace(/\/$/, "") === baseUrl);
 }
+
+/** Registry snapshots per registry URL + provider (process lifetime, REGISTRY_TTL). */
+const registryCache = new Map();
 
 /**
  * The models.dev registry's model map for this endpoint's preset —
  * the AUTO-DETECTION channel for newly released models: the registry
  * updates independently of this code, so a model released tomorrow
- * arrives with its context window and reasoning flag attached.
- * Snapshots cache in the endpoint's auth namespace for REGISTRY_TTL;
- * a failed fetch falls back to the cached snapshot, then to {}.
+ * arrives with its context window attached. A failed fetch falls back
+ * to the last snapshot, then to {}.
  */
-async function registryModels(connection) {
-  const registry = endpointPreset(connection)?.registry;
+async function registryModels(preset, signal) {
+  const registry = preset?.registry;
   if (!registry?.url || !registry?.provider) return {};
-  const settings = connection.aiio?.settings ?? {};
-  const cache = settings.registry;
-  if (cache && typeof cache === "object" && cache.models &&
-      Date.now() - (cache.fetchedAt ?? 0) < REGISTRY_TTL) {
-    return cache.models;
-  }
+  const key = `${registry.url} ${registry.provider}`;
+  const cache = registryCache.get(key);
+  if (cache && Date.now() - cache.fetchedAt < REGISTRY_TTL) return cache.models;
   try {
-    const response = await fetch(registry.url, singleShot({ signal: connection.aiio?.requestSignal }));
+    const response = await fetch(registry.url, { headers: ONE_SHOT, signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
     const models = body?.[registry.provider]?.models;
@@ -471,16 +470,15 @@ async function registryModels(connection) {
       if (!m || typeof m !== "object") continue;
       mapped[id] = {
         label: m.name ?? id,
-        reasoning: m.reasoning === true,
         ...(Number.isFinite(m.limit?.context) ? { contextWindow: m.limit.context } : {}),
         ...(Number.isFinite(m.limit?.output) ? { maxTokens: m.limit.output } : {}),
       };
     }
     if (Object.keys(mapped).length === 0) throw new Error("registry held no models");
-    connection.aiio?.authSet?.({ registry: { fetchedAt: Date.now(), models: mapped } });
+    registryCache.set(key, { fetchedAt: Date.now(), models: mapped });
     return mapped;
   } catch {
-    return cache?.models && typeof cache.models === "object" ? cache.models : {};
+    return cache?.models ?? {};
   }
 }
 
@@ -489,17 +487,16 @@ async function registryModels(connection) {
  * Cached and static metadata fills only omissions for the same IDs;
  * the models.dev registry is consulted only if the live list fails.
  * Offline, registry, static and cached IDs form fallback candidates.
+ * @this {Function} the registered provider class
  */
-async function models() {
-  const settings = this.aiio?.settings ?? {};
-  const headers = {};
-  if (settings.auth?.token) headers.authorization = `Bearer ${settings.auth.token}`;
+async function models({ url = KIMI_URL, auth, settings = {}, signal } = {}) {
+  const baseUrl = String(url).replace(/\/$/, "");
+  const preset = presetOf(this, baseUrl);
+  const headers = { ...ONE_SHOT };
+  if (auth?.token) headers.authorization = `Bearer ${auth.token}`;
   let live = null;
   try {
-    const response = await fetch(`${this.baseUrl}/models`, singleShot({
-      headers,
-      signal: this.aiio?.requestSignal,
-    }));
+    const response = await fetch(`${baseUrl}/models`, { headers, signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json();
     if (!Array.isArray(body.data)) throw new Error("malformed model catalog");
@@ -507,17 +504,16 @@ async function models() {
     for (const model of body.data) {
       if (typeof model?.id !== "string" || model.id === "") continue;
       live[model.id] = {
-        ...(typeof model.name === "string" && model.name !== "" ? { label: model.name } : {}),
-        ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
-        ...(Number.isFinite(model.context_window) ? { contextWindow: model.context_window } : {}),
+        ...(Number.isFinite(model.context_length) ? { contextWindow: model.context_length }
+          : Number.isFinite(model.context_window) ? { contextWindow: model.context_window } : {}),
         ...(Number.isFinite(model.max_output_tokens) ? { maxTokens: model.max_output_tokens } : {}),
       };
     }
   } catch {
     live = null; // offline: registry + static + cached below
   }
-  const registry = live === null ? await registryModels(this) : {};
-  const staticModels = endpointPreset(this)?.models ?? {};
+  const registry = live === null ? await registryModels(preset, signal) : {};
+  const staticModels = preset?.models ?? {};
   const cached = settings.models && typeof settings.models === "object" && !Array.isArray(settings.models)
     ? settings.models
     : {};
@@ -526,17 +522,12 @@ async function models() {
   ])] : Object.keys(live);
   const map = {};
   for (const id of ids) {
-    const liveModel = live === null ? null : live[id];
-    const merged = { ...cached[id], ...staticModels[id], ...registry[id], ...liveModel };
+    const merged = { ...cached[id], ...staticModels[id], ...registry[id], ...(live === null ? null : live[id]) };
     map[id] = {
-      label: liveModel?.label ?? registry[id]?.label ?? staticModels[id]?.label ?? cached[id]?.label ?? id,
-      reasoning: merged.reasoning === true,
+      label: id,
       ...(Number.isFinite(merged.contextWindow) ? { contextWindow: merged.contextWindow } : {}),
       ...(Number.isFinite(merged.maxTokens) ? { maxTokens: merged.maxTokens } : {}),
     };
-  }
-  if (live !== null || Object.keys(registry).length > 0) {
-    this.aiio?.authSet?.({ models: map });
   }
   return map;
 }
@@ -547,6 +538,8 @@ async function models() {
  *  relative to one turn's token cost, so there is no need to hit it
  *  every request. */
 const KIMI_BALANCE_TTL = 60 * 1000;
+/** Kimi Code's /usages subscription snapshot changes slowly relative to a turn. */
+const KIMI_USAGE_TTL = 60 * 1000;
 
 /**
  * Platform-endpoint balance reporting: the one confirmed source of
@@ -576,16 +569,16 @@ async function reportBalance(connection, aiio) {
   const token = aiio.settings?.auth?.token;
   if (!token) return;
   try {
-    const response = await fetch(`${connection.baseUrl}/users/me/balance`, singleShot({
-      headers: { authorization: `Bearer ${token}` },
+    const response = await fetch(`${connection.baseUrl}/users/me/balance`, {
+      headers: { authorization: `Bearer ${token}`, ...ONE_SHOT },
       signal: aiio.requestSignal,
-    }));
+    });
     if (!response.ok) return;
     const body = await response.json();
     const balance = Number(body?.data?.available_balance);
     if (!Number.isFinite(balance)) return;
     const unit = String(connection.baseUrl ?? "").includes(".cn") ? "cny" : "usd";
-    aiio.setPlanUsage?.({ quotas: { balance: { remaining: balance, unit } } });
+    aiio.planUsageSet?.({ quotas: { balance: { remaining: balance, unit } } });
   } catch { /* best-effort — a failed balance fetch never breaks the turn */ }
 }
 
@@ -595,7 +588,7 @@ async function reportBalance(connection, aiio) {
  * (confirmed on the platform's /v1/tools/search* endpoints; Moonshot
  * does not document a chat-completions-specific split the way OpenAI's
  * x-ratelimit-*-requests/-tokens pair does) — so the OpenAI default
- * this plugin would otherwise inherit (defineProvider) never matches
+ * this plugin would otherwise inherit (IO completion) never matches
  * anything real here. Reported as "requests" (the header names a
  * single rate dimension with no token/request distinction, and Kimi's
  * own docs describe its recharge/tier limits in request-rate terms).
@@ -610,6 +603,49 @@ async function reportBalance(connection, aiio) {
  * lib/io/request.js's call site (never awaited, a late rejection
  * can't escape unhandled — not that this one ever rejects).
  */
+async function reportSubscriptionUsage(connection, aiio) {
+  if (!aiio) return;
+  const cache = aiio._kimiUsage;
+  if (cache && Date.now() - cache.fetchedAt < KIMI_USAGE_TTL) return;
+  aiio._kimiUsage = { fetchedAt: Date.now() }; // claim before awaiting
+  const token = aiio.settings?.auth?.token;
+  if (!token) return;
+  try {
+    const response = await fetch(`${connection.baseUrl}/usages`, {
+      headers: { authorization: `Bearer ${token}`, ...ONE_SHOT }, signal: aiio.requestSignal,
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    const quota = (value) => {
+      const total = Number(value?.limit);
+      const used = Number(value?.used);
+      const remaining = Number(value?.remaining);
+      const reset = value?.resetTime ?? value?.reset_time;
+      const report = {
+        ...(Number.isFinite(total) ? { total } : {}),
+        ...(Number.isFinite(used) ? { used } : {}),
+        ...(Number.isFinite(remaining) ? { remaining } : {}),
+        ...(typeof reset === "string" && reset !== "" ? { reset } : {}),
+      };
+      return Object.keys(report).length > 0 ? report : null;
+    };
+    // The coding API publishes its weekly allowance as `usage`, and the
+    // rolling allowance in `limits[]` with a duration. These are the two
+    // actionable subscription limits; booster-wallet internals are money
+    // ledger data, not a quota, so deliberately stay unpublished.
+    const quotas = {};
+    const weekly = quota(body?.usage);
+    if (weekly) quotas["7d"] = weekly;
+    for (const item of body?.limits ?? []) {
+      const minutes = Number(item?.window?.duration);
+      if (item?.window?.timeUnit !== "TIME_UNIT_MINUTE" || !Number.isFinite(minutes) || minutes <= 0) continue;
+      const limit = quota(item.detail);
+      if (limit) quotas[`${minutes / 60}h`] = limit;
+    }
+    if (Object.keys(quotas).length > 0) aiio.planUsageSet?.({ quotas });
+  } catch { /* best-effort — account usage never breaks a turn */ }
+}
+
 function reportPlanUsage(headers, aiio = this?.aiio) {
   const get = (name) => headers?.get?.(name) ?? undefined;
   const num = (name) => {
@@ -635,31 +671,20 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     if (Object.keys(bare).length > 0) quotas.requests = bare;
   }
   if (Object.keys(quotas).length > 0) {
-    aiio?.setPlanUsage?.({ quotas });
+    aiio?.planUsageSet?.({ quotas });
     return;
   }
   if (supportsFiles(this)) return reportBalance(this, aiio);
+  return reportSubscriptionUsage(this, aiio);
 }
 
 /* --------------------------------------------------- web capabilities */
 
 /**
- * The settings gate every server-side web capability checks first:
- * `web.provider === false` opts OUT of provider web backends (the
- * caller then falls through to MCP/package routing). App-level
- * settings live on the ENV (aiio.settings is only the endpoint's
- * namespaced view), so the handler reads aiio.env.settings.
- */
-function providerWebDisabled(aiio) {
-  return aiio?.env?.settings?.web?.provider === false;
-}
-
-/**
- * The `$web_search` builtin is a Moonshot-server feature of the
- * PLATFORM endpoints (verified against platform.moonshot.ai's docs).
- * Arbitrary OpenAI-compatible proxies certainly have no builtin
- * tools — unsupported endpoints answer undefined (honest
- * fall-through), never a request that could only 400.
+ * The platform endpoints (api.moonshot.ai / .cn) expose the direct Web Search
+ * Basic API (POST {baseUrl}/tools/search; docs verified 2026-09-29). Arbitrary
+ * OpenAI-compatible proxies have no such tool — unsupported endpoints answer
+ * undefined (honest fall-through), never a request that could only 400/404.
  */
 function webSearchHosted(aiio) {
   const base = String(aiio?.url ?? "").replace(/\/$/, "");
@@ -667,116 +692,109 @@ function webSearchHosted(aiio) {
 }
 
 /**
- * The coding relay (api.kimi.com/coding, the Kimi Code subscription)
- * has no `$web_search` builtin, but it DOES expose a dedicated search
- * API: POST {baseUrl}/search with `{text_query}` answers
- * `{search_results: [{url, title, snippet}]}` under the same Bearer
- * credential (verified against the Kimi Code third-party docs and a
- * live integration, 2026). Same honesty rule: only this exact base
- * URL takes the relay path.
+ * The coding relay (api.kimi.com/coding, the Kimi Code subscription) exposes
+ * its own dedicated search API: POST {baseUrl}/search with `{text_query}`
+ * answers `{search_results: [{url, title, snippet}]}` under the same Bearer
+ * credential (verified against the Kimi Code third-party docs and a live
+ * integration, 2026). Same honesty rule: only this exact base URL takes the
+ * relay path.
  */
 function webSearchRelay(aiio) {
   return String(aiio?.url ?? "").replace(/\/$/, "") === KIMI_CODING_URL;
 }
 
 /**
- * One POST {baseUrl}/search against the coding relay. A rejected
- * request (4xx/5xx) THROWS with the status — the Agent wraps it as a
- * failure and dispatch falls through; the result is never fabricated.
+ * Kimi provider web requests ride the shared deadline/connect discipline. Both
+ * web paths are DIRECT REST lookups — the platform `/tools/search` + `/tools/fetch`
+ * and the coding relay `/search` — but the server runs the actual
+ * search/extraction before returning the head, which intermittently exceeds the
+ * 3s default (proven live on both, ai-cache/2026-09-28 009/010). 3s + 1500ms,
+ * passed only as an argument (shared code untouched).
  */
-async function relayWebSearch(aiio, query, { signal, deadline }) {
-  const token = aiio?.settings?.auth?.token;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener?.("abort", onAbort, { once: true });
-  let timer;
-  if (Number.isFinite(deadline)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
-    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
-    timer?.unref?.();
-  }
-  try {
-    const response = await fetch(`${KIMI_CODING_URL}/search`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-      },
-      signal: controller.signal,
-      body: JSON.stringify({ text_query: query }),
-    });
-    if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
-    const body = await response.json();
-    const results = Array.isArray(body?.search_results) ? body.search_results : null;
-    if (results === null) throw new ProviderError("malformed", "Kimi relay search returned no search_results array");
-    return results
-      .map((item) => {
-        const raw = typeof item?.url === "string" ? item.url.trim() : "";
-        let url;
-        try { url = new URL(raw); } catch { return null; }
-        if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-        const title = typeof item?.title === "string" && item.title.trim() !== "" ? item.title.trim() : url.href;
-        const snippet = typeof item?.snippet === "string" ? item.snippet.trim() : "";
-        return snippet === "" ? `- [${title}](${url.href})` : `- [${title}](${url.href}) — ${snippet}`;
-      })
-      .filter(Boolean)
-      .join("\n");
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.("abort", onAbort);
-  }
+const WEB_TOOL_TTFB_MS = 4_500;
+
+const webPost = (aiio, url, init, { signal, deadline }) =>
+  aiio.fetch(url, { ...init, signal }, { deadline, connectTimeout: WEB_TOOL_TTFB_MS });
+
+/** Render a `search_results` array to the bounded Markdown list (both paths share this). */
+function renderSearchResults(results, source) {
+  const markdown = results
+    .map((item) => {
+      const raw = typeof item?.url === "string" ? item.url.trim() : "";
+      let url;
+      try { url = new URL(raw); } catch { return null; }
+      if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+      const title = typeof item?.title === "string" && item.title.trim() !== "" ? item.title.trim() : url.href;
+      const snippet = typeof item?.snippet === "string" ? item.snippet.trim() : "";
+      return snippet === "" ? `- [${title}](${url.href})` : `- [${title}](${url.href}) — ${snippet}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+  if (markdown === "") throw failure("malformed", `Kimi ${source} returned no usable search results`);
+  return markdown;
 }
 
 /**
- * One `$web_search` builtin-tool request against POST
- * {baseUrl}/chat/completions, non-streaming (docs verified
- * 2026-06: `tools: [{type:"builtin_function",
- * function:{name:"$web_search"}}]`; the server executes the search
- * and the assistant message content answers). A rejected request
- * (4xx/5xx) THROWS with the status — the Agent wraps it as a failure
- * and dispatch falls through; the result is never fabricated.
+ * One DIRECT web-search POST: `{text_query}` in, `{search_results: [{url,
+ * title, snippet}]}` out, under the endpoint's Bearer credential. Used by BOTH
+ * the platform endpoints (POST {baseUrl}/tools/search — Web Search Basic,
+ * docs verified 2026-09-29) and the coding relay (POST {baseUrl}/search). No
+ * LLM, no echo loop — this is the fast path that replaced the slow `$web_search`
+ * chat-completions builtin. A rejected request (4xx/5xx) THROWS with the
+ * status; an empty/unusable result THROWS — dispatch falls through, never fabricates.
  */
-async function builtinWebSearch(aiio, prompt, { signal, deadline }) {
+async function directWebSearch(aiio, path, query, { signal, deadline }) {
   const token = aiio?.settings?.auth?.token;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort(signal?.reason ?? new Error("web request cancelled"));
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener?.("abort", onAbort, { once: true });
-  let timer;
-  if (Number.isFinite(deadline)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) controller.abort(new Error("web request deadline passed"));
-    else timer = setTimeout(() => controller.abort(new Error("web request timed out")), remaining);
-    timer?.unref?.();
-  }
-  try {
-    const response = await fetch(`${String(aiio.url).replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: aiio.currentModel,
-        messages: [{
-          role: "user",
-          content: prompt,
-        }],
-        tools: [{ type: "builtin_function", function: { name: "$web_search" } }],
-        stream: false,
-      }),
-    });
-    if (!response.ok) throw new HttpStatusError(response.status, response.statusText, await response.text());
-    const body = await response.json();
-    const content = body?.choices?.[0]?.message?.content;
-    return typeof content === "string" ? content : "";
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.("abort", onAbort);
-  }
+  const base = String(aiio.url).replace(/\/$/, "");
+  const response = await webPost(aiio, `${base}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ text_query: query }),
+  }, { signal, deadline });
+  if (!response.ok) throw await statusError(response);
+  const body = await response.json();
+  const results = Array.isArray(body?.search_results) ? body.search_results : null;
+  if (results === null) throw failure("malformed", "Kimi web search returned no search_results array");
+  return renderSearchResults(results, "web search");
+}
+
+/**
+ * One DIRECT web-fetch POST: `{url}` in, `{url, title, markdown}` out, under
+ * the endpoint's Bearer credential. Used by BOTH the platform endpoints (POST
+ * {baseUrl}/tools/fetch — URL Fetch, docs verified 2026-09-29) and the coding
+ * relay (POST {baseUrl}/fetch — verified live 2026-09-29). No LLM — direct
+ * content extraction. A rejected request (4xx/5xx — including the documented
+ * security_risk 403 and markdown_not_found 404) THROWS with the status; an
+ * empty extraction THROWS — dispatch falls through, never fabricates.
+ *
+ * KNOWN LIMITATION (accepted, 2026-09-29): the service's `markdown` is a
+ * text+IMAGES extraction — per the docs, "text and images appear in page
+ * order, images as `![imageN](url)` placeholders". Inline hyperlinks are NOT
+ * part of the output and the `{url}`-only request schema offers no toggle, so
+ * the stripped links are SERVER-side and not recoverable through this API.
+ * Callers needing a page's links should use web-search (whose results carry
+ * URLs) or opt out via `web.provider.fetch: false` to take the local extractor.
+ */
+async function directWebFetch(aiio, path, url, { signal, deadline }) {
+  const token = aiio?.settings?.auth?.token;
+  const base = String(aiio.url).replace(/\/$/, "");
+  const response = await webPost(aiio, `${base}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ url }),
+  }, { signal, deadline });
+  if (!response.ok) throw await statusError(response);
+  const body = await response.json();
+  const markdown = typeof body?.markdown === "string" ? body.markdown.trim() : "";
+  if (markdown === "") throw failure("malformed", "Kimi web fetch returned no usable content");
+  const title = typeof body?.title === "string" ? body.title.trim() : "";
+  return title === "" ? markdown : `# ${title}\n\n${markdown}`;
 }
 
 /** Kimi (Moonshot AI) chat-completions protocol. */
@@ -784,22 +802,30 @@ export default class KimiProvider {
   static provider = {
     label: "Kimi (Moonshot AI)",
     capabilities: {
-      tools: true,
-      thinking: true,
       streaming: true,
-      "web-search": async function ({ aiio, args, signal, deadline }) {
-        if (providerWebDisabled(aiio)) return undefined;
-        const query = String(args?.query ?? "").trim();
-        if (query === "") return undefined;
-        // Two proven provider paths: the platform endpoints' `$web_search`
-        // builtin, and the coding relay's dedicated /search API.
-        if (webSearchHosted(aiio)) {
-          return builtinWebSearch(aiio,
-            `Search the web for "${query}" and answer with the top results as a Markdown list: each result one bullet with its title, URL, and a one-or-two-sentence snippet.`,
-            { signal, deadline });
-        }
-        if (webSearchRelay(aiio)) return relayWebSearch(aiio, query, { signal, deadline });
-        return undefined;
+      thinking: [],
+      tools: {
+        "web-search": { function: async ({ aiio, args, signal, deadline }) => {
+          const query = String(args?.query ?? "").trim();
+          if (query === "") return undefined;
+          // Two DIRECT provider paths, no LLM generation: the platform
+          // endpoints' /tools/search (Web Search Basic) and the coding relay's
+          // /search API. (The old `$web_search` chat-completions builtin was the
+          // slow multi-round LLM echo loop — replaced.)
+          if (webSearchHosted(aiio)) return directWebSearch(aiio, "/tools/search", query, { signal, deadline });
+          if (webSearchRelay(aiio)) return directWebSearch(aiio, "/search", query, { signal, deadline });
+          return undefined;
+        } },
+        "web-fetch": { function: async ({ aiio, args, signal, deadline }) => {
+          const url = String(args?.url ?? "").trim();
+          if (url === "") return undefined;
+          // Two DIRECT fetch paths, no LLM: the platform endpoints' /tools/fetch
+          // and the coding relay's /fetch (both answer {url, title, markdown};
+          // relay path verified live 2026-09-29, ai-cache/2026-09-28 011).
+          if (webSearchHosted(aiio)) return directWebFetch(aiio, "/tools/fetch", url, { signal, deadline });
+          if (webSearchRelay(aiio)) return directWebFetch(aiio, "/fetch", url, { signal, deadline });
+          return undefined;
+        } },
       },
     },
   };
@@ -842,7 +868,7 @@ export default class KimiProvider {
     },
   ];
 
-  static async detectEndpoints({ endpoints = {} } = {}) {
+  static async detect({ endpoints = {} } = {}) {
     const found = {};
     for (const { name, env, url, urlEnv } of ENV_ENDPOINTS) {
       if (endpoints[name]) continue;
@@ -858,6 +884,8 @@ export default class KimiProvider {
     return found;
   }
 
+  static async models(options) { return models.call(this, options); }
+
   constructor(url = KIMI_URL, aiio) {
     this.baseUrl = String(url).replace(/\/$/, "");
     this.url = `${this.baseUrl}/chat/completions`;
@@ -865,47 +893,38 @@ export default class KimiProvider {
   }
 
   context2msg(context, aiio = this.aiio) { return context2msg(context, aiio); }
-  async send(message) { return send.call(this, message); }
+  async send(message, base) { return send.call(this, message, base); }
   msg2events(message, state, aiio = this.aiio) { return msg2events(message, state, aiio); }
-  async models() { return models.call(this); }
   reportPlanUsage(headers, aiio = this.aiio) { return reportPlanUsage.call(this, headers, aiio); }
 
   /**
    * Refine the shared taxonomy for ONE status code: a 403 is a
    * TEMPORARY usage/rate limit far more often than a dead credential
    * (401 already covers that) — see BAD_CREDENTIAL_403.
-   * @param {*} err - the raw error (HttpStatusError carries status/body)
-   * @returns {ProviderError}
+   * @param {*} err - the raw error (status/body ride along)
+   * @param {object} base - the shared verdict
+   * @returns {object}
    */
-  classifyError(err) {
-    if (typeof err?.status === "number" && err.status === 403) {
-      const body = String(err.body ?? err.message ?? "");
-      if (!BAD_CREDENTIAL_403.test(body)) {
-        return new ProviderError(
-          "provider",
-          `${err.message} [${this.aiio?.name}] (likely a temporary usage/rate limit, not an invalid credential)`,
-          { status: err.status, cause: err },
-        );
-      }
+  classifyError(err, base) {
+    if (err?.status === 403 && !BAD_CREDENTIAL_403.test(String(err.body ?? err.message ?? ""))) {
+      base.kind = "provider";
+      base.message += " (likely a temporary usage/rate limit, not an invalid credential)";
     }
-    return classifyError(err, this.aiio?.name);
+    return base;
   }
 
   /**
-   * Kimi's TOKEN-DEPLETION dialect: its usage/rate limits answer a
-   * 403 whose body names the limit (see classifyError — that same
-   * 403 classifies "provider" precisely BECAUSE it is a quota, not
-   * a credential) — so a Kimi 403 that is not a dead credential IS
-   * the budget signal. Every other failure defers to the shared
-   * exact predicate (429/402, quota-named bodies).
+   * Kimi's TOKEN-DEPLETION dialect: its usage/rate limits answer a 403
+   * whose body names the limit (see classifyError — that same 403
+   * classifies "provider" precisely BECAUSE it is a quota, not a
+   * credential) — so a Kimi 403 that is not a dead credential IS the
+   * budget signal. Every other failure keeps the shared verdict.
    * @param {object} classified
+   * @param {boolean} base - the shared verdict
    * @returns {boolean}
    */
-  depletionError(classified) {
-    if (classified?.status === 403 && classified?.kind === "provider" &&
-        !BAD_CREDENTIAL_403.test(String(classified?.message ?? ""))) {
-      return true;
-    }
-    return depletionError(classified);
+  depletionError(classified, base) {
+    return (classified?.status === 403 && classified?.kind === "provider" &&
+      !BAD_CREDENTIAL_403.test(String(classified?.message ?? ""))) || base;
   }
 }

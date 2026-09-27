@@ -1,15 +1,15 @@
 // test/io-http.test.js — proof for the default HTTP backend
-// (lib/http.js) over a mock fetch.
+// (lib/io/http.js, private to IO) over a mock fetch.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
   HttpStatusError,
-  defaultConnect,
-  defaultSendHeaders,
-  defaultSendBody,
-  defaultSend,
-  defaultRead,
-  defaultClose,
-} from "../lib/io.js";
+  defaultConnect as httpConnect,
+  defaultSendHeaders as httpSendHeaders,
+  defaultSendBody as httpSendBody,
+  defaultSend as httpSend,
+  defaultRead as httpRead,
+  defaultClose as httpClose,
+} from "../lib/io/http.js";
 
 const realFetch = globalThis.fetch;
 let mock;
@@ -30,19 +30,19 @@ function streamOf(lines) {
   return new Response(text);
 }
 
-describe("defaultConnect", () => {
+describe("httpConnect", () => {
   test("returns the stateless {url, aiio} connection", () => {
     const aiio = { marker: 1 };
-    const conn = defaultConnect("http://x/api", aiio);
+    const conn = httpConnect("http://x/api", aiio);
     expect(conn).toEqual({ url: "http://x/api", aiio });
     expect(conn.aiio).toBe(aiio); // connection-scoped owner
   });
 });
 
-describe("defaultSend composition", () => {
+describe("httpSend composition", () => {
   test("send composes sendHeaders(msg[0]) + sendBody(msg[1])", async () => {
-    const conn = defaultConnect("http://x/chat", { requestSignal: undefined });
-    await defaultSend(conn, [{ "content-type": "application/json" }, { a: 1 }]);
+    const conn = httpConnect("http://x/chat", { requestSignal: undefined });
+    await httpSend(conn, [{ "content-type": "application/json" }, { a: 1 }]);
     const [url, init] = mock.calls[0];
     expect(url).toBe("http://x/chat");
     expect(init.method).toBe("POST");
@@ -52,23 +52,23 @@ describe("defaultSend composition", () => {
   });
 
   test("nil body sends no payload (streaming GET-style)", async () => {
-    const conn = defaultConnect("http://x/chat", {});
-    await defaultSend(conn, [{ authorization: "Bearer t" }, null]);
+    const conn = httpConnect("http://x/chat", {});
+    await httpSend(conn, [{ authorization: "Bearer t" }, null]);
     expect(mock.calls[0][1].body).toBeUndefined();
   });
 
   test("aiio.requestSignal is wired into fetch", async () => {
     const ctrl = new AbortController();
-    const conn = defaultConnect("http://x/chat", { requestSignal: ctrl.signal });
-    await defaultSend(conn, [{}, { a: 1 }]);
+    const conn = httpConnect("http://x/chat", { requestSignal: ctrl.signal });
+    await httpSend(conn, [{}, { a: 1 }]);
     expect(mock.calls[0][1].signal).toBe(ctrl.signal);
   });
 
   test("non-2xx throws HttpStatusError with status and body", async () => {
     mock.handler = () => new Response("nope", { status: 401, statusText: "Unauthorized" });
-    const conn = defaultConnect("http://x/chat", {});
+    const conn = httpConnect("http://x/chat", {});
     try {
-      await defaultSend(conn, [{}, {}]);
+      await httpSend(conn, [{}, {}]);
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(HttpStatusError);
@@ -78,25 +78,25 @@ describe("defaultSend composition", () => {
   });
 });
 
-describe("defaultRead blocking-await line reader", () => {
+describe("httpRead blocking-await line reader", () => {
   async function connected(lines) {
     mock.handler = () => streamOf(lines);
-    const conn = defaultConnect("http://x/chat", {});
-    await defaultSend(conn, [{}, {}]);
+    const conn = httpConnect("http://x/chat", {});
+    await httpSend(conn, [{}, {}]);
     return conn;
   }
 
   test("reads whole NDJSON messages, nil at end-of-stream", async () => {
     const conn = await connected([`{"a":1}`, `{"b":2}`]);
-    expect(await defaultRead(conn)).toEqual({ a: 1 });
-    expect(await defaultRead(conn)).toEqual({ b: 2 });
-    expect(await defaultRead(conn)).toBeNull();
+    expect(await httpRead(conn)).toEqual({ a: 1 });
+    expect(await httpRead(conn)).toEqual({ b: 2 });
+    expect(await httpRead(conn)).toBeNull();
   });
 
   test("strips SSE data: prefixes; [DONE] ends the stream", async () => {
     const conn = await connected([`data: {"x":1}`, ``, `data: [DONE]`, `data: {"x":9}`]);
-    expect(await defaultRead(conn)).toEqual({ x: 1 });
-    expect(await defaultRead(conn)).toBeNull();
+    expect(await httpRead(conn)).toEqual({ x: 1 });
+    expect(await httpRead(conn)).toBeNull();
   });
 
   // OpenAI Responses SSE regression: framing lines are NOT JSON
@@ -112,9 +112,9 @@ describe("defaultRead blocking-await line reader", () => {
       `data: {"type":"response.output_text.delta","delta":"hi"}`,
       `data: [DONE]`,
     ]);
-    expect(await defaultRead(conn)).toEqual({ type: "response.created" });
-    expect(await defaultRead(conn)).toEqual({ type: "response.output_text.delta", delta: "hi" });
-    expect(await defaultRead(conn)).toBeNull();
+    expect(await httpRead(conn)).toEqual({ type: "response.created" });
+    expect(await httpRead(conn)).toEqual({ type: "response.output_text.delta", delta: "hi" });
+    expect(await httpRead(conn)).toBeNull();
   });
 
   test("buffers messages split across stream chunks", async () => {
@@ -126,33 +126,33 @@ describe("defaultRead blocking-await line reader", () => {
       },
     });
     mock.handler = () => new Response(stream);
-    const conn = defaultConnect("http://x/chat", {});
-    await defaultSend(conn, [{}, {}]);
-    expect(await defaultRead(conn)).toEqual({ a: 1 });
-    expect(await defaultRead(conn)).toEqual({ b: 2 });
-    expect(await defaultRead(conn)).toBeNull();
+    const conn = httpConnect("http://x/chat", {});
+    await httpSend(conn, [{}, {}]);
+    expect(await httpRead(conn)).toEqual({ a: 1 });
+    expect(await httpRead(conn)).toEqual({ b: 2 });
+    expect(await httpRead(conn)).toBeNull();
   });
 
   test("malformed JSON line throws SyntaxError", async () => {
     const conn = await connected([`{not json}`]);
-    expect(defaultRead(conn)).rejects.toBeInstanceOf(SyntaxError);
+    expect(httpRead(conn)).rejects.toBeInstanceOf(SyntaxError);
   });
 
   test("read before send is an ordinary error", async () => {
-    const conn = defaultConnect("http://x/chat", {});
-    expect(defaultRead(conn)).rejects.toThrow(/read before send/);
+    const conn = httpConnect("http://x/chat", {});
+    expect(httpRead(conn)).rejects.toThrow(/read before send/);
   });
 });
 
-describe("defaultClose", () => {
+describe("httpClose", () => {
   test("cancels the stream; idempotent; tolerates empty connections", async () => {
     mock.handler = () => streamOf([`{"a":1}`]);
-    const conn = defaultConnect("http://x/chat", {});
-    await defaultSend(conn, [{}, {}]);
-    await defaultRead(conn);
-    await defaultClose(conn);
-    await defaultClose(conn); // idempotent
+    const conn = httpConnect("http://x/chat", {});
+    await httpSend(conn, [{}, {}]);
+    await httpRead(conn);
+    await httpClose(conn);
+    await httpClose(conn); // idempotent
     expect(conn.closed).toBe(true);
-    await defaultClose({}); // no response at all
+    await httpClose({}); // no response at all
   });
 });

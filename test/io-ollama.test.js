@@ -7,14 +7,16 @@ import { join } from "node:path";
 import { Env } from "../lib/env.js";
 import { IO } from "../lib/io.js";
 import OllamaPlugin from "../providers/ollama.js";
-import { defineProvider } from "../lib/io.js";
+import { thinkingNative } from "../lib/io/thinking.js";
+import { providerClass } from "./fakes.js";
+import { providerAdd } from "./env-internals.js";
 
-const Ollama = defineProvider(OllamaPlugin, { name: "ollama" });
+const Ollama = await providerClass(OllamaPlugin, "ollama");
 const connection = (aiio = {}) => new Ollama(aiio.url, aiio);
 const ollama = {
   provider: Ollama.provider,
-  models: (aiio) => connection(aiio).models(),
-  login: (aiio) => connection(aiio).login(),
+  models: ({ url, settings } = {}) => Ollama.models({ url, auth: settings?.auth, settings }),
+  login: () => Ollama.login(),
   context2msg: (context, aiio) => connection(aiio).context2msg(context, aiio),
   msg2events: (message, state, aiio) => connection(aiio).msg2events(message, state, aiio),
 };
@@ -44,16 +46,17 @@ function ndjson(frames) {
 }
 
 describe("Ollama thinking control", () => {
-  test("booleans pass through; levels clamp to Ollama's low/medium/high", () => {
+  test("native modes: none disables, a level passes through, undefined omits", () => {
     const think = (value) => ollama.context2msg([{ type: 2, content: [{ type: "text", text: "q" }] }],
-      { settings: { think: value }, currentModel: "gpt-oss:20b" })[1].think;
+      { settings: { think: value }, modelCurrent: "gpt-oss:20b" })[1].think;
     expect(think(undefined)).toBeUndefined();
-    expect(think(false)).toBe(false);
-    expect(think(true)).toBe(true);
     expect(think("none")).toBe(false);
     expect(think("low")).toBe("low");
-    expect(think("max")).toBe("high");
-    expect(think("xhigh")).toBe("high");
+    // IO maps library levels onto Ollama's modes before the provider sees them
+    const modes = Ollama.provider.capabilities.thinking;
+    expect(think(thinkingNative("max", modes))).toBe("high");
+    expect(think(thinkingNative("xhigh", modes))).toBe("high");
+    expect(think(thinkingNative(false, modes))).toBe(false);
   });
 });
 
@@ -63,13 +66,13 @@ describe("Ollama metadata surface", () => {
     expect(typeof ollama.provider.label).toBe("string");
     expect(ollama.provider.capabilities).toEqual({
       tools: true,
-      thinking: true,
+      thinking: ["none", "low", "medium", "high"],
       streaming: true,
     });
     expect(ollama.provider.url).toBeUndefined(); // URLs belong to endpoints
   });
 
-  test("models() lists the local API and refreshes the cached snapshot", async () => {
+  test("models() lists the local API", async () => {
     mock.handler = () =>
       new Response(JSON.stringify({
         models: [
@@ -77,13 +80,10 @@ describe("Ollama metadata surface", () => {
           { name: "llama3.1:8b", size: 200, details: { family: "llama" } },
         ],
       }));
-    const authed = [];
-    const aiio = { url: "http://localhost:11434", settings: {}, authSet: (a) => authed.push(a) };
-    const models = await ollama.models(aiio);
+    const models = await ollama.models({ url: "http://localhost:11434", settings: {} });
     expect(mock.calls[0][0]).toBe("http://localhost:11434/api/tags");
     expect(Object.keys(models)).toEqual(["qwen3:8b", "llama3.1:8b"]);
-    expect(models["qwen3:8b"]).toMatchObject({ reasoning: false, input: ["text"], family: "qwen3" });
-    expect(authed).toEqual([{ models }]); // cache updated on access
+    expect(models["qwen3:8b"]).toMatchObject({ input: ["text"], family: "qwen3" });
   });
 
   test("models() probes /api/show for each model's context window (best-effort metadata)", async () => {
@@ -106,29 +106,19 @@ describe("Ollama metadata surface", () => {
     expect(map["mystery:1b"].contextWindow).toBeUndefined(); // unknown stays absent
   });
 
-  test("models() falls back to the cached list when unreachable", async () => {
+  test("models() throws when unreachable (Env keeps the cached list)", async () => {
     mock.handler = () => Promise.reject(new TypeError("fetch failed"));
-    const cached = { "cached:1": { label: "cached:1" } };
-    const models = await ollama.models({ url: "http://x", settings: { models: cached } });
-    expect(models).toBe(cached);
-    expect(await ollama.models({ url: "http://x", settings: {} })).toEqual({});
+    await expect(ollama.models({ url: "http://x", settings: {} })).rejects.toThrow(/fetch failed/);
   });
 
-  test("login() is a trivial no-auth procedure routed through endpoint auth", async () => {
-    env.registerProvider("ollama", OllamaPlugin);
-    env.endpoints.ollama = { provider: "ollama", url: "http://localhost:11434" };
-    const aiio = new IO({ env, model: "ollama/m" });
-    const auth = await ollama.login(aiio);
-    expect(auth).toEqual({ type: "none" });
-    expect(env.endpointSettings("ollama")).toEqual({
-      provider: "ollama", url: "http://localhost:11434", auth: { type: "none" },
-    });
+  test("login() is a trivial no-auth record", () => {
+    expect(ollama.login()).toEqual({ type: "none" });
   });
 });
 
 describe("Ollama context2msg (outgoing shape)", () => {
   const aiio = {
-    currentModel: "qwen3:8b",
+    modelCurrent: "qwen3:8b",
     settings: {},
     tools: () => [],
   };
@@ -237,8 +227,8 @@ describe("Ollama msg2events (incoming shape)", () => {
 describe("Ollama error/timeout surfacing (consistent classes)", () => {
   async function runWith(handler) {
     mock.handler = handler;
-    env.registerProvider("ollama", OllamaPlugin);
-    env.endpoints.ollama = { provider: "ollama", url: "http://localhost:11434" };
+    providerAdd(env, "ollama", OllamaPlugin);
+    env._endpoints.ollama = { provider: "ollama", url: "http://localhost:11434" };
     const aiio = new IO({ env, model: "ollama/m", timeout: 50 });
     return aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
   }

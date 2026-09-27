@@ -1,26 +1,26 @@
 // test/base-stdin.test.js — proof for lib/stdin.js (shared CLI grammar)
 import { describe, expect, test } from "bun:test";
-import { parseContext } from "../lib/context.js";
+import { messagesParse } from "../lib/context.js";
 import { readStdin } from "../lib/cli.js";
 
-describe("parseContext — whole-input JSON first", () => {
+describe("messagesParse — whole-input JSON first", () => {
   test("a complete JSON context array passes through as-is", () => {
     const context = [
       { type: 1, content: [{ type: "text", text: "sys" }] },
       { type: 2, content: [{ type: "text", text: "hi" }] },
     ];
-    expect(parseContext(JSON.stringify(context))).toEqual(context);
+    expect(messagesParse(JSON.stringify(context))).toEqual(context);
   });
 
   test("empty input yields an empty context", () => {
-    expect(parseContext("")).toEqual([]);
-    expect(parseContext("\n\n  \n")).toEqual([]);
+    expect(messagesParse("")).toEqual([]);
+    expect(messagesParse("\n\n  \n")).toEqual([]);
   });
 });
 
-describe("parseContext — per-line fallback", () => {
+describe("messagesParse — per-line fallback", () => {
   test("non-JSON lines become user messages", () => {
-    expect(parseContext("hello\nhow are you")).toEqual([
+    expect(messagesParse("hello\nhow are you")).toEqual([
       { type: 2, content: [{ type: "text", text: "hello" }] },
       { type: 2, content: [{ type: "text", text: "how are you" }] },
     ]);
@@ -33,7 +33,7 @@ describe("parseContext — per-line fallback", () => {
       { type: 3, content: [{ type: "text", text: "a" }] },
     ];
     const input = `${JSON.stringify(msg)}\nplain line\n${JSON.stringify(pair)}`;
-    expect(parseContext(input)).toEqual([
+    expect(messagesParse(input)).toEqual([
       msg,
       { type: 2, content: [{ type: "text", text: "plain line" }] },
       ...pair,
@@ -41,22 +41,22 @@ describe("parseContext — per-line fallback", () => {
   });
 
   test("JSON scalars are not messages — treated as plain lines", () => {
-    expect(parseContext("42")).toEqual([
+    expect(messagesParse("42")).toEqual([
       { type: 2, content: [{ type: "text", text: "42" }] },
     ]);
-    expect(parseContext('"just a string"')).toEqual([
+    expect(messagesParse('"just a string"')).toEqual([
       { type: 2, content: [{ type: "text", text: '"just a string"' }] },
     ]);
   });
 
   test("malformed JSON objects degrade to user messages, never throw", () => {
-    expect(parseContext('{"type": 2, broken')).toEqual([
+    expect(messagesParse('{"type": 2, broken')).toEqual([
       { type: 2, content: [{ type: "text", text: '{"type": 2, broken' }] },
     ]);
   });
 
   test("blank lines are skipped", () => {
-    expect(parseContext("a\n\n   \nb")).toEqual([
+    expect(messagesParse("a\n\n   \nb")).toEqual([
       { type: 2, content: [{ type: "text", text: "a" }] },
       { type: 2, content: [{ type: "text", text: "b" }] },
     ]);

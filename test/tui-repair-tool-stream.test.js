@@ -9,7 +9,7 @@ async function settle() { for (let i = 0; i < 8; i++) await new Promise((resolve
 
 test("tool result and display become visible before the next provider request completes", async () => {
   const env = await testEnv();
-  env.registerTool("preview", () => ({ result: "RESULT VISIBLE", display: "DISPLAY VISIBLE" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  env.toolAdd("preview", () => ({ result: "RESULT VISIBLE", display: "DISPLAY VISIBLE" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
   const secondStarted = deferred();
   const release = deferred();
   let request = 0;
@@ -45,12 +45,12 @@ test("structured display content is rendered as text rather than object coercion
 
 test("tool result callback observes the appended result and display in Agent context", async () => {
   const env = await testEnv();
-  env.registerTool("preview", () => ({ result: "done", display: "shown" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  env.toolAdd("preview", () => ({ result: "done", display: "shown" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
   let round = 0;
   const io = fakeIO(async (_, callbacks) => emitScript(round++ === 0 ? [{ type: "start" }, ...TOOLCALL(0, "call", "preview", {}), { type: "done" }] : [{ type: "done" }], callbacks));
   let appendedAtNotification = false;
   const agent = new Agent({ env, model: "p/m", context: [], toolCall: { fork: false }, createIO: () => io });
-  agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => { appendedAtNotification = agent.context.includes(result); });
+  agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => { appendedAtNotification = agent.context.messages().includes(result); });
   await agent.run();
   expect(appendedAtNotification).toBe(true);
 });
@@ -59,7 +59,7 @@ test("bash-style live output renders in the transcript with tool-result styling"
   const env = await testEnv();
   const streamed = deferred();
   const release = deferred();
-  env.registerTool("streamer", async (_args, context) => {
+  env.toolAdd("streamer", async (_args, context) => {
     context.onData("LIVE BASH OUTPUT");
     streamed.resolve();
     await release.promise;
@@ -87,7 +87,7 @@ test("final tool output immediately replaces its live stream without duplication
   const env = await testEnv();
   const streamed = deferred();
   const release = deferred();
-  env.registerTool("streamer", async (_args, context) => {
+  env.toolAdd("streamer", async (_args, context) => {
     context.onData("SAME OUTPUT"); streamed.resolve(); await release.promise; return "SAME OUTPUT";
   }, { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
   let round = 0;
@@ -110,8 +110,8 @@ test("tool-call argument deltas render before their end event", async () => {
   const release = deferred();
   const io = fakeIO(async (_, callbacks) => {
     emitScript([{ type: "start" }], { ...callbacks, onDone: () => {} });
-    callbacks.onToolcallStart({ type: "toolcall_start", contentIndex: 0, callId: "call", name: "read", arguments: "" });
-    callbacks.onToolcallDelta({ type: "toolcall_delta", contentIndex: 0, arguments: '{"path":"STREAMING' });
+    callbacks.onToolCallStart({ type: "tool_call_start", contentIndex: 0, callId: "call", name: "read", arguments: "" });
+    callbacks.onToolCallDelta({ type: "tool_call_delta", contentIndex: 0, arguments: '{"path":"STREAMING' });
     streamed.resolve();
     await release.promise;
     return { type: "done" };

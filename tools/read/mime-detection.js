@@ -7,7 +7,7 @@
  */
 
 import Context from "../../lib/context.js";
-const { MIME_BY_EXTENSION, detectMime: detectContextMime } = Context;
+const { MIME_BY_EXTENSION, mimeDetect: detectContextMime } = Context;
 
 /**
  * @param {Object} options
@@ -15,6 +15,6 @@ const { MIME_BY_EXTENSION, detectMime: detectContextMime } = Context;
  * @param {Buffer|Uint8Array} [options.buffer] - bytes for magic-byte sniffing
  * @returns {string} the detected media type
  */
-export function detectMime({ path, buffer } = {}) {
+export function mimeDetect({ path, buffer } = {}) {
   return detectContextMime({ path, buffer });
 }

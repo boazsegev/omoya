@@ -2,7 +2,10 @@ import { describe, test, expect, afterEach } from "bun:test";
 import * as fs from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { initializeJobs, disableJobs } from "../lib/jobs/lifecycle.js";
-import { jobsPaths, scheduleJobs, jobsStatus, dispatchJobs } from "../lib/jobs.js";
+import { jobsPaths } from "../lib/jobs/paths.js";
+import { scheduleJobs } from "../lib/jobs/operations.js";
+import { jobsStatus } from "../lib/jobs/status.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
 import { jobSchedule, toolDescription } from "../tools/job-schedule.js";
 const roots = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });
@@ -13,7 +16,7 @@ async function cli(root, ...args) {
 }
 async function tree(path) { const result = {}; for (const entry of await fs.readdir(path, { withFileTypes: true })) result[entry.name] = entry.isDirectory() ? await tree(join(path, entry.name)) : await fs.readFile(join(path, entry.name), "utf8"); return result; }
 describe("manual Jobs surfaces", () => {
-  test("CRUD changes only tasks and redacted diagnostics, never lifecycle, even with dead daemon residue", async () => {
+  test("CRUD changes only tasks, never lifecycle, even with dead daemon residue; diagnostics name the problem", async () => {
     const { root, paths, env } = await fixture();
     const before = await tree(paths.root), scheduler = new Proxy({}, { get() { throw new Error("scheduler must not be touched"); } });
     await jobSchedule({ action: "create", filename: "a.md", prompt: "work", schedule: "every 1h" }, { env, scheduler });
@@ -21,12 +24,11 @@ describe("manual Jobs surfaces", () => {
     expect((await scheduleJobs(root, { action: "read", filename: "a.md" })).task.enabled).toBe(false);
     expect((await scheduleJobs(root, { action: "list" })).tasks).toHaveLength(1);
     await jobSchedule({ action: "remove", filename: "a.md" }, { env, scheduler }); expect(await tree(paths.root)).toEqual(before);
-    await fs.writeFile(join(paths.tasks, "bad.md"), "---\nunknown: secret-value\n---\nwork");
+    await fs.writeFile(join(paths.tasks, "bad.md"), "---\nunknown: value\n---\nwork");
     const listed = await scheduleJobs(root, { action: "list" });
     expect(listed.tasks.map((task) => task.id)).not.toContain("bad.md");
-    expect(listed.diagnostics).toContainEqual({ filename: "bad.md", code: "JOBS_TASK_UNKNOWN_KEY", reportable: true });
-    const after = await tree(paths.root); delete after.tasks; delete after.errors; delete before.tasks; delete before.errors; expect(after).toEqual(before);
-    expect(JSON.stringify(await tree(paths.errors))).not.toContain("secret-value");
+    expect(listed.diagnostics).toContainEqual({ filename: "bad.md", code: "JOBS_TASK_UNKNOWN_KEY", message: "task frontmatter has an unknown key \"unknown\" (known: id, enabled, schedule, tools, timeout, model)" });
+    const after = await tree(paths.root); delete after.tasks; delete before.tasks; expect(after).toEqual(before);
   });
   test("disable after task publication cannot be undone by tool repair", async () => {
     const { root, env } = await fixture();
@@ -53,7 +55,9 @@ describe("manual Jobs surfaces", () => {
     const { root, paths } = await fixture(); await fs.rm(paths.root, { recursive: true });
     expect((await cli(root, "run")).stderr).toContain("JOBS_INACTIVE"); expect(await fs.exists(paths.root)).toBe(false);
     const absent = await cli(root, "status"); expect(absent.code).toBe(1); expect(JSON.parse(absent.stdout).eligibility.state).toBe("absent"); expect(await fs.exists(paths.root)).toBe(false);
-    expect((await cli(root, "--init")).code).toBe(0); expect((await cli(root, "status")).code).toBe(0); expect((await cli(root, "run")).code).toBe(0);
+    expect((await cli(root, "--init")).code).toBe(0); expect((await cli(root, "status")).code).toBe(0);
+    // run prints short notes, never the run record (that is logged under ai-jobs/)
+    const ran = await cli(root, "run"); expect(ran.code).toBe(0); expect(ran.stdout).toMatch(/: no jobs due\n$/); expect(ran.stderr).toBe("");
     expect((await cli(root, "--disable")).code).toBe(0); expect((await cli(root, "run")).stderr).toContain("JOBS_DISABLED");
     expect((await cli(root, "init")).code).toBe(0);
     expect((await cli(root, "--help")).stdout).toContain("No locks"); expect((await cli(root, "init", "--scheduler", "daemon")).code).toBe(1);

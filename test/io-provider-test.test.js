@@ -8,10 +8,12 @@ import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, rmSync } from "node:fs";
 import { Env } from "../lib/env.js";
-import { IO, defineProvider } from "../lib/io.js";
+import { IO } from "../lib/io.js";
+import { providerClass } from "./fakes.js";
 import TestPlugin from "../providers/test.js";
+import { providerAdd, providerOf, providersLoad } from "./env-internals.js";
 
-const TestProvider = defineProvider(TestPlugin, { name: "test" });
+const TestProvider = await providerClass(TestPlugin, "test");
 
 const SCRIPT_FILE = `./ai-tmp/test-provider-script-${process.pid}.json`;
 
@@ -30,7 +32,7 @@ function env() {
     cwd: root,
     settings: { providers: { test: { provider: "test", url: "test://script", secret: true } } },
   });
-  value.registerProvider("test", TestPlugin);
+  providerAdd(value, "test", TestPlugin);
   return value;
 }
 
@@ -51,12 +53,12 @@ describe("test provider: metadata + models/login", () => {
     expect(typeof TestProvider.provider.label).toBe("string");
     expect(TestProvider.provider).toMatchObject({ secret: true, spawn: true });
     expect(TestProvider.provider.capabilities).toEqual({
-      tools: true, thinking: true, streaming: true,
+      tools: true, thinking: [], streaming: true,
     });
   });
 
   test("models() is a fixed local map (no network, no auth cache)", async () => {
-    const models = await new TestProvider("test://script", {}).models();
+    const models = await TestProvider.models();
     expect(Object.keys(models)).toContain("test-model");
     expect(models["test-model"]).toMatchObject({ label: "Test Model", secret: true });
     expect(models.ui).toMatchObject({ label: "UI demonstration" });
@@ -64,7 +66,7 @@ describe("test provider: metadata + models/login", () => {
   });
 
   test("login() is a no-auth marker and persists nothing", async () => {
-    expect(await new TestProvider("test://script", {}).login()).toEqual({ type: "none" });
+    expect(TestProvider.login()).toEqual({ type: "none" });
   });
 });
 
@@ -113,8 +115,8 @@ describe("test provider: script sources", () => {
     for (let index = 0; index < 10; index++) turns.push(await aiio.write(context));
     expect(turns[0].type).toBe("done");
     expect(turns[0].message.content.some((block) => block.name === "note")).toBe(true);
-    const workerCall = turns.flatMap((turn) => turn.message?.content ?? []).find((block) => block.name === "worker");
-    expect(workerCall?.arguments).toMatchObject({ name: "ui-response-demo", model: "test/ui-response" });
+    const workerCall = turns.flatMap((turn) => turn.message?.content ?? []).find((block) => block.name === "worker-create");
+    expect(workerCall?.arguments.workers).toEqual([{ name: "ui-response-demo", description: "UI response demonstrator", model: "test/ui-response" }]);
     expect(turns.flatMap((turn) => turn.message?.content ?? []).some((block) => block.name?.startsWith("chat"))).toBe(false);
   });
 
@@ -162,8 +164,8 @@ describe("test provider: block translation", () => {
     expect(types).toContain("thinking_end:0");
     expect(types).toContain("text_start:1");
     expect(types).toContain("text_end:1");
-    expect(types).toContain("toolcall_start:2");
-    expect(types).toContain("toolcall_end:2");
+    expect(types).toContain("tool_call_start:2");
+    expect(types).toContain("tool_call_end:2");
     const blocks = terminal.message.content;
     expect(blocks[0]).toEqual({ type: "thinking", text: "let me think" });
     expect(blocks[1]).toEqual({ type: "text", text: "visible" });
@@ -203,12 +205,14 @@ describe("test provider: block translation", () => {
 describe("test provider: package scan registration", () => {
   test("Env scan-load registers test from the package providers dir", async () => {
     const pkgEnv = new Env();
-    const names = await pkgEnv.loadProviders();
+    const names = await providersLoad(pkgEnv);
     expect(names).toContain("test");
-    const Protocol = pkgEnv.provider("test");
+    const Protocol = providerOf(pkgEnv, "test");
     expect(typeof Protocol).toBe("function");
-    expect(typeof Protocol.detectEndpoints).toBe("function");
-    for (const method of ["context2msg", "msg2events", "send", "read", "close", "models", "login"]) {
+    for (const method of ["detect", "models", "login", "testConnection"]) {
+      expect(typeof Protocol[method]).toBe("function");
+    }
+    for (const method of ["context2msg", "msg2events", "send", "read", "close"]) {
       expect(typeof Protocol.prototype[method]).toBe("function");
     }
   });

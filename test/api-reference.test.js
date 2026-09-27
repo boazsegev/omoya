@@ -41,12 +41,12 @@ describe("api-reference: compact API renderer", () => {
   test("renders documented callables independently without architecture or contracts", async () => {
     const text = renderWith(await collect([{ name: "Env", file: "lib/env.js" }]), markdown);
     expect(text).toStartWith("# API (");
-    expect(text).toContain("### `Env.contextWindow(endpoint, model)`");
-    expect(text).toContain("### `Env.parseDuration(value)`");
-    expect(text).toContain("The model's context window in tokens");
+    expect(text).toContain("### `Env.models(secret = false)`");
+    expect(text).toContain("### `Env.extend(plugin)`");
+    expect(text).toContain("The model catalog");
     expect(text).not.toContain("## Architecture"); // callable docs only, no architecture section
-    const agentText = renderWith(await collect([{ name: "Agent", file: "lib/agent.js" }]), markdown);
-    expect(agentText).toContain("### `Agent.SessionStore.constructor(");
+    const contextText = renderWith(await collect([{ name: "Context", file: "lib/context.js" }]), markdown);
+    expect(contextText).toContain("### `Context.constructor(");
   });
 });
 
@@ -55,11 +55,11 @@ describe("api-reference: the auto-detected tool catalog", () => {
     const { contract, missing } = await collectToolCatalog();
     expect(missing).toEqual([]); // the package tools are all described
     const names = contract.tools.map((t) => t.name);
-    for (const name of ["bash", "read", "write", "edit", "skill", "question", "mcp", "job-schedule"]) {
+    for (const name of ["bash", "read", "write", "edit", "skill", "question", "job-schedule"]) {
       expect(names).toContain(name);
     }
     const bash = contract.tools.find((t) => t.name === "bash");
-    expect(bash.flags).toEqual(["sandbox", "onTimeout"]); // bash streams from its forked OS-sandboxed worker
+    expect(bash.flags).toEqual(["sandbox"]); // dispatch owns deadlines and process teardown
     expect(bash.inputSchema.required).toEqual(["command"]);
     const question = contract.tools.find((t) => t.name === "question");
     expect(question.flags).toEqual(["safe", "sandbox"]);

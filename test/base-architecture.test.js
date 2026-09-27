@@ -4,7 +4,7 @@
 //   public modules live at lib/<name>.js; each may own a PRIVATE folder
 //   lib/<name>/ nobody else imports; dependencies point strictly DOWN
 //   the chain context < env < io < agent < cli < jobs < app (an
-//   owner is never owned by what it owns); providers are plugins over context/env/io;
+//   owner is never owned by what it owns); providers are Env plugins importing only Context;
 //   executables touch public modules only.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
@@ -12,9 +12,9 @@ import { join, dirname } from "node:path";
 import { NAMES } from "../lib/namespace.js";
 
 // Jobs owns headless execution and uses CLI's public model selection contract.
-const RANK = { context: 1, env: 2, io: 3, agent: 4, cli: 5, jobs: 6, app: 7 };
+const RANK = { sandbox: 0, context: 1, env: 2, io: 3, agent: 4, cli: 5, jobs: 6, app: 7 };
 const PUBLIC = Object.keys(RANK);
-const FOUNDATIONS = ["namespace", "tool-runtime"];
+const FOUNDATIONS = ["namespace", "tool-runtime", "util"];
 /** The app façade owns lib/app/, whose areas get their own stricter
  *  recursive rules below: lib/app.js -> lib/app/{tui,web} -> lib/app/gtui/gtui.js
  *  (tui only) -> gtui privates, one direction only; lib/app/markdown/ and
@@ -104,7 +104,7 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
       for (const spec of specifiers(join("lib", `${name}.js`))) {
         if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
         if (owned.some((f) => spec.startsWith(`./${f}/`))) continue; // own privates
-        if (spec === "./namespace.js") continue; // dependency-free cross-cutting foundation
+        if (FOUNDATIONS.some((f) => spec === `./${f}.js`)) continue; // dependency-free cross-cutting foundations
         const target = publicNameOf(spec);
         if (target !== null && spec.startsWith("./") && RANK[target] < RANK[name]) continue;
         offenders.push(`lib/${name}.js -> ${spec}`);
@@ -175,7 +175,7 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     shared: { runtime: false, lower: false, allow: [] },
     tui: { runtime: true, lower: true, allow: [join("lib", "app", "gtui", "gtui.js"), MARKDOWN, SHARED] },
     // public/text-safe.js re-exports the Markdown display sanitizer for the SPA
-    web: { runtime: true, lower: true, allow: [MARKDOWN, SHARED, join("lib", "app", "markdown", "text-safe.js")] },
+    web: { runtime: true, lower: true, allow: [MARKDOWN, SHARED, join("lib", "app", "markdown", "browser.js"), join("lib", "app", "markdown", "text-safe.js")] },
   };
   test("every lib/app/ folder is a ruled area", () => {
     expect(folders(join("lib", "app")).filter((folder) => !(folder in APP_AREAS))).toEqual([]);
@@ -208,17 +208,43 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     });
   }
 
-  test("providers use public foundations or another bundled provider's dialect", () => {
+  test("providers import only Context (plus the namespace foundation) or another bundled provider's dialect", () => {
     const offenders = [];
     for (const file of jsFiles("providers")) {
       for (const spec of specifiers(file)) {
-        if (spec.startsWith("node:") || spec.startsWith("bun")) continue;
-        const target = publicNameOf(spec);
-        const rootHelper = /^\.\.\/lib\/(context|env|io|namespace)\.js$/.test(spec);
+        if (spec.startsWith("node:")) continue;
+        if (spec === "../lib/context.js" || spec === "../lib/namespace.js") continue;
         if (file === "providers/claude.js" && spec === "./anthropic.js") continue;
-        if ((target !== null && spec.startsWith("../") && RANK[target] <= RANK.io) || rootHelper) continue;
         offenders.push(`${file} -> ${spec}`);
       }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("Env's internals never leak: no private fields, endpoint-keyed reads, or removed statics outside lib/env", () => {
+    // Env publishes settings, folders, models/connection, login, tools,
+    // skills/prompts and events; everything else is its own business.
+    const LEAKS = [
+      /\benv\._[A-Za-z]/, // private state
+      /\benv\.endpoint/, // endpoint-keyed members (the pair is the published unit)
+      /\benv\.providers\b/, // the provider registry
+      /\bsafeEnv\b/, // safe mode is the caller's argument
+      /\bEnv\.(http|provider|thinking|mcp|osSandbox)/, // statics that moved off Env
+    ];
+    const roots = ["lib", "tools", "bin", "providers"];
+    const walk = (dir) => readdirSync(dir).flatMap((entry) => {
+      const file = join(dir, entry);
+      return statSync(file).isDirectory() ? walk(file) : [file];
+    });
+    const files = roots.flatMap((root) => walk(root))
+      .filter((file) => !file.startsWith(join("lib", "env") + "/") && file !== join("lib", "env.js"))
+      .filter((file) => file.endsWith(".js") || (file.startsWith("bin/") && !/\.[a-z]+$/.test(file)));
+    const offenders = [];
+    for (const file of files) {
+      const lines = readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, index) => {
+        for (const pattern of LEAKS) if (pattern.test(line)) offenders.push(`${file}:${index + 1}: ${line.trim()}`);
+      });
     }
     expect(offenders).toEqual([]);
   });
@@ -254,7 +280,7 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
   });
 
   test("each façade publishes its canonical namespace and Agent/application entries assemble explicit variants", async () => {
-    const expected = { context: "Context", env: "Env", io: "IO", agent: "Agent", cli: "CLI", jobs: "Jobs", app: "App" };
+    const expected = { sandbox: "Sandbox", context: "Context", env: "Env", io: "IO", agent: "Agent", cli: "CLI", jobs: "Jobs", app: "App" };
     for (const [file, name] of Object.entries(expected)) {
       const module = await import(`../lib/${file}.js`);
       expect(module.default?.name, `lib/${file}.js default namespace`).toBe(name);

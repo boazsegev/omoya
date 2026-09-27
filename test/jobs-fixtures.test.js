@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import Jobs from "../lib/jobs.js";
+import { jobsPaths } from "../lib/jobs/paths.js";
+import { parseTasks } from "../lib/jobs/tasks.js";
 
 const FIXTURES = "test/fixtures/jobs";
 const TASK_NAMES = ["plain", "recurring", "disabled", "malformed", "duplicate first", "duplicate second"];
@@ -19,8 +21,8 @@ async function source(index, name) {
 async function fixture() {
   const root = await fs.realpath(await fs.mkdtemp("./ai-tmp/jobs-fixtures-"));
   roots.push(root);
-  await Jobs.initializeJobs(root);
-  const paths = Jobs.jobsPaths(root);
+  await Jobs.init(root);
+  const paths = jobsPaths(root);
   await Promise.all(TASK_NAMES.map(async (name, index) => fs.writeFile(join(paths.tasks, `${name}.md`), await source(index, name))));
   return { root, paths };
 }
@@ -28,7 +30,7 @@ async function fixture() {
 describe("reusable jobs Markdown fixtures", () => {
   test("parsing keeps valid recurring metadata, pauses disabled tasks and rejects both duplicate IDs", async () => {
     const entries = await Promise.all(TASK_NAMES.map(async (name, index) => ({ filename: `${name}.md`, source: await source(index, name) })));
-    const parsed = Jobs.parseTasks(entries);
+    const parsed = parseTasks(entries);
     expect(parsed.tasks.map((task) => task.id)).toEqual(["plain.md", "recurring-report", "paused-report"]);
     expect(parsed.tasks[1]).toMatchObject({ schedule: { kind: "every", milliseconds: 3600000 }, tools: ["read"], timeout: 300000 });
     expect(parsed.tasks[2].enabled).toBe(false);
@@ -44,20 +46,22 @@ describe("reusable jobs Markdown fixtures", () => {
     const ran = [];
     const options = {
       clock,
-      validate: (project) => Jobs.validateJobsOperational(project),
+      validate: (project) => Jobs.validate(project),
       executor: async (task) => { ran.push(task); return { outcome: "completed" }; },
     };
-    const first = await Jobs.dispatchJobs(root, options);
+    const first = await Jobs.run(root, options);
     expect(first.outcomes).toHaveLength(2);
     expect(ran.map((task) => task.id).sort()).toEqual(["plain.md", "recurring-report"]);
     expect(await fs.readFile(collision, "utf8")).toBe(archived);
     const archiveDate = localDate(options.clock());
     expect((await fs.readdir(paths.completed)).sort()).toEqual([`${archiveDate} 000 plain.md`, `${archiveDate} 001 plain.md`]);
     expect((await fs.readdir(paths.tasks)).sort()).toEqual(["disabled.md", "duplicate first.md", "duplicate second.md", "malformed.md", "recurring.md"]);
-    const diagnostics = await fs.readdir(paths.errors);
-    expect(diagnostics).toHaveLength(1);
-    expect(await fs.readFile(join(paths.errors, diagnostics[0]), "utf8")).not.toContain("enabled");
-    expect((await Jobs.dispatchJobs(root, options)).outcomes).toEqual([]);
-    expect((await Jobs.dispatchJobs(root, { ...options, clock: () => options.clock() + 3600000 })).outcomes).toEqual([{ id: "recurring-report", outcome: "completed" }]);
+    // One readable log for the day names every rejected task file.
+    expect(first.log).toBe(`ai-jobs/errors/${archiveDate}.md`);
+    expect(await fs.readdir(paths.errors)).toEqual([`${archiveDate}.md`]);
+    const log = await fs.readFile(join(root, first.log), "utf8");
+    for (const file of ["malformed.md", "duplicate first.md", "duplicate second.md"]) expect(log).toContain(`— ${file} — `);
+    expect((await Jobs.run(root, options)).outcomes).toEqual([]);
+    expect((await Jobs.run(root, { ...options, clock: () => options.clock() + 3600000 })).outcomes).toEqual([{ id: "recurring-report", outcome: "completed" }]);
   });
 });

@@ -80,8 +80,9 @@ async function main() {
     return;
   }
   const result = await App.TUI.run(launchState(args));
-  if (result.session) process.stderr.write(`session: ${result.session.id} (resume with: ${program} --resume ${result.session.id})\n`);
-  else process.stderr.write("session: anonymous (not persisted)\n");
+  // only a logged session has a file to resume
+  if (result.session?.save) process.stderr.write(`session: ${result.session.id} (resume with: ${program} --resume ${result.session.id})\n`);
+  else if (result.session) process.stderr.write(`session: ${result.session.summary}\n`);
   process.exitCode = result.code;
 }
 

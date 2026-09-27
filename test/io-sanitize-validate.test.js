@@ -3,7 +3,9 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
-import { IO, sanitizeRequest, ProviderError } from "../lib/io.js";
+import { IO, ProviderError } from "../lib/io.js";
+import { sanitizeRequest } from "../lib/io/sanitize.js";
+import { providerAdd } from "./env-internals.js";
 
 let dir, env;
 beforeEach(() => {
@@ -42,8 +44,8 @@ function providerWithEvents(events) {
   };
 }
 function makeIO(events) {
-  env.registerProvider("fake", providerWithEvents(events));
-  env.endpoints.fake = { provider: "fake", url: "test://fake" };
+  providerAdd(env, "fake", providerWithEvents(events));
+  env._endpoints.fake = { provider: "fake", url: "test://fake" };
   return new IO({ env, model: "fake/m" });
 }
 
@@ -68,6 +70,7 @@ describe("response validator", () => {
     expect(terminal.usage.source).toBe("provider");
   });
   test("nil translator results are skipped", async () => {
-    expect((await makeIO([null, false, undefined]).write([{ type: 2, content: [] }])).type).toBe("done");
+    const terminal = await makeIO([null, false, undefined, { type: "text_delta", contentIndex: 0, text: "ok" }]).write([{ type: 2, content: [] }]);
+    expect(terminal.type).toBe("done");
   });
 });

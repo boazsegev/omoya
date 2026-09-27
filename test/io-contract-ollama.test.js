@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Env } from "../lib/env.js";
 import { IO } from "../lib/io.js";
-import { isResponseEvent } from "../lib/context.js";
-import { isMessage } from "../lib/context.js";
+import { eventValid } from "../lib/context.js";
+import { messageValid } from "../lib/context.js";
+import { providerOf, providersLoad } from "./env-internals.js";
 
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -38,17 +39,20 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
       cwd: dir,
       settings: { providers: { ollama: { provider: "ollama", url: "http://mock" } } },
     });
-    await env.loadProviders({ dirs: [join(PACKAGE_ROOT, "providers")], detect: false });
+    await providersLoad(env, { dirs: [join(PACKAGE_ROOT, "providers")], detect: false });
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("Env scan-load registers ollama from the package providers dir", async () => {
     const pkgEnv = new Env({ dir: PACKAGE_ROOT });
-    const names = await pkgEnv.loadProviders();
+    const names = await providersLoad(pkgEnv);
     expect(names).toContain("ollama");
-    const Ollama = pkgEnv.provider("ollama");
-    for (const method of ["context2msg", "msg2events", "send", "read", "close", "models", "login"]) {
+    const Ollama = providerOf(pkgEnv, "ollama");
+    for (const method of ["context2msg", "msg2events"]) {
       expect(typeof Ollama.prototype[method]).toBe("function");
+    }
+    for (const method of ["models", "login", "testConnection", "detect"]) {
+      expect(typeof Ollama[method]).toBe("function");
     }
     expect(Ollama.provider.capabilities).toMatchObject({ tools: true, streaming: true });
   });
@@ -68,11 +72,11 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
     );
 
     expect(events.length).toBeGreaterThan(0);
-    for (const event of events) expect(isResponseEvent(event)).toBe(true);
+    for (const event of events) expect(eventValid(event)).toBe(true);
 
     // terminal envelope: valid message, provider usage, native metadata
     expect(terminal.type).toBe("done");
-    expect(isMessage(terminal.message)).toBe(true);
+    expect(messageValid(terminal.message)).toBe(true);
     expect(terminal.message.type).toBe(3);
     expect(terminal.message.content).toEqual([{ type: "text", text: "The answer is 42." }]);
     expect(terminal.usage).toEqual({ inputTokens: 9, outputTokens: 5, source: "provider" });
@@ -90,7 +94,7 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
   });
 
   test("tool round trip: request schema out, normalized toolCall back", async () => {
-    env.registerTool("file-read", () => {}, {
+    env.toolAdd("file-read", () => {}, {
       description: "read a file",
       inputSchema: { type: "object", properties: { path: { type: "string" } } },
     });
@@ -134,7 +138,7 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
 
   test("metadata passthrough: native frame data rides the terminal event", async () => {
     mock.handler = () =>
-      ndjson([{ message: { role: "assistant", content: "" }, done: true, done_reason: "stop", eval_count: 1, prompt_eval_count: 1 }]);
+      ndjson([{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop", eval_count: 1, prompt_eval_count: 1 }]);
     const aiio = new IO({ env, model: "ollama/m", url: "http://mock" });
     const terminal = await aiio.write([{ type: 2, content: [] }]);
     expect(terminal.doneReason).toBe("stop");

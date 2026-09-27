@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Env } from "../lib/env.js";
 import { renderSettingsTemplate, writeSettingsTemplate } from "../lib/cli.js";
 import { parseJsonc } from "../lib/env/jsonc.js";
+import { toolsLoad } from "./env-internals.js";
 
 let dir;
 beforeEach(() => {
@@ -20,9 +21,9 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 describe("renderSettingsTemplate", () => {
   test("every schema key appears, commented out, and the whole file parses as JSONC to {}", async () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
-    await env.loadTools({ dirs: ["./tools"] }); // so mcp's own contribution is included
+    await toolsLoad(env, { dirs: ["./tools"] }); // so mcp's own contribution is included
     const text = renderSettingsTemplate(env);
-    const schema = env.defaultsSchema();
+    const schema = env.settingsSchema();
     for (const key of Object.keys(schema)) {
       expect(text).toContain(`// ${JSON.stringify(key)}:`);
     }
@@ -52,7 +53,7 @@ describe("the tui wrapper --init", () => {
 describe("writeSettingsTemplate", () => {
   test("writes the namespaced project settings file into env.cwd", async () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     const file = writeSettingsTemplate(env);
     expect(file).toBe(join(dir, NAMES.projectSettings));
     expect(existsSync(file)).toBe(true);
@@ -61,7 +62,7 @@ describe("writeSettingsTemplate", () => {
 
   test("refuses to overwrite an existing file unless force", async () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
-    await env.loadTools({ dirs: ["./tools"] });
+    await toolsLoad(env, { dirs: ["./tools"] });
     writeSettingsTemplate(env);
     expect(() => writeSettingsTemplate(env)).toThrow(/already exists/);
     expect(() => writeSettingsTemplate(env, { force: true })).not.toThrow();

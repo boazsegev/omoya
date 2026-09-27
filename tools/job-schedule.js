@@ -1,5 +1,4 @@
-import { toolRevision } from "../lib/tool-runtime.js";
-const { scheduleJobs, validateJobsOperational } = await import(`../lib/jobs/operations.js?now=${toolRevision()}`);
+import Jobs from "../lib/jobs.js";
 
 function scalar(value) { return JSON.stringify(value); }
 function validateSchedule(value) {
@@ -40,7 +39,7 @@ async function authoredCommand(env, args, context) {
   if (!["create", "update"].includes(args.action)) return args;
   let metadata = {}, prompt;
   if (args.action === "update") {
-    const current = await scheduleJobs(env.cwd, { action: "read", filename: args.filename }, context);
+    const current = await Jobs.schedule(env.cwd, { action: "read", filename: args.filename }, context);
     metadata = { ...current.task.metadata }; prompt = current.task.prompt;
   }
   if (args.prompt !== undefined) prompt = args.prompt;
@@ -58,7 +57,7 @@ async function authoredCommand(env, args, context) {
 async function available(env, context) {
   if (!env?.cwd || context?.agent?.safe === true) return false;
   try {
-    await validateJobsOperational(env.cwd, { settings: env.settings?.jobs ?? {}, cwd: env.cwd, ...(context?.agent ? { folder: context.agent.folder } : {}) });
+    await Jobs.validate(env.cwd, { settings: env.settings?.jobs ?? {}, cwd: env.cwd, ...(context?.agent ? { folder: context.agent.folder } : {}) });
     return true;
   } catch { return false; }
 }
@@ -69,7 +68,7 @@ export async function jobSchedule(args, context = {}) {
   if (!env?.cwd) throw new Error("job-schedule requires a project environment");
   if (agent?.safe === true) throw new Error("job-schedule is unavailable to read-only Agents");
   const options = { settings: env.settings?.jobs ?? {}, cwd: env.cwd, ...(agent ? { folder: agent.folder } : {}) };
-  const result = await scheduleJobs(env.cwd, await authoredCommand(env, args, { ...options, agent }), options);
+  const result = await Jobs.schedule(env.cwd, await authoredCommand(env, args, { ...options, agent }), options);
   return result;
 }
 export { jobSchedule as "job-schedule" };

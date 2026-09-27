@@ -3,8 +3,10 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { defaultSettingsDir } from "../lib/env/paths.js";
 import { join, resolve } from "node:path";
-import { Env, deepMerge } from "../lib/env.js";
+import { Env } from "../lib/env.js";
+import { deepMerge } from "../lib/env/settings.js";
 import { NAMES } from "../lib/namespace.js";
+import { authSetOf, endpointOf, scope, toolRoots } from "./env-internals.js";
 
 const projectAuth = (name) => `${NAMES.projectAuthPrefix}${name}.json`;
 
@@ -68,10 +70,10 @@ describe("scan-and-merge", () => {
   });
 
   test("arrays concatenate across files", () => {
-    writeJson("a.json", { tools: ["./tools-a"] });
-    writeJson("b.json", { tools: ["./tools-b", "./tools-c"] });
+    writeJson("a.json", { tools: { folders: ["./tools-a"] } });
+    writeJson("b.json", { tools: { folders: ["./tools-b", "./tools-c"] } });
     const env = new Env({ dir, cwd: dir });
-    expect(env.settings.tools).toEqual(["./tools-a", "./tools-b", "./tools-c"]);
+    expect(env.settings.tools.folders).toEqual(["./tools-a", "./tools-b", "./tools-c"]);
   });
 
   test("settings.json parse failure crashes the load (fail fast)", () => {
@@ -81,12 +83,13 @@ describe("scan-and-merge", () => {
 
   test("settings.json may hold // and /* */ comments (JSONC — see lib/env/jsonc.js)", () => {
     writeJson("settings.json", `{
-      // "toolTimeout": 120000,
+      // "tools": { "timeout": 120000 },
       "maxActive": 4, /* keep it modest */
       "ollama": { "url": "http://localhost:11434" } // trailing note
     }`);
     const env = new Env({ dir, cwd: dir });
-    expect(env.settings).toEqual({ maxActive: 4, ollama: { url: "http://localhost:11434" } });
+    expect(env.settings).toMatchObject({ maxActive: 4, ollama: { url: "http://localhost:11434" } });
+    expect(env.settings.tools.timeout).toBe(120_000); // the commented-out line stays a comment (the default reads)
   });
 
   test("other files' parse failures are ignored", () => {
@@ -102,7 +105,8 @@ describe("scan-and-merge", () => {
     writeJson("scalar.json", "42");
     writeJson("settings.json", { ok: 1 });
     const env = new Env({ dir, cwd: dir });
-    expect(env.settings).toEqual({ ok: 1 });
+    expect(env.settings.ok).toBe(1);
+    expect(Object.keys(env.settings).filter((key) => /^\d+$/.test(key))).toEqual([]); // the array never merged
   });
 
   test("explicit arguments override merged settings", () => {
@@ -140,7 +144,7 @@ describe("the scanning layers (package → settings folder → namespaced projec
     const original = Env._loadThemes;
     try {
       Env._loadThemes = false;
-      expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui).toBeUndefined();
+      expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toEqual({}); // the default
 
       Env._loadThemes = true;
       expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toMatchObject({
@@ -160,7 +164,7 @@ describe("the scanning layers (package → settings folder → namespaced projec
     writeFileSync(join(user, "settings.json"), JSON.stringify({ b: 2, shared: { u: 2 } }));
     writeFileSync(join(user, "auth-ep.json"), JSON.stringify({ ep: { token: "t" } }));
     const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
-    expect(env.settingsDir).toBe(user);
+    expect(env._settingsDir).toBe(user);
     expect(env.settings.a).toBe(1);
     expect(env.settings.b).toBe(2);
     expect(env.settings.shared).toEqual({ p: 1, u: 2 }); // deep-merged across layers
@@ -180,7 +184,7 @@ describe("the scanning layers (package → settings folder → namespaced projec
     expect(env.settings.lp.token).toBe("lt");
     expect(env.settings.ignored).toBeUndefined();
     expect(env.settings.ignored2).toBeUndefined();
-    expect(env.endpointScope("lp")).toBe("local"); // project settings scope is local
+    expect(scope(env, "lp")).toBe("local"); // project settings scope is local
   });
 
   test("JSON scanning is NEVER recursive — nested settings/auth files are private data, never loaded", () => {
@@ -205,7 +209,7 @@ describe("the scanning layers (package → settings folder → namespaced projec
     expect(env.settings.lp).toBeUndefined();
   });
 
-  test("project-scoped `tools`, `mcp` and `providerPaths` are STRIPPED at load (executable trust)", () => {
+  test("project-scoped `tools.folders`, `mcp` and `providerPaths` are STRIPPED at load (executable trust)", () => {
     // SECURITY: the project's settings file is agent-writable — it
     // must never name tool roots, unsandboxed server commands or
     // provider classes (the same keys in package/settings scope are
@@ -213,14 +217,15 @@ describe("the scanning layers (package → settings folder → namespaced projec
     const pkg = mk("pkg");
     const project = mk("project");
     writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({
-      tools: ["./x"],
+      tools: { folders: ["./x"], timeout: 30_000, timeoutLimit: 90_000, concurrency: 2 },
       mcp: { evil: { command: "curl" } },
       providerPaths: ["./y"],
       other: 1,
     }));
     const env = new Env({ dir: pkg, settingsDir: null, cwd: project });
-    expect(env.settings.tools).toBeUndefined();
-    expect(env.settings.mcp).toBeUndefined();
+    expect(env.settings.tools).toMatchObject({ timeout: 30_000, timeoutLimit: 90_000, concurrency: 2 });
+    expect(env.settings.tools.folders).toEqual([]); // stripped: only the default reads
+    expect(env.settings.mcp).toEqual({}); // stripped: only the default reads
     expect(env.settings.providerPaths).toBeUndefined();
     expect(env.settings.other).toBe(1); // the rest merges normally
   });
@@ -230,21 +235,56 @@ describe("the scanning layers (package → settings folder → namespaced projec
     const project = mk("project");
     writeFileSync(join(project, projectAuth("evil")), JSON.stringify({
       evil: { provider: "openai", url: "https://example.test" },
-      tools: ["./evil-tools"],
+      tools: { folders: ["./evil-tools"], timeout: 25_000 },
       providerPaths: ["./evil-providers"],
       mcp: { evil: { command: "evil-command" } },
     }));
     const env = new Env({ dir: pkg, settingsDir: null, cwd: project });
-    expect(env.endpoint("evil")).toMatchObject({ provider: "openai", url: "https://example.test" });
-    expect(env.settings.tools).toBeUndefined();
+    expect(endpointOf(env, "evil")).toMatchObject({ provider: "openai", url: "https://example.test" });
+    expect(env.settings.tools).toMatchObject({ timeout: 25_000 });
+    expect(env.settings.tools.folders).toEqual([]);
     expect(env.settings.providerPaths).toBeUndefined();
-    expect(env.settings.mcp).toBeUndefined();
+    expect(env.settings.mcp).toEqual({}); // stripped: only the default reads
+  });
+
+  for (const sourceFile of [NAMES.projectSettings, projectAuth("evil")]) {
+    test(`${sourceFile} preserves trusted folders while applying project tool policy`, () => {
+      const pkg = mk("pkg");
+      const user = mk("user");
+      const project = mk("project");
+      writeFileSync(join(pkg, "settings.json"), JSON.stringify({ tools: { folders: ["./package-tools"], timeout: 120_000 } }));
+      writeFileSync(join(user, "settings.json"), JSON.stringify({ tools: { folders: ["./user-tools"], concurrency: 3 } }));
+      writeFileSync(join(project, sourceFile), JSON.stringify({ tools: { folders: ["./evil-tools"], timeout: 30_000, concurrency: 2 } }));
+      const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+      expect(env.settings.tools).toMatchObject({ folders: ["./package-tools", "./user-tools"], timeout: 30_000, concurrency: 2 });
+    });
+
+    for (const tools of [null, false, "./evil", ["./evil"], { folders: null }, JSON.parse('{"__proto__":{"folders":["./evil"]},"constructor":{"prototype":{"folders":["./evil"]}}}')]) {
+      test(`${sourceFile} cannot replace or prototype-smuggle trusted folders via ${JSON.stringify(tools)}`, () => {
+        const pkg = mk("pkg");
+        const project = mk("project");
+        writeFileSync(join(pkg, "settings.json"), JSON.stringify({ tools: { folders: ["./trusted"], timeout: 120_000 } }));
+        writeFileSync(join(project, sourceFile), JSON.stringify({ tools }));
+        const env = new Env({ dir: pkg, settingsDir: null, cwd: project });
+        expect(env.settings.tools).toMatchObject({ folders: ["./trusted"], timeout: 120_000 });
+        expect(toolRoots(env)).not.toContain("./evil");
+      });
+    }
+  }
+
+  test("top-level prototype keys in project settings cannot smuggle tool folders", () => {
+    const pkg = mk("pkg");
+    const project = mk("project");
+    writeFileSync(join(project, NAMES.projectSettings), '{"__proto__":{"tools":{"folders":["./evil"]}}}');
+    const env = new Env({ dir: pkg, settingsDir: null, cwd: project });
+    expect(env.settings.tools.folders).toEqual([]); // only the default
+    expect(toolRoots(env)).not.toContain("./evil");
   });
 
   test("settingsDir: null disables the user layer", () => {
     const pkg = mk("pkg");
     const env = new Env({ dir: pkg, settingsDir: null, cwd: pkg });
-    expect(env.settingsDir).toBe(null);
+    expect(env._settingsDir).toBe(null);
   });
 
   test("a folder already scanned under an earlier layer is never scanned twice", () => {
@@ -267,32 +307,32 @@ describe("the scanning layers (package → settings folder → namespaced projec
     expect(env.settings.ok).toBe(1);
   });
 
-  test("dynamic writes land in the settings folder, never the package folder", () => {
+  test("dynamic writes land in the settings folder, never the package folder", async () => {
     const pkg = mk("pkg");
     const user = mk("user");
     const env = new Env({ dir: pkg, settingsDir: user, cwd: pkg });
-    env.authSet("ep", { token: "t" });
+    authSetOf(env, "ep", { token: "t" });
     expect(existsSync(join(user, "auth-ep.json"))).toBe(true);
     expect(existsSync(join(pkg, "auth-ep.json"))).toBe(false);
-    env.saveEndpoint("ep2", { provider: "x", url: "u" });
-    expect(existsSync(join(user, "auth-ep2.json"))).toBe(true);
+    env.settings.providers.ep2 = { provider: "x", url: "u" };
+    await Promise.resolve(); // settings writes coalesce per tick
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8")).providers.ep2).toEqual({ provider: "x", url: "u" });
     expect(existsSync(join(pkg, "settings.json"))).toBe(false);
-    // a LOCAL scope write uses the project's namespaced files
-    env.authSet("lp", { token: "lt" }, { scope: "local" });
+    // a LOCAL scope auth write uses the project's namespaced files
+    authSetOf(env, "lp", { token: "lt" }, { scope: "local" });
     expect(existsSync(join(pkg, projectAuth("lp")))).toBe(true); // cwd === pkg here
-    env.saveEndpoint("lp2", { provider: "x", url: "u" }, { scope: "local" });
-    expect(existsSync(join(pkg, NAMES.projectSettings))).toBe(true);
   });
 
-  test("saveEndpoint preserves unrelated settings and all endpoints across a batch", async () => {
+  test("settings writes preserve unrelated settings and all endpoints, one coalesced write", async () => {
     const pkg = mk("pkg");
     const user = mk("user");
     writeFileSync(join(user, "settings.json"), JSON.stringify({ keep: { value: 1 }, providers: { existing: { provider: "x", url: "http://old" } } }));
     const env = new Env({ dir: pkg, settingsDir: user, cwd: pkg });
-    await env.batch(() => {
-      env.saveEndpoint("first", { provider: "x", url: "http://first" });
-      env.saveEndpoint("second", { provider: "x", url: "http://second" });
-    });
+    env.settings.providers.first = { provider: "x", url: "http://first" };
+    env.settings.providers.second = { provider: "x", url: "http://second" };
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8")).providers.first).toBeUndefined(); // not yet: coalesced
+    await Promise.resolve();
+    expect(endpointOf(env, "second")).toEqual({ provider: "x", url: "http://second" }); // the live registry is the same record
     expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8"))).toEqual({
       keep: { value: 1 },
       providers: {
@@ -301,5 +341,89 @@ describe("the scanning layers (package → settings folder → namespaced projec
         second: { provider: "x", url: "http://second" },
       },
     });
+  });
+});
+
+describe("the settings view: defaults, derived values, and delta persistence", () => {
+  let root;
+  beforeEach(() => { root = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "settings-view-"))); });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+  const layers = () => {
+    const pkg = join(root, "pkg"), user = join(root, "user"), project = join(root, "project");
+    for (const dir of [pkg, user, project]) mkdirSync(dir, { recursive: true });
+    return { pkg, user, project };
+  };
+
+  test("a nested write changes only that key in the owning file; other layers stay byte-identical", async () => {
+    const { pkg, user, project } = layers();
+    writeFileSync(join(pkg, "settings.json"), JSON.stringify({ tui: { alt: true } }));
+    writeFileSync(join(user, "settings.json"), '{\n  "keep": [1, 2],\n  "tui": { "theme": "default", "cursor": { "blink": 450 } }\n}\n');
+    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ other: 1 }));
+    const before = { pkg: readFileSync(join(pkg, "settings.json"), "utf8"), project: readFileSync(join(project, NAMES.projectSettings), "utf8") };
+    const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+    env.settings.tui.cursor.blink = 900;
+    expect(env.settings.tui.cursor.blink).toBe(900); // the live view answers at once
+    await Promise.resolve();
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8"))).toEqual({
+      keep: [1, 2], tui: { theme: "default", cursor: { blink: 900 } },
+    });
+    expect(readFileSync(join(pkg, "settings.json"), "utf8")).toBe(before.pkg); // never the package folder
+    expect(readFileSync(join(project, NAMES.projectSettings), "utf8")).toBe(before.project);
+  });
+
+  test("the project file owns a path it already holds; a trusted-only key never lands there", async () => {
+    const { pkg, user, project } = layers();
+    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ tui: { alt: false } }));
+    const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+    env.settings.tui.alt = true;
+    env.settings.sessions_source = undefined; // an unknown key's delete is a no-op write
+    await Promise.resolve();
+    expect(JSON.parse(readFileSync(join(project, NAMES.projectSettings), "utf8"))).toEqual({ tui: { alt: true } });
+    expect(existsSync(join(user, "settings.json"))).toBe(false); // nothing else changed
+    expect(() => { env.settings.sessions = "elsewhere"; }).toThrow(/derived/);
+  });
+
+  test("reads apply schema defaults; settings.sessions is the resolved folder", () => {
+    const { pkg, user, project } = layers();
+    writeFileSync(join(user, "settings.json"), JSON.stringify({ tui: { theme: "mine" } }));
+    const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+    expect(env.settings.tui.theme).toBe("mine");
+    expect(env.settings.tui.cursor.shape).toBe("line"); // a default fills what no layer sets
+    expect(env.settings.modelAccess).toBe("all");
+    expect(env.settings.sessions).toBe(join(user, NAMES.sessionsDir));
+    expect(JSON.parse(JSON.stringify(env.settings.tui))).toMatchObject({ theme: "mine", alt: false });
+  });
+
+  test("global theme descends to each app, whose own setting overrides it independently", async () => {
+    const { pkg, user, project } = layers();
+    writeFileSync(join(user, "settings.json"), JSON.stringify({ theme: "night" }));
+    const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+    expect(env.settings.tui.theme).toBe("night");
+    expect(env.settings.web.theme).toBe("night");
+    env.settings.web.theme = "light";
+    expect(env.settings.tui.theme).toBe("night");
+    expect(env.settings.web.theme).toBe("light");
+    env.settings.tui.theme = "day";
+    expect(env.settings.tui.theme).toBe("day");
+    expect(env.settings.web.theme).toBe("light");
+    await Promise.resolve();
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8"))).toEqual({ theme: "night", tui: { theme: "day" }, web: { theme: "light" } });
+    delete env.settings.web.theme;
+    expect(env.settings.web.theme).toBe("night");
+    env.settings.theme = "dusk";
+    expect(env.settings.web.theme).toBe("dusk");
+    expect(env.settings.tui.theme).toBe("day");
+    await Promise.resolve();
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8"))).toEqual({ theme: "dusk", tui: { theme: "day" }, web: {} });
+  });
+
+  test("deleting a key removes it from memory and its owning file", async () => {
+    const { pkg, user, project } = layers();
+    writeFileSync(join(user, "settings.json"), JSON.stringify({ web: { theme: "dark", autocomplete: false } }));
+    const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
+    delete env.settings.web.theme;
+    expect(env.settings.web.theme).toBe("system"); // the default answers again
+    await Promise.resolve();
+    expect(JSON.parse(readFileSync(join(user, "settings.json"), "utf8"))).toEqual({ web: { autocomplete: false } });
   });
 });

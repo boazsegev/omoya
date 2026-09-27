@@ -7,19 +7,18 @@
  * see SECURITY.md. The `read` tool does reject symlinks directly.
  */
 
-import { spawn } from "node:child_process";
+import Sandbox from "../lib/sandbox.js";
 // The tiny MCP-runtime module carries the shared tool revision: Bun
 // resolves it to ONE instance across cache-busted imports, so this
 // tool stamps its helper imports WITHOUT loading the whole library —
 // a forked sandbox worker stays process + jail + settings + this file.
 import { toolRevision } from "../lib/tool-runtime.js";
+import { childEnv } from "../lib/util.js";
 
 const timestamp = toolRevision();
 const { findCommandTraversal } = await import(`./guard/paths.js?now=${timestamp}`);
-const { childEnv } = await import(`./guard/env.js?now=${timestamp}`);
 
 const MAX_OUTPUT = 50_000;
-const ACTIVE_CHILDREN = new Set();
 const CD_WORDS = new Set(["cd"]);
 const LINK_WORDS = new Set(["ln"]);
 const PREFIX_WORDS = new Set(["command", "builtin", "exec", "env", "time", "nice", "sudo", "xargs"]);
@@ -76,19 +75,17 @@ export async function bash({ command, env } = {}, context) {
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn("bash", ["-c", command], {
+      child = (context?.sandbox ?? Sandbox).spawn("bash", ["-c", command], {
         cwd, env: childEnv(context?.env?.settings, env),
-        stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" && context?.detached !== false,
+        stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) { reject(error); return; }
-    ACTIVE_CHILDREN.add(child);
     let stdout = "";
     let stderr = "";
     let settled = false;
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
-      ACTIVE_CHILDREN.delete(child);
       fn(value);
     };
     // LIVE STREAMING: complete output lines ride to the binding
@@ -120,20 +117,11 @@ export async function bash({ command, env } = {}, context) {
   });
 }
 
-export function onTimeout() {
-  for (const child of ACTIVE_CHILDREN) {
-    try {
-      if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-      else child.kill("SIGKILL");
-    } catch { try { child.kill("SIGKILL"); } catch {} }
-  }
-}
-
 export function toolDescription() {
   return { bash: {
     // The worker relays complete output records through its one-way stderr
     // protocol, so bash remains forked and OS-sandboxed while streaming.
-    sandbox: true, onTimeout,
+    sandbox: true,
     description: "Run a Bash command in the working folder; return output and any exit code. Prefer read to inspect folders.",
     inputSchema: { type: "object", properties: {
       command: { type: "string", description: "The bash command line to run (no cd or ln; every visible path argument must stay inside the working folder)" },

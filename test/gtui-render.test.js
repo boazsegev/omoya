@@ -1,6 +1,6 @@
 // test/gtui-render.test.js — proof for lib/app/gtui/render.js: DEAD CODE
-// (see AI-GTUI.md) — a Buffer's diff turned into ANSI bytes: one CUP
-// per changed run, coalesced SGR, wide-grapheme continuation cells
+// (see AI-GTUI.md) — a Buffer's diff turned into ANSI bytes: each changed
+// row repainted from column one and closed with EL, coalesced SGR, wide-grapheme continuation cells
 // skipped, and the real terminal cursor placed/hidden per
 // buffer.cursor.
 import { describe, expect, test } from "bun:test";
@@ -11,7 +11,7 @@ import { BOLD } from "../lib/app/gtui/cell.js";
 const CURSOR_HIDE = "\x1b[?25l"; // every content-changing paint re-asserts cursor state — hidden by default
 
 describe("renderDiff", () => {
-  test("null prev: the whole (non-blank) content prints from one CUP, opening with a bare reset (no color/attrs codes) when unstyled", () => {
+  test("null prev: the visible content prints from one CUP, then erases the rest of the row, opening with a bare reset (no color/attrs codes) when unstyled", () => {
     const buf = createBuffer(5, 1);
     buf.text(0, 0, "hi");
     // row diffs as ONE run incl. trailing blanks; the run OPENS with a
@@ -19,7 +19,7 @@ describe("renderDiff", () => {
     // it never trusts leftover SGR state from an unrelated prior write);
     // content changed, so the frame ALSO re-asserts cursor state (hidden,
     // since buffer.cursor was never set)
-    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0mhi   ${CURSOR_HIDE}`);
+    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0mhi\x1b[K${CURSOR_HIDE}`);
   });
 
   test("no changes against an identical prev, cursor unmoved (both hidden): empty output", () => {
@@ -30,30 +30,30 @@ describe("renderDiff", () => {
     expect(renderDiff(a, b)).toBe("");
   });
 
-  test("a single changed cell mid-row: one CUP at that column, just that glyph", () => {
+  test("a single changed cell mid-row repaints the whole row from column one", () => {
     const before = createBuffer(5, 1);
     before.text(0, 0, "abcde");
     const after = createBuffer(5, 1);
     after.text(0, 0, "abcde");
     after.set(2, 0, "X");
-    expect(renderDiff(after, before)).toBe(`\x1b[1;3H\x1b[0mX${CURSOR_HIDE}`);
+    expect(renderDiff(after, before)).toBe(`\x1b[1;1H\x1b[0mabXde${CURSOR_HIDE}`);
   });
 
-  test("two separate changed spans on one row: two CUPs, each its own run", () => {
+  test("two separate changed spans on one row: still ONE CUP and one row repaint", () => {
     const before = createBuffer(6, 1);
     before.text(0, 0, "aaaaaa");
     const after = createBuffer(6, 1);
     after.text(0, 0, "aaaaaa");
     after.set(0, 0, "X");
     after.set(4, 0, "Y");
-    expect(renderDiff(after, before)).toBe(`\x1b[1;1H\x1b[0mX\x1b[1;5H\x1b[0mY${CURSOR_HIDE}`);
+    expect(renderDiff(after, before)).toBe(`\x1b[1;1H\x1b[0mXaaaYa${CURSOR_HIDE}`);
   });
 
   test("a changed run on row 2 gets a 1-based CUP matching its row", () => {
     const before = createBuffer(3, 3);
     const after = createBuffer(3, 3);
     after.set(1, 2, "z");
-    expect(renderDiff(after, before)).toBe(`\x1b[3;2H\x1b[0mz${CURSOR_HIDE}`);
+    expect(renderDiff(after, before)).toBe(`\x1b[3;1H\x1b[0m z\x1b[K${CURSOR_HIDE}`);
   });
 
   test("a styled cell opens SGR before it, and the run resets AS SOON AS it returns to the default style", () => {
@@ -61,7 +61,7 @@ describe("renderDiff", () => {
     buf.set(0, 0, "x", { fg: 208, attrs: BOLD });
     // "x" is styled; the two trailing blanks are plain — the reset lands
     // right after "x" (a style-change boundary), not deferred to the run's end
-    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0m\x1b[1;38;5;208mx\x1b[0m  ${CURSOR_HIDE}`);
+    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0m\x1b[1;38;5;208mx\x1b[0m\x1b[K${CURSOR_HIDE}`);
   });
 
   test("a style change WITHIN a run emits SGR only where it actually changes (coalesced)", () => {
@@ -79,7 +79,7 @@ describe("renderDiff", () => {
     const buf = createBuffer(4, 1);
     buf.set(0, 0, "日"); // width 2 — claims a continuation cell at column 1
     buf.set(2, 0, "x");
-    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0m日x ${CURSOR_HIDE}`);
+    expect(renderDiff(buf, null)).toBe(`\x1b[1;1H\x1b[0m日x\x1b[K${CURSOR_HIDE}`);
   });
 
   test("a run of cells sharing one url coalesces into ONE OSC 8 hyperlink span, closed where the url ends", () => {
@@ -89,7 +89,7 @@ describe("renderDiff", () => {
     // one open, one close — never per-cell
     expect(out.match(/\x1b\]8;;https:\/\/x\x1b\\/g)).toHaveLength(1);
     expect(out.match(/\x1b\]8;;\x1b\\/g)).toHaveLength(1);
-    expect(out).toBe(`\x1b[1;1H\x1b]8;;https://x\x1b\\\x1b[0mgo\x1b]8;;\x1b\\  ${CURSOR_HIDE}`);
+    expect(out).toBe(`\x1b[1;1H\x1b]8;;https://x\x1b\\\x1b[0mgo\x1b]8;;\x1b\\\x1b[K${CURSOR_HIDE}`);
   });
 
   test("the link closes exactly where the url changes, even mid-run", () => {
@@ -97,7 +97,7 @@ describe("renderDiff", () => {
     buf.set(0, 0, "a", { url: "https://x" });
     buf.set(1, 0, "b"); // no link, same (default) style as "a" — no new SGR needed
     const out = renderDiff(buf, null);
-    expect(out).toBe(`\x1b[1;1H\x1b]8;;https://x\x1b\\\x1b[0ma\x1b]8;;\x1b\\b  ${CURSOR_HIDE}`);
+    expect(out).toBe(`\x1b[1;1H\x1b]8;;https://x\x1b\\\x1b[0ma\x1b]8;;\x1b\\b\x1b[K${CURSOR_HIDE}`);
   });
 });
 
@@ -106,7 +106,7 @@ describe("renderDiff: cursor", () => {
     const buf = createBuffer(5, 1);
     buf.text(0, 0, "hi");
     buf.setCursor(2, 0);
-    expect(renderDiff(buf, null)).toBe("\x1b[1;1H\x1b[0mhi   \x1b[1;3H\x1b[?25h");
+    expect(renderDiff(buf, null)).toBe("\x1b[1;1H\x1b[0mhi\x1b[K\x1b[1;3H\x1b[?25h");
   });
 
   test("the cursor moving alone (no cell changed) still repaints — just the cursor bytes", () => {

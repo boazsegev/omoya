@@ -7,9 +7,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
-import { Env, osSandboxKind } from "../lib/env.js";
+import { Env } from "../lib/env.js";
+import Sandbox from "../lib/sandbox.js";
+import { toolEntry, toolSchemas, toolsLoad } from "./env-internals.js";
+const osSandboxKind = () => Sandbox.osKind();
 import { Agent } from "../lib/agent.js";
-import { callToolSandboxed } from "../lib/agent.js";
+import { callToolSandboxed } from "../lib/agent/tool-sandbox.js";
 import { scriptedIO, TOOLCALL, TEXT } from "./fakes.js";
 
 const FIXTURES = "./test/tool-fixtures";
@@ -23,11 +26,14 @@ async function fixtureEnv() {
   // control, neither touching anything outside the project.
   const dir = mkdtempSync("./ai-tmp/sandbox-");
   const env = new Env({ dir, cwd: dir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
-  await env.loadTools({ dirs: [FIXTURES] });
+  await toolsLoad(env, { dirs: [FIXTURES] });
   return env;
 }
 
-const toolResults = (agent) => agent.context.filter((m) => m.type === 4);
+/** A file tool's module file (its catalog entry's `file`). */
+const fileOf = (env, name) => toolEntry(env, name)?.file;
+
+const toolResults = (agent) => agent.context.messages().filter((m) => m.type === 4);
 
 describe("tool sandbox: crash-proof forked tool calls", () => {
   test("a tool that exits its process (exit 1) does NOT crush the Agent — fork is the default", async () => {
@@ -68,11 +74,13 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
         stderr: child.stderr,
         pid: child.pid,
         on: (event, cb) => child.on(event, cb),
+        once: (event, cb) => child.once(event, cb),
+        removeListener: (event, cb) => child.removeListener(event, cb),
         kill: (signal) => child.kill(signal),
       };
     };
     const result = await callToolSandboxed({
-      env, name: "noisy", args: {}, timeout: 20_000, spawnImpl: slowDrainSpawn,
+      env, name: "noisy", file: fileOf(env, "noisy"), args: {}, timeout: 20_000, spawnImpl: slowDrainSpawn,
     });
     expect(result).toEqual({ ok: true, value: "noisy done" });
   });
@@ -89,7 +97,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
     const [result] = toolResults(agent);
     expect(result).toMatchObject({ type: 4, error: true, name: "guardfail", callId: "c1" });
     // the payload the worker serialized rides back and appends as a System message
-    const systems = agent.context.filter((m) => m.type === 1);
+    const systems = agent.context.messages().filter((m) => m.type === 1);
     expect(systems.map((m) => m.content[0].text)).toContain("Stay in the current directory tree. Use relative path names only.");
   });
 
@@ -157,7 +165,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
     expect(agent._toolCall.timeout).toBe(2000);
   });
 
-  test("toolCall.async runs one message's calls CONCURRENTLY, results appended in order", async () => {
+  test("toolCall.async cannot overlap unmarked file tools, results append in order", async () => {
     const env = await fixtureEnv();
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "slow", { ms: 600 }), ...TOOLCALL(1, "c2", "slow", { ms: 600 }), DONE],
@@ -171,8 +179,8 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
     await agent.run({});
     const elapsed = Date.now() - started;
 
-    // sequential would be ≥ 2×600ms of sleep alone; concurrent is ~one
-    expect(elapsed).toBeLessThan(1_100);
+    // Neither tool declares safe:true, so the calls must not overlap.
+    expect(elapsed).toBeGreaterThanOrEqual(1_200);
     const results = toolResults(agent);
     expect(results.map((m) => m.callId)).toEqual(["c1", "c2"]); // call order preserved
     expect(results.map((m) => m.content[0].text)).toEqual(["slept 600ms", "slept 600ms"]);
@@ -196,9 +204,48 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
 });
 
 describe("callToolSandboxed (unit)", () => {
+  test("non-serializable arguments do not leave a forked worker waiting on stdin", async () => {
+    const env = await fixtureEnv();
+    const args = {};
+    args.self = args;
+    let child;
+    const spawnImpl = (file, argv, options) => {
+      child = spawn(file, argv, options);
+      return child;
+    };
+    try {
+      const result = await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args, spawnImpl });
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("worker setup failed") });
+      expect(child).toBeUndefined();
+    } finally {
+      child?.kill("SIGKILL");
+    }
+  });
+
+  test("successful and timed-out workers both close their process", async () => {
+    const env = await fixtureEnv();
+    for (const [ms, timeout, ok] of [[1, 3000, true], [30000, 200, false]]) {
+      let child;
+      const result = await callToolSandboxed({
+        env, name: "slow", file: fileOf(env, "slow"), args: { ms }, timeout,
+        spawnImpl: (file, argv, options) => (child = spawn(file, argv, options)),
+      });
+      try {
+        expect(result.ok).toBe(ok);
+        // timeout resolves immediately after SIGKILL; close may arrive on a later tick.
+        if (child.exitCode === null && child.signalCode === null) {
+          await Promise.race([new Promise((resolve) => child.once("close", resolve)), Bun.sleep(2000)]);
+        }
+        expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+      } finally {
+        child?.kill("SIGKILL");
+      }
+    }
+  }, 10000);
+
   test("an unknown tool is an ordinary error result, never a throw", async () => {
     const env = await fixtureEnv();
-    const result = await callToolSandboxed({ env, name: "no-such-tool", args: {} });
+    const result = await callToolSandboxed({ env, name: "no-such-tool", file: fileOf(env, "no-such-tool"), args: {} });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("unknown tool");
   });
@@ -207,9 +254,9 @@ describe("callToolSandboxed (unit)", () => {
 describe("sandbox: true — the shared OS write sandbox for any tool", () => {
   test("the registry carries the flag; the published catalog strips it", async () => {
     const env = await fixtureEnv();
-    expect(env.toolEntry("jailed").sandbox).toBe(true);
-    expect(env.toolEntry("slow").sandbox).toBeUndefined();
-    const published = env.toolSchemas().find((t) => t.name === "jailed");
+    expect(toolEntry(env, "jailed").sandbox).toBe(true);
+    expect(toolEntry(env, "slow").sandbox).toBeUndefined();
+    const published = toolSchemas(env).find((t) => t.name === "jailed");
     expect(published.sandbox).toBeUndefined(); // harness metadata never reaches the provider
     expect(published.description).toContain("TEST ONLY");
   });
@@ -236,11 +283,11 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     const folder = `${project}/agent`;
     mkdirSync(folder);
     const env = new Env({ dir: project, cwd: project, settings: {} });
-    await env.loadTools();
+    await toolsLoad(env);
     const agent = new Agent({ env });
-    agent.setFolder("agent");
+    agent.folderSet("agent");
     const result = await callToolSandboxed({
-      env, name: "write", args: { path: "../sibling.txt", content: "sibling" },
+      env, name: "write", file: fileOf(env, "write"), args: { path: "../sibling.txt", content: "sibling" },
       sandbox: true, cwd: agent.folder,
     });
     expect(result).toEqual({ ok: true, value: "Successfully wrote to ../sibling.txt" });
@@ -281,12 +328,12 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
       queueMicrotask(() => child.emit("close", 1)); // no result line: ordinary failure
       return child;
     };
-    const result = await callToolSandboxed({ env, name: "slow", args: {}, sandbox: true, spawnImpl });
+    const result = await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, spawnImpl });
     expect(result.ok).toBe(false); // the fake child produced no result
     const [call] = spawned;
     expect(call.options.detached).toBe(true);
-    await callToolSandboxed({ env, name: "slow", args: {}, sandbox: true, detached: false, spawnImpl });
-    expect(spawned[1].options.detached).toBe(false);
+    await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, detached: false, spawnImpl });
+    expect(spawned[1].options.detached).toBe(true); // dispatch teardown requires a process group
     expect(call.options.stdio).toEqual(["pipe", "pipe", "pipe", "pipe", "pipe"]);
     expect(call.options).toHaveProperty("detached");
     const kind = osSandboxKind();

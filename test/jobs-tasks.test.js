@@ -2,10 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import Jobs, { loadTasks, parseTask, parseTasks, taskDiagnosticKey, taskId, taskStateKey } from "../lib/jobs.js";
+import Jobs from "../lib/jobs.js";
+import { errorsLog, localStamp, messageLocal } from "../lib/jobs/errors.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
+import { parseTask, parseTasks, taskId, taskStateKey } from "../lib/jobs/tasks.js";
 
 const roots = [];
-async function fixture() { const root = await mkdtemp(join(tmpdir(), "jobs-tasks-")); roots.push(root); await Jobs.initializeJobs(root); return root; }
+async function fixture() { const root = await mkdtemp(join(tmpdir(), "jobs-tasks-")); roots.push(root); await Jobs.init(root); return root; }
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 function defaults(task, filename, prompt) {
   expect(task).toMatchObject({ id: filename, filename, prompt, enabled: true, schedule: { kind: "once" }, metadata: {} });
@@ -20,7 +23,7 @@ function defaults(task, filename, prompt) {
 
     const task = parseTask("ignored.md", "---\nid: stable-id\nenabled: false\nschedule: every 1w\ntools: [read, bash]\ntimeout: 5m\nmodel: fast\n---\nAct now.");
     expect(task).toMatchObject({ id: "stable-id", filename: "ignored.md", prompt: "Act now.", enabled: false, schedule: { kind: "every", every: "1w", milliseconds: 604800000 }, tools: ["read", "bash"], timeout: 300000, model: "fast" });
-    expect(task.diagnostics).toEqual([]); expect(Jobs.parseTask).toBe(parseTask);
+    expect(task.diagnostics).toEqual([]); expect(Jobs.parseTask).toBeUndefined();
   });
 
   test("normalizes structured calendar schedules independently of machine timezone", () => {
@@ -50,7 +53,7 @@ function defaults(task, filename, prompt) {
     for (const [name, field] of cases) {
       expect(() => parseTask(name + ".md", "---\nid: should-not-survive\nenabled: false\n" + field + "\n---\nPrompt")).toThrow();
       try { parseTask(name + ".md", "---\nid: should-not-survive\nenabled: false\n" + field + "\n---\nPrompt"); }
-      catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_SCHEDULE", details: { filename: name + ".md", reportable: true } }); }
+      catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_SCHEDULE", details: { filename: name + ".md" } }); }
     }
   });
 
@@ -68,7 +71,7 @@ function defaults(task, filename, prompt) {
   test("prioritizes credential rejection over unknown nested keys", () => {
     expect(() => parseTask("credential-first.md", "---\nsettings: {token: secret}\n---\nPrompt")).toThrow();
     try { parseTask("credential-first.md", "---\nsettings: {token: secret}\n---\nPrompt"); }
-    catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_CREDENTIAL", details: { filename: "credential-first.md", reportable: true } }); }
+    catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_CREDENTIAL", details: { filename: "credential-first.md" } }); }
   });
 
   test("blocks every malformed declared frontmatter class", () => {
@@ -82,12 +85,11 @@ function defaults(task, filename, prompt) {
     for (const [name, source, code] of cases) {
       expect(() => parseTask(`${name}.md`, source)).toThrow();
       try { parseTask(`${name}.md`, source); }
-      catch (error) { expect(error).toMatchObject({ code, details: { filename: `${name}.md`, reportable: true } }); }
+      catch (error) { expect(error).toMatchObject({ code, details: { filename: `${name}.md` } }); }
     }
   });
 
-  test("blocks and reports cyclic YAML aliases without losing valid siblings", async () => {
-    const root = await fixture();
+  test("blocks and reports cyclic YAML aliases without losing valid siblings", () => {
     const entries = [
       { filename: "object-cycle.md", source: "---\na: &a {self: *a}\n---\nObject body" },
       { filename: "array-cycle.md", source: "---\ntools: &a [*a]\n---\nArray body" },
@@ -96,18 +98,9 @@ function defaults(task, filename, prompt) {
     const parsed = parseTasks(entries);
     expect(parsed.tasks.map((task) => task.id)).toEqual(["stable"]);
     expect(parsed.diagnostics).toEqual([
-      { filename: "object-cycle.md", code: "JOBS_TASK_YAML_CYCLE", reportable: true },
-      { filename: "array-cycle.md", code: "JOBS_TASK_YAML_CYCLE", reportable: true },
+      { filename: "object-cycle.md", code: "JOBS_TASK_YAML_CYCLE", message: "task frontmatter cannot contain cyclic YAML aliases" },
+      { filename: "array-cycle.md", code: "JOBS_TASK_YAML_CYCLE", message: "task frontmatter cannot contain cyclic YAML aliases" },
     ]);
-    const loaded = await loadTasks(root, entries);
-    expect(loaded.tasks.map((task) => task.id)).toEqual(["stable"]);
-    const errors = await readdir(join(root, "ai-jobs/errors"));
-    expect(errors).toHaveLength(2);
-    for (const diagnostic of loaded.diagnostics) {
-      const content = await readFile(join(root, "ai-jobs/errors", `${taskDiagnosticKey(diagnostic)}.json`), "utf8");
-      expect(content).toBe(`${JSON.stringify({ code: "JOBS_TASK_YAML_CYCLE", task: taskDiagnosticKey(diagnostic) })}\n`);
-      expect(content).not.toContain("self"); expect(content).not.toContain("tools");
-    }
   });
 
   test("blocks invalid delimiter and YAML failures", () => {
@@ -125,24 +118,18 @@ function defaults(task, filename, prompt) {
     for (const [filename, source] of rejected) {
       expect(() => parseTask(filename, source)).toThrow();
       try { parseTask(filename, source); }
-      catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_YAML", details: { filename, reportable: true } }); }
+      catch (error) { expect(error).toMatchObject({ code: "JOBS_TASK_YAML", details: { filename } }); }
     }
     defaults(parseTask("prose.md", "Note: this is ordinary Markdown prose."), "prose.md", "Note: this is ordinary Markdown prose.");
     defaults(parseTask("rule.md", "---\nordinary Markdown horizontal-rule content"), "rule.md", "---\nordinary Markdown horizontal-rule content");
 
-    const loaded = await loadTasks(root, [
+    const parsed = parseTasks([
       ...rejected.map(([filename, source]) => ({ filename, source })),
       { filename: "valid.md", source: "---\nid: valid-sibling\nschedule: every 1h\n---\nRun." },
     ]);
-    expect(loaded.tasks.map((task) => task.id)).toEqual(["valid-sibling"]);
-    expect(loaded.diagnostics).toEqual(rejected.map(([filename]) => ({ filename, code: "JOBS_TASK_YAML", reportable: true })));
-    const errors = await readdir(join(root, "ai-jobs/errors"));
-    expect(errors).toHaveLength(3);
-    for (const diagnostic of loaded.diagnostics) {
-      const content = await readFile(join(root, "ai-jobs/errors", `${taskDiagnosticKey(diagnostic)}.json`), "utf8");
-      expect(content).toBe(`${JSON.stringify({ code: "JOBS_TASK_YAML", task: taskDiagnosticKey(diagnostic) })}\n`);
-      expect(content).not.toContain("enabled"); expect(content).not.toContain("schedule");
-    }
+    expect(parsed.tasks.map((task) => task.id)).toEqual(["valid-sibling"]);
+    expect(parsed.diagnostics.map(({ filename, code }) => ({ filename, code }))).toEqual(rejected.map(([filename]) => ({ filename, code: "JOBS_TASK_YAML" })));
+    for (const item of parsed.diagnostics) expect(item.message).toStartWith("task frontmatter");
   });
 
   test("keeps declared values strict internally by blocking invalid values", () => {
@@ -163,21 +150,71 @@ function defaults(task, filename, prompt) {
     expect(result.diagnostics.map((item) => item.code)).toEqual(["JOBS_TASK_CREDENTIAL", "JOBS_TASK_PROMPT", "JOBS_TASK_DUPLICATE_ID", "JOBS_TASK_DUPLICATE_ID"]);
   });
 
-  test("reports only invalid metadata diagnostics atomically without source secrets", async () => {
+  test("names the offending key so the task file can be fixed", () => {
+    const { diagnostics } = parseTasks([
+      { filename: "bad.md", source: "---\napiKey: abc\n---\nBody" },
+      { filename: "typo.md", source: "---\nshedule: every 1h\n---\nBody" },
+      { filename: "one.md", source: "---\nid: same\n---\nPrompt" },
+      { filename: "two.md", source: "---\nid: same\n---\nPrompt" },
+    ]);
+    expect(diagnostics.map(({ filename, code }) => [filename, code])).toEqual([["bad.md", "JOBS_TASK_CREDENTIAL"], ["typo.md", "JOBS_TASK_UNKNOWN_KEY"], ["two.md", "JOBS_TASK_DUPLICATE_ID"], ["one.md", "JOBS_TASK_DUPLICATE_ID"]]);
+    expect(diagnostics[0].message).toContain('"apiKey"');
+    expect(diagnostics[1].message).toContain('"shedule"');
+    expect(diagnostics[1].message).toContain("schedule");
+    expect(diagnostics[2].message).toContain('"same"');
+  });
+
+  test("error log: readable Markdown per day with task file, time, code, message, outcome and session", async () => {
+    const root = await fixture(), at = new Date(2026, 8, 28, 5, 26, 57).getTime();
+    const log = await errorsLog(root, [
+      { filename: "bad.md", code: "JOBS_TASK_UNKNOWN_KEY", message: 'task frontmatter has an unknown key "shedule"' },
+      { id: "report", filename: "report.md", code: "JOBS_FAILED", message: "provider refused", outcome: "failed", session: "job-1" },
+    ], at);
+    expect(log).toBe("ai-jobs/errors/2026-09-28.md");
+    expect(await readFile(join(root, log), "utf8")).toBe(`# Jobs errors 2026-09-28
+
+## 05:26:57 — bad.md — JOBS_TASK_UNKNOWN_KEY
+
+task frontmatter has an unknown key "shedule"
+
+## 05:26:57 — report.md — JOBS_FAILED
+
+provider refused
+
+- Task id: report
+- Outcome: failed
+- Session: job-1
+
+`);
+    expect(localStamp(at)).toEqual({ date: "2026-09-28", time: "05:26:57" });
+  });
+
+  test("error log: a task-file problem is logged once per day, job failures every time", async () => {
+    const root = await fixture(), at = new Date(2026, 8, 28, 9, 0, 0).getTime();
+    const fileProblem = { filename: "bad.md", code: "JOBS_TASK_YAML", message: "task frontmatter is malformed YAML: x" };
+    const failure = { filename: "job.md", code: "JOBS_FAILED", message: "boom", outcome: "failed", session: "s" };
+    await errorsLog(root, [fileProblem, failure], at);
+    await errorsLog(root, [fileProblem, failure], at + 300_000);
+    const content = await readFile(join(root, "ai-jobs/errors/2026-09-28.md"), "utf8");
+    expect(content.match(/— bad\.md —/g)).toHaveLength(1);
+    expect(content.match(/— job\.md —/g)).toHaveLength(2);
+    expect(await errorsLog(root, [], at)).toBeUndefined();
+  });
+
+  test("errors never name anything outside the project; inside paths read relative", async () => {
     const root = await fixture();
-    const entries = [
-      { filename: "bad.md", source: "---\napiKey: never-write-this-secret\n---\nBody" },
-      { filename: "valid.md", source: "---\nid: stable\n---\nBody" },
-      { filename: "plain.md", source: "Body" },
-    ];
-    const result = await loadTasks(root, entries);
-    expect(result.tasks.map((task) => task.id)).toEqual(["stable", "plain.md"]);
-    const diagnostic = result.diagnostics[0];
-    const path = join(root, "ai-jobs/errors", `${taskDiagnosticKey(diagnostic)}.json`);
-    const content = await readFile(path, "utf8");
-    expect(await readdir(join(root, "ai-jobs/errors"))).toEqual([`${taskDiagnosticKey(diagnostic)}.json`]);
-    expect(content).toBe(`${JSON.stringify({ code: "JOBS_TASK_CREDENTIAL", task: taskDiagnosticKey(diagnostic) })}\n`);
-    expect(content).not.toContain("secret"); expect(content).not.toContain("apiKey"); expect(content).not.toContain("bad.md");
+    expect(messageLocal(root, `ENOENT: no such file or directory, open '${root}/ai-jobs/tasks/a.md'`)).toBe("ENOENT: no such file or directory, open 'ai-jobs/tasks/a.md'");
+    expect(messageLocal(root, "cannot read /Users/someone/.omoya-settings/auth-openai.json")).toBe("cannot read …/auth-openai.json");
+    expect(messageLocal(root, "see https://api.example.com/v1/models")).toBe("see https://api.example.com/v1/models");
+    // End to end: a scan's log and record hold the task file and message, never the root.
+    const tasks = join(root, "ai-jobs/tasks");
+    await Bun.write(join(tasks, "typo.md"), "---\nshedule: every 1h\n---\nBody");
+    await Bun.write(join(tasks, "job.md"), "Run it");
+    const result = await dispatchJobs(root, { executor: async () => { throw new Error(`cannot open ${tasks}/job.md or /etc/omoya/secret.conf`); } });
+    const log = await readFile(join(root, result.log), "utf8"), record = await readFile(join(root, "ai-jobs/last-run.json"), "utf8");
+    expect(log).toContain("— typo.md — JOBS_TASK_UNKNOWN_KEY");
+    expect(log).toContain("cannot open ai-jobs/tasks/job.md or …/secret.conf");
+    for (const text of [log, record]) { expect(text).not.toContain(root); expect(text).not.toContain("/etc/omoya"); }
   });
 
   test("derives ids and keeps state keys safe", () => {

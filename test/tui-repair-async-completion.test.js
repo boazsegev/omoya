@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createCompletionSources } from "../lib/app/tui/completion-sources.js";
+import { Context } from "../lib/context.js";
 import { createApp } from "../lib/app/tui/app.js";
 
 test("filesystem completion never uses synchronous directory IO", async () => {
@@ -9,23 +11,27 @@ test("filesystem completion never uses synchronous directory IO", async () => {
 });
 
 test("completion source catalogues keep raw menu data and mapped completion data", async () => {
-  let resolvePrompts;
-  const prompts = new Promise((resolve) => { resolvePrompts = resolve; });
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: () => prompts };
-  const agent = { context: [], listSessionsAsync: async () => [{ id: "saved", preview: "p" }] };
+  let available = [];
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map(available.map((name) => [name, { name }])) };
+  const dir = mkdtempSync("./ai-tmp/completion-sessions-");
+  const saved = new Context({ id: "saved", dir, origin: process.cwd() });
+  saved.append({ type: 2, content: [{ type: "text", text: "p" }] });
+  saved.close();
+  const agent = { context: new Context({ messages: [] }), env: { settings: { sessions: dir }, cwd: process.cwd() } };
   const sources = createCompletionSources(agent, env);
   expect(sources().prompts).toEqual([]);
-  resolvePrompts(["menu"]);
+  available = ["menu"]; // read on refresh, never while typing
+  expect(sources().prompts).toEqual([]);
   await sources.refresh();
   expect(sources().prompts).toEqual(["/menu"]);
   expect(sources.catalog().prompts).toEqual(["menu"]);
-  expect(sources.catalog().sessions).toEqual([{ id: "saved", preview: "p" }]);
+  expect(sources.catalog().sessions).toMatchObject([{ id: "saved", preview: "p" }]);
   expect(sources().argCandidates["/session-resume"]).toEqual(["saved"]);
 });
 
 test("stale delayed filesystem completion is ignored after typing or Escape", () => {
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => [] };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [] };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
   const app = createApp(agent, { env, completionIO: { listDir: async () => ["file"] } });
   let state = app.init().model;
   state = app.update(state, { type: "input.change", value: "fi", caret: 2 }).model;
@@ -39,8 +45,8 @@ test("stale delayed filesystem completion is ignored after typing or Escape", ()
 });
 
 test("delayed filesystem Tab previews its first candidate and retains an interactive menu", () => {
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => [] };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [] };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
   const app = createApp(agent, { env, completionIO: { listDir: async () => ["file", "filter"] } });
   let state = app.init().model;
   state = app.update(state, { type: "input.change", value: "fi", caret: 2 }).model;
@@ -55,8 +61,8 @@ test("delayed filesystem Tab previews its first candidate and retains an interac
 
 test("Tab on an exact slash command does not request filesystem completion", () => {
   let reads = 0;
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => [] };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [] };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
   const app = createApp(agent, { env, completionIO: { listDir: async () => { reads++; return []; } } });
   let state = app.init().model;
   state = app.update(state, { type: "input.change", value: "/" + "context", caret: 8 }).model;
@@ -66,8 +72,8 @@ test("Tab on an exact slash command does not request filesystem completion", () 
 });
 
 test("same-draft repeated Tabs reject a stale filesystem response by request nonce", () => {
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => [] };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [] };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
   const app = createApp(agent, { env, completionIO: { listDir: async () => [] } });
   let state = app.init().model;
   state = app.update(state, { type: "input.change", value: "fi", caret: 2 }).model;
@@ -81,8 +87,8 @@ test("same-draft repeated Tabs reject a stale filesystem response by request non
 
 test("missing asynchronous completion directory invokes and safely settles the runtime boundary", async () => {
   let calls = 0;
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => [] };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [] };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => new Map() };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
   const app = createApp(agent, { env, completionIO: { listDir: async () => { calls++; throw new Error("missing"); } } });
   let state = app.init().model;
   state = app.update(state, { type: "input.change", value: "fi", caret: 2 }).model;
@@ -94,8 +100,8 @@ test("missing asynchronous completion directory invokes and safely settles the r
 });
 
 test("master menu uses supplied catalogue without synchronous prompt or session scans", () => {
-  const env = { endpointNames: () => [], toolNames: () => [], promptNamesAsync: async () => ["menu"], promptNames: () => { throw new Error("sync prompt scan"); } };
-  const agent = { context: [], pending: [], model: "x/y", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {}, listSessionsAsync: async () => [{ id: "saved", preview: "p" }], listSessions: () => { throw new Error("sync session scan"); } };
+  const env = { endpointNames: () => [], toolNames: () => [], prompts: () => { throw new Error("sync prompt scan"); } };
+  const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "x/y", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {}, env: { cwd: ".", get settings() { return { get sessions() { throw new Error("sync session scan"); } }; } } };
   const app = createApp(agent, { env });
   let state = app.init().model;
   state = app.update(state, { type: "key", key: "ctrl+x" }).model;

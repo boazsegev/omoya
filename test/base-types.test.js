@@ -3,10 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   MessageType,
   ContentType,
-  textContent,
-  userMessage,
-  systemMessage,
-  assistantMessage,
+  contentText,
+  messageUser,
+  messageSystem,
+  messageAssistant,
 } from "../lib/context.js";
 
 describe("MessageType", () => {
@@ -34,37 +34,37 @@ describe("ContentType", () => {
 });
 
 describe("constructors", () => {
-  test("textContent shape", () => {
-    expect(textContent("hi")).toEqual({ type: "text", text: "hi" });
+  test("contentText shape", () => {
+    expect(contentText("hi")).toEqual({ type: "text", text: "hi" });
   });
 
-  test("userMessage wraps plain text into a typed message", () => {
-    expect(userMessage("hello")).toEqual({
+  test("messageUser wraps plain text into a typed message", () => {
+    expect(messageUser("hello")).toEqual({
       type: 2,
       content: [{ type: "text", text: "hello" }],
     });
   });
 
-  test("systemMessage wraps plain text into a typed message", () => {
-    expect(systemMessage("be terse")).toEqual({
+  test("messageSystem wraps plain text into a typed message", () => {
+    expect(messageSystem("be terse")).toEqual({
       type: 1,
       content: [{ type: "text", text: "be terse" }],
     });
   });
 
-  test("assistantMessage holds an ordered block mix", () => {
+  test("messageAssistant holds an ordered block mix", () => {
     const blocks = [
       { type: "thinking", text: "hmm" },
       { type: "text", text: "answer" },
       { type: "toolCall", callId: "c1", name: "file-read", arguments: {} },
     ];
-    const msg = assistantMessage(blocks);
+    const msg = messageAssistant(blocks);
     expect(msg.type).toBe(3);
     expect(msg.content).toBe(blocks);
   });
 
   test("array/block addressing: no local ids needed", () => {
-    const ctx = [userMessage("a"), assistantMessage([textContent("b")])];
+    const ctx = [messageUser("a"), messageAssistant([contentText("b")])];
     expect(ctx[1].content[0].text).toBe("b");
   });
 });

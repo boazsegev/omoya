@@ -9,34 +9,34 @@ describe("Agent core: context ownership", () => {
     const io = scriptedIO([[...TEXT(0, "hi there"), { type: "done" }]]);
     const agent = new Agent({ env, model: "fake/m", context: [USER("hello")], createIO: () => io });
     expect((await agent.run()).type).toBe("done");
-    expect(agent.context.map((message) => message.type)).toEqual([2, 3]);
-    expect(agent.context[1].content).toEqual([{ type: "text", text: "hi there" }]);
+    expect(agent.context.messages().map((message) => message.type)).toEqual([2, 3]);
+    expect(agent.context.at(1).content).toEqual([{ type: "text", text: "hi there" }]);
   });
 
   test("refuses a secret tool even when a provider calls it by name", async () => {
     const env = await testEnv();
     let invoked = 0;
-    env.registerTool("human-only", () => { invoked++; return "should not run"; }, {
+    env.toolAdd("human-only", () => { invoked++; return "should not run"; }, {
       secret: true, description: "human only", inputSchema: { type: "object" },
     });
     const io = scriptedIO([
-      [{ type: "toolcall_start", contentIndex: 0, callId: "secret-call", name: "human-only", arguments: {} }, { type: "toolcall_end", contentIndex: 0, arguments: {} }, { type: "done" }],
+      [{ type: "tool_call_start", contentIndex: 0, callId: "secret-call", name: "human-only", arguments: {} }, { type: "tool_call_end", contentIndex: 0, arguments: {} }, { type: "done" }],
       [{ type: "done" }],
     ]);
     const agent = new Agent({ env, model: "fake/m", context: [USER("call it")], createIO: () => io });
     await agent.run();
 
     expect(invoked).toBe(0);
-    const result = agent.context.find((message) => message?.type === 4 && message.name === "human-only");
+    const result = agent.context.messages().find((message) => message?.type === 4 && message.name === "human-only");
     expect(result).toMatchObject({ error: true });
     expect(result.content[0].text).toContain("not available to agents");
   });
 
   test("passes complete context on every provider request", async () => {
     const env = await testEnv();
-    env.registerTool("fake-tool", ({ x }) => `got ${x}`, { description: "fake", inputSchema: {} });
+    env.toolAdd("fake-tool", ({ x }) => `got ${x}`, { description: "fake", inputSchema: {} });
     const io = scriptedIO([
-      [{ type: "toolcall_start", contentIndex: 0, callId: "c1", name: "fake-tool", arguments: { x: 7 } }, { type: "toolcall_end", contentIndex: 0, arguments: { x: 7 } }, { type: "done" }],
+      [{ type: "tool_call_start", contentIndex: 0, callId: "c1", name: "fake-tool", arguments: { x: 7 } }, { type: "tool_call_end", contentIndex: 0, arguments: { x: 7 } }, { type: "done" }],
       [...TEXT(0, "done now"), { type: "done" }],
     ]);
     const agent = new Agent({ env, model: "fake/m", context: [USER("call the tool")], createIO: () => io });
@@ -67,7 +67,7 @@ describe("Agent endpoint/model selection and reuse", () => {
     await agent.run();
     await agent.run();
     expect(factory.made).toHaveLength(1);
-    await factory.made[0].io.kill();
+    await factory.made[0].io.close();
     await agent.run();
     expect(factory.made).toHaveLength(2);
   });
@@ -77,7 +77,7 @@ describe("Agent endpoint/model selection and reuse", () => {
     const factory = recordingFactory(() => scriptedIO([[{ type: "done" }]]));
     const events = [];
     const agent = new Agent({ env, createIO: factory });
-    agent.onEvent(Agent.EVENT.ERROR, (event) => events.push(event));
+    agent.onEvent(Agent.EVENT.REQUEST_ERROR, (event) => events.push(event));
     const terminal = await agent.run();
     expect(terminal).toEqual({ type: "error", error: "Please load a model" });
     expect(events).toEqual([{ error: terminal.error }]);

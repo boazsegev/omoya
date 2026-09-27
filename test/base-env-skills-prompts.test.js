@@ -7,6 +7,8 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
+import { Agent } from "../lib/agent.js";
+import { skillRoots } from "./env-internals.js";
 
 let dir; // this Env's own package folder
 let extra; // a standalone configured/environment skill root
@@ -47,7 +49,7 @@ const SETTINGS = () => join(dir, "user-settings");
 describe("Env skill roots — accumulative layers", () => {
   test("the layer order: package, settings folder, project skills", () => {
     const env = new Env({ dir, cwd: extra, settings: {} });
-    expect(env.defaultSkillRoots()).toEqual([
+    expect(skillRoots(env)).toEqual([
       join(dir, "skills"),
       join(SETTINGS(), "skills"),
       join(extra, NAMES.projectSkillsDir),
@@ -56,7 +58,7 @@ describe("Env skill roots — accumulative layers", () => {
 
   test("settings.skills ADDS to the accumulated roots, never replaces", () => {
     const env = new Env({ dir, cwd: extra, settings: { skills: [extra] } });
-    expect(env.defaultSkillRoots()).toEqual([
+    expect(skillRoots(env)).toEqual([
       join(dir, "skills"),
       join(SETTINGS(), "skills"),
       extra,
@@ -67,13 +69,13 @@ describe("Env skill roots — accumulative layers", () => {
   test("the namespace skill variable ADDS after configured roots", () => {
     process.env[NAMES.skillsEnv] = extra;
     const env = new Env({ dir, cwd: dir, settings: {} });
-    expect(env.defaultSkillRoots()).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), extra, join(dir, NAMES.projectSkillsDir)]);
+    expect(skillRoots(env)).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), extra, join(dir, NAMES.projectSkillsDir)]);
   });
 
   test("all sources accumulate together, in layer order", () => {
     process.env[NAMES.skillsEnv] = extra;
     const env = new Env({ dir, cwd: dir, settings: { skills: "/configured/path" } });
-    expect(env.defaultSkillRoots()).toEqual([
+    expect(skillRoots(env)).toEqual([
       join(dir, "skills"),
       join(SETTINGS(), "skills"),
       "/configured/path",
@@ -86,79 +88,88 @@ describe("Env skill roots — accumulative layers", () => {
     // an environment root resolving to <settingsDir>/skills scans ONCE
     process.env[NAMES.skillsEnv] = join(SETTINGS(), "skills");
     const env = new Env({ dir, cwd: dir, settings: {} });
-    expect(env.defaultSkillRoots()).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), join(dir, NAMES.projectSkillsDir)]);
+    expect(skillRoots(env)).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), join(dir, NAMES.projectSkillsDir)]);
     // a configured root repeating the package folder scans once too
     const env2 = new Env({ dir, cwd: dir, settings: { skills: [join(dir, "skills")] } });
-    expect(env2.defaultSkillRoots()).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), join(dir, NAMES.projectSkillsDir)]);
+    expect(skillRoots(env2)).toEqual([join(dir, "skills"), join(SETTINGS(), "skills"), join(dir, NAMES.projectSkillsDir)]);
   });
 });
 
-describe("Env.skillCatalog / skillBodies — skills EXTEND across roots", () => {
-  test("catalog lists every skill, sorted, with descriptions", () => {
-    skillFile(join(dir, "skills"), "alpha", 'name: alpha\ndescription: "first"', "alpha body");
+describe("env.skills() — skills EXTEND across roots", () => {
+  test("a name-sorted Map of {name, description, file, source, body}", () => {
     skillFile(join(dir, "skills"), "beta", 'name: beta\ndescription: "second"', "beta body");
+    skillFile(join(dir, "skills"), "alpha", 'name: alpha\ndescription: "first"', "alpha body");
     const env = new Env({ dir, settings: {} });
-    const text = env.skillCatalog();
-    expect(text).toContain("`alpha` — first");
-    expect(text).toContain("`beta` — second");
-    expect(text.indexOf("alpha")).toBeLessThan(text.indexOf("beta"));
+    const skills = env.skills();
+    expect([...skills.keys()]).toEqual(["alpha", "beta"]);
+    expect(skills.get("alpha")).toMatchObject({ name: "alpha", description: "first", file: join(dir, "skills", "alpha", "SKILL.md"), source: join(dir, "skills") });
+    expect(skills.get("alpha").body).toContain("alpha body");
+    expect(Object.isFrozen(skills.get("alpha"))).toBe(true);
   });
 
   test("a same-named skill in a later root EXTENDS (concatenates), never replaces", () => {
     skillFile(join(dir, "skills"), "core", "name: core\ndescription: base", "base rules");
     skillFile(extra, "core", "name: core\ndescription: extra", "extra rules");
     const env = new Env({ dir, settings: { skills: [extra] } });
-    const { text, unknown } = env.skillBodies(["core"]);
-    expect(unknown).toEqual([]);
-    expect(text).toContain("base rules");
-    expect(text).toContain("extra rules");
-    expect(text.indexOf("base rules")).toBeLessThan(text.indexOf("extra rules"));
+    const { body } = env.skills().get("core");
+    expect(body).toContain("base rules");
+    expect(body).toContain("extra rules");
+    expect(body.indexOf("base rules")).toBeLessThan(body.indexOf("extra rules"));
   });
 
-  test("unknown skill names are reported, not fatal", () => {
-    const env = new Env({ dir, settings: {} });
-    const { text, unknown } = env.skillBodies(["nope"]);
-    expect(text).toBe("");
-    expect(unknown).toEqual(["nope"]);
-  });
-
-  test("--debug-equivalent: catalog can append sources", () => {
-    skillFile(join(dir, "skills"), "alpha", 'name: alpha\ndescription: "d"', "b");
-    const env = new Env({ dir, settings: {} });
-    expect(env.skillCatalog({ debug: true })).toContain(`(${join(dir, "skills")})`);
+  test("skillDirs replaces the accumulated layers (embedders, tests)", () => {
+    skillFile(join(dir, "skills"), "alpha", "name: alpha", "a");
+    skillFile(extra, "only", "name: only", "o");
+    expect([...new Env({ dir, settings: {}, skillDirs: [extra] }).skills().keys()]).toEqual(["only"]);
   });
 });
 
-describe("Env.promptNamesAsync — async merged prompt names", () => {
-  test("matches synchronous names for layered overrides and an explicit roots override", async () => {
-    promptFile(join(dir, "prompts"), "base.md", "name: shared", "base");
-    promptFile(extra, "override.md", "name: shared", "override");
-    promptFile(extra, "other.md", "name: other", "other");
+describe("Agent formats the catalogs (Agent.skillCatalog / promptCatalog / skillSection)", () => {
+  test("catalog text lists every entry, sorted, with descriptions; debug appends sources", () => {
+    skillFile(join(dir, "skills"), "alpha", 'name: alpha\ndescription: "first"', "alpha body");
+    skillFile(join(dir, "skills"), "beta", 'name: beta\ndescription: "second"', "beta body");
+    const env = new Env({ dir, settings: {} });
+    const text = Agent.skillCatalog(env.skills());
+    expect(text).toStartWith("# Skill Catalog\n");
+    expect(text).toContain("`alpha` — first");
+    expect(text.indexOf("alpha")).toBeLessThan(text.indexOf("beta"));
+    expect(Agent.skillCatalog(env.skills(), { debug: true })).toContain(`(${join(dir, "skills")})`);
+    expect(Agent.skillSection(env.skills().get("alpha"))).toBe(`<skill name="alpha">\n${env.skills().get("alpha").body}\n</skill>`);
+  });
+
+  test("the prompt catalog shows the overriding entry only", () => {
+    promptFile(join(dir, "prompts"), "greet.md", "name: greet\ndescription: base", "base greeting");
+    promptFile(extra, "greet.md", "name: greet\ndescription: override", "overriding greeting");
     const env = new Env({ dir, settings: { prompts: [extra] } });
-    expect(await env.promptNamesAsync()).toEqual(env.promptNames());
-    expect(await env.promptNamesAsync({ roots: [extra] })).toEqual(env.promptNames({ roots: [extra] }));
+    const text = Agent.promptCatalog(env.prompts());
+    expect(text).toStartWith("# Prompt Catalog\n");
+    expect(text).toContain("`greet` — override");
+    expect(text).not.toContain("base");
   });
 });
 
-describe("Env.promptCatalog / promptBody — prompts OVERRIDE across roots", () => {
+describe("env.prompts() — prompts OVERRIDE across roots", () => {
   test("a same-named prompt in a later root REPLACES the earlier one", () => {
-    promptFile(join(dir, "prompts"), "greet.md", 'name: greet\ndescription: base', "base greeting");
-    promptFile(extra, "greet.md", 'name: greet\ndescription: override', "overriding greeting");
+    promptFile(join(dir, "prompts"), "greet.md", "name: greet\ndescription: base", "base greeting");
+    promptFile(extra, "greet.md", "name: greet\ndescription: override", "overriding greeting");
     const env = new Env({ dir, settings: { prompts: [extra] } });
-    expect(env.promptBody("greet")).toBe("overriding greeting");
-    expect(env.promptCatalog()).toContain("`greet` — override");
-    expect(env.promptCatalog()).not.toContain("base");
+    expect(env.prompts().get("greet")).toMatchObject({ description: "override", body: "overriding greeting", source: extra });
   });
 
-  test("an unknown prompt name resolves to null", () => {
-    const env = new Env({ dir, settings: {} });
-    expect(env.promptBody("nope")).toBeNull();
+  test("an unknown prompt name is absent", () => {
+    expect(new Env({ dir, settings: {} }).prompts().has("nope")).toBe(false);
   });
 
   test("never cached: adding a prompt file after construction is picked up on the next call", () => {
     const env = new Env({ dir, settings: {} });
-    expect(env.promptBody("late")).toBeNull();
+    expect(env.prompts().has("late")).toBe(false);
     promptFile(join(dir, "prompts"), "late.md", "name: late\ndescription: d", "late body");
-    expect(env.promptBody("late")).toBe("late body");
+    expect(env.prompts().get("late").body).toBe("late body");
+  });
+
+  test("promptDirs replaces the accumulated layers", () => {
+    promptFile(join(dir, "prompts"), "base.md", "name: base", "b");
+    promptFile(extra, "other.md", "name: other", "o");
+    expect([...new Env({ dir, settings: {}, promptDirs: [extra] }).prompts().keys()]).toEqual(["other"]);
   });
 });

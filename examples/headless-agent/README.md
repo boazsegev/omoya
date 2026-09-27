@@ -3,8 +3,8 @@
 A Bun ESM script that embeds Omoya's public library API (`omoya/agent`) to run
 one agent turn without the terminal UI: it builds an environment with
 `Agent.Env.create()`, constructs an `Agent` for an illustrative model
-selector, registers `Agent.EVENT` listeners, enqueues a user message, and
-awaits the terminal `done`/`error` event from `agent.run()`.
+selector, registers `Agent.EVENT` listeners, adds a user message (`agent.send`), and
+awaits the terminal `done`/`error` event from `agent.send()`.
 
 ## Prerequisites
 

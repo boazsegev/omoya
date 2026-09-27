@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { GTUI } from "../lib/app/gtui/gtui.js";
 import { TerminalInput, TerminalScreen } from "./terminal-screen.js";
 import { createApp } from "../lib/app/tui/app.js";
+import { Context } from "../lib/context.js";
 import { USER } from "./fakes.js";
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -9,7 +10,7 @@ for (const mode of ["inline", "alt"]) {
   test(`${mode} physical screen retains the latest completed exchange above input`, async () => {
     const input = new TerminalInput();
     const output = new TerminalScreen();
-    const agent = { context: [USER("USER VISIBLE"), { type: 3, content: [{ type: "text", text: "ASSISTANT VISIBLE" }] }], pending: [], model: "test/model", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
+    const agent = { context: new Context({ messages: [USER("USER VISIBLE"), { type: 3, content: [{ type: "text", text: "ASSISTANT VISIBLE" }] }] }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
     const app = createApp(agent, { sources: {} });
     const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode }), theme: app.theme });
     const run = ui.run(app);
@@ -27,7 +28,7 @@ for (const mode of ["inline", "alt"]) {
   test(`${mode} raw terminal selection is visibly and semantically replaced`, async () => {
     const input = new TerminalInput();
     const output = new TerminalScreen(80, 12);
-    const agent = { context: [], pending: [], model: "test/model", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
+    const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
     const app = createApp(agent, { sources: {} });
     const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode }), theme: app.theme });
     const run = ui.run(app);
@@ -43,7 +44,7 @@ for (const mode of ["inline", "alt"]) {
   test(`${mode} raw terminal completion keys preview, cycle, and accept the highlighted value`, async () => {
     const input = new TerminalInput();
     const output = new TerminalScreen(80, 12);
-    const agent = { context: [], pending: [], model: "test/model", setQuestion() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
+    const agent = { context: new Context({ id: "stub", messages: [] }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {} };
     const app = createApp(agent, { sources: { listDir: () => ["alpha", "alpine", "alps"] } });
     const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode }), theme: app.theme });
     const run = ui.run(app);

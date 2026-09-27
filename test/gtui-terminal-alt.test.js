@@ -4,6 +4,8 @@ import { GTUI } from "../lib/app/gtui/gtui.js";
 import { createBuffer } from "../lib/app/gtui/buffer.js";
 import { renderDiff } from "../lib/app/gtui/render.js";
 import { terminalHostInternals } from "../lib/app/gtui/terminal-host.js";
+import { resolveTheme } from "../lib/app/tui/theme-data.js";
+import { readFileSync } from "node:fs";
 
 class FakeInput extends EventEmitter {
   isTTY = true;
@@ -27,6 +29,41 @@ function application(view, update = (model) => ({ model, effects: [] })) {
 }
 
 describe("GTUI terminal alt host", () => {
+  test("Omoya selects terminal-reported light mode when COLORFGBG is unavailable", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const tokens = resolveTheme({ tui: { theme: "omoya", themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")).tui.themes } });
+    const host = GTUI.host.terminal({ input, output, mode: "alt", colorfgbg: "" });
+    const ui = new GTUI({ host, theme: tokens });
+    let mode;
+    const running = ui.run(application((_, theme) => {
+      mode = theme.dark;
+      return GTUI.view.text({ margin: 0, role: "accent" }, "Omoya");
+    }));
+    expect(output.bytes()).toContain("\x1b]11;?\x07");
+    input.emit("data", Buffer.from("\x1b]11;rgb:ffff/ffff/ffff\x07"));
+    await tick();
+    expect(mode).toBe(false);
+    expect(output.bytes()).toContain("\x1b[38;2;8;117;104mOmoya");
+    ui.stop();
+    await running;
+  });
+  test("OSC 11 dark reply selects Omoya dark and invalid replies leave the fallback unchanged", async () => {
+    const input = new FakeInput(), output = new FakeOutput();
+    const tokens = resolveTheme({ tui: { theme: "omoya", themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")).tui.themes } });
+    const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode: "alt", colorfgbg: "" }), theme: tokens });
+    let mode;
+    const running = ui.run(application((_, theme) => { mode = theme.dark; return GTUI.view.text({ margin: 0, role: "accent" }, "Omoya"); }));
+    expect(mode).toBeNull();
+    input.emit("data", Buffer.from("\x1b]11;not-a-color\x07"));
+    expect(mode).toBeNull();
+    input.emit("data", Buffer.from("\x1b]11;rgb:0a0a/0707/0909\x1b\\"));
+    await tick();
+    expect(mode).toBe(true);
+    expect(output.bytes()).toContain("\x1b[38;2;239;90;76mOmoya");
+    ui.stop();
+    await running;
+  });
   test("renders configured scrollbar glyphs in overflowing alt scrolls and preserves teardown", async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
@@ -50,8 +87,9 @@ describe("GTUI terminal alt host", () => {
     await tick();
     await tick();
     const diff = output.chunks.slice(beforeScroll).join("");
-    expect(diff).toContain("\x1b[1;12H\x1b[0m\x1b[38;5;2m|");
-    expect(diff).toContain("\x1b[3;12H\x1b[0m\x1b[38;5;3m#");
+    // Changed rows repaint whole; the bar glyph closes each row.
+    expect(diff).toContain("\x1b[1;1H\x1b[0mline 3     \x1b[0m\x1b[38;5;2m|");
+    expect(diff).toContain("\x1b[3;1H\x1b[0mline 5     \x1b[0m\x1b[38;5;3m#");
     ui.stop();
     await running;
     expect(output.bytes()).toEndWith("\x1b[?1049l");

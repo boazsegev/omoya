@@ -1,7 +1,7 @@
 /**
  * test/tool-fixtures/slow.js — TEST-ONLY tool that sleeps for `ms`
  * and then returns. Used by the tool-sandbox tests (timeout kills a
- * stuck call; toolCall.async runs calls concurrently).
+ * stuck call; unmarked calls must not overlap).
  */
 
 export function toolDescription() {

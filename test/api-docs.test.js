@@ -32,14 +32,15 @@ describe("generated API documentation", () => {
     expect(text).toContain("### `GTUI.event.key(payload)`");
   }, 20_000);
 
-  test("composition-boundary prototype methods appear on their owning class", async () => {
+  test("Env plugin members appear on Env, documented from their plugin", async () => {
     const data = await collect();
     const env = data.modules.find((module) => module.name === "Env");
     const klass = env.exports.find((symbol) => symbol.name === "Env");
-    expect(klass.members.find((member) => member.name === "createAgent")).toMatchObject({
-      signature: "createAgent(options = {…})",
-      from: "lib/agent.js",
+    expect(klass.members.find((member) => member.name === "agentCreate")).toMatchObject({
+      signature: "agentCreate(options = {…})",
+      from: "lib/agent/env-plugin.js",
     });
+    expect(klass.members.find((member) => member.name === "agents")?.from).toBe("lib/agent/env-plugin.js");
   }, 20_000);
 
   test("API cross-references link method-call notation across modules", async () => {
@@ -49,8 +50,8 @@ describe("generated API documentation", () => {
     // where a relative "./agent/" would resolve to /agent — outside the API tree.
     expect(html).toBe('<p><a href="/api/agent/#Agent-close"><code>Agent.close()</code></a></p>');
     // Same-module mentions stay fragment-only.
-    const local = linkApiReferences("<p><code>Env.safe</code></p>", buildApiLinks(data), "Env");
-    expect(local).toBe('<p><a href="#Env-safe"><code>Env.safe</code></a></p>');
+    const local = linkApiReferences("<p><code>Env.settings</code></p>", buildApiLinks(data), "Env");
+    expect(local).toBe('<p><a href="#Env-settings"><code>Env.settings</code></a></p>');
   }, 20_000);
 
   test("API.md regenerates from the live tree on every run", async () => {
@@ -58,6 +59,25 @@ describe("generated API documentation", () => {
     writeFileSync("API.md", text);
     expect(readFileSync("API.md", "utf8")).toBe(text);
     expect(text).toContain("# API (");
+  }, 20_000);
+
+  test("settings schema includes live nested defaults and dynamic-key contracts", async () => {
+    const text = await generate();
+    const settings = text.split("### `Env.settings`\n\n```schema\n")[1]?.split("\n```")[0];
+    expect(settings).toContain('"tui": {');
+    expect(settings).toContain('"cursor": {');
+    expect(settings).toContain('"blink": "number"');
+    expect(settings).toContain('"web": {');
+    expect(settings).toContain('"collapse": {');
+    expect(settings).toContain('"thinking": "boolean"');
+    expect(settings).toContain('"tools": {');
+    expect(settings).toContain('"timeout": "number"');
+    expect(settings).toContain('"read": {');
+    expect(settings).toContain('"<server>": {');
+    expect(settings).toContain('"env-refuse": "string[]"');
+    expect(settings).toContain('"providerTools": {');
+    expect(settings).toContain('"folders": "string[]"');
+    expect(settings).not.toContain('"tui": "unknown"');
   }, 20_000);
 
   test("API-schema.md regenerates from the live tree on every run", async () => {

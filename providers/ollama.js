@@ -28,7 +28,7 @@
  *
  * Wire mapping (/api/chat NDJSON -> response events): content strings
  * stream as text_start/text_delta/text_end at contentIndex 0; tool_calls
- * become toolcall_start/toolcall_end pairs (Ollama supplies no call ids
+ * become tool_call_start/tool_call_end pairs (Ollama supplies no call ids
  * — local `ollama-N` ids are generated for context linkage); the
  * done:true frame maps prompt_eval_count/eval_count into the usage
  * envelope. Native frames ride along as event metadata where useful.
@@ -40,17 +40,15 @@
  */
 
 import Context from "../lib/context.js";
-const { MessageType, ContentType, mimetypeOf } = Context;
-import Env from "../lib/env.js";
-const { resolveEffort, singleShot } = Env;
-
-/** The `think` levels Ollama's /api/chat defines. */
-const OLLAMA_EFFORTS = ["low", "medium", "high"];
-
+const { MessageType, ContentType, mimeOf, contentIndexer } = Context;
 const metadata = {
   label: "Ollama",
-  capabilities: { tools: true, thinking: true, streaming: true },
+  // /api/chat `think`: false, or the low/medium/high levels it defines
+  capabilities: { tools: true, thinking: ["none", "low", "medium", "high"], streaming: true },
 };
+
+/** One-shot catalog request: no parked keep-alive socket holds the process open. */
+const ONE_SHOT = { connection: "close" };
 
 const DEFAULT_URL = "http://localhost:11434";
 
@@ -63,18 +61,16 @@ function context2msg(context, aiio) {
   if (token) headers.authorization = `Bearer ${token}`;
 
   const body = {
-    model: aiio?.currentModel,
+    model: aiio?.modelCurrent,
     messages: context.map((msg, i) => toOllamaMessage(msg, context, i)),
     stream: true,
   };
-  // Thinking control: Agent's /agent-thinking command (or a settings
-  // override) sets `think` — false/true for on-off models, a level for
-  // models with levels (e.g. gpt-oss), clamped to the low/medium/high
-  // Ollama defines. Undefined: server default.
+  // Thinking control: `think` is already the native mode (IO maps the
+  // library level): "none" disables, a level passes through (e.g.
+  // gpt-oss). Undefined: server default.
   const think = aiio?.settings?.think;
   if (think === "none") body.think = false;
-  else if (typeof think === "string") body.think = resolveEffort(think, { levels: OLLAMA_EFFORTS });
-  else if (think !== undefined) body.think = think;
+  else if (typeof think === "string") body.think = think;
   const tools = aiio?.tools?.() ?? [];
   if (tools.length > 0) {
     body.tools = tools.map((t) => ({
@@ -130,7 +126,7 @@ function withAttachments(out, msg) {
   const attachments = (msg.content ?? [])
     .filter((b) => (b?.type === ContentType.Image || b?.type === ContentType.Binary) && typeof b.content === "string" && b.content !== "");
   const labels = attachments
-    .filter((b) => b?.type === ContentType.Binary && !(mimetypeOf(b) ?? "").startsWith("image/"))
+    .filter((b) => b?.type === ContentType.Binary && !(mimeOf(b) ?? "").startsWith("image/"))
     .map((b) => `[${typeof b.filename === "string" && b.filename ? b.filename : "attachment"}]`);
   if (labels.length > 0) out.content = [out.content, ...labels].filter(Boolean).join("\n");
   if (attachments.length > 0) out.images = attachments.map((b) => b.content);
@@ -185,16 +181,10 @@ function msg2events(msg, state = {}, aiio) {
   const events = [];
   const m = msg?.message;
 
-  // Block-index allocation: thinking (when present) is block 0, text
-  // follows, tool calls come after — so a thinking-capable model's
-  // blocks index consistently (text-only responses keep text at 0).
-  const alloc = (key) => {
-    if (state[key] === undefined) {
-      state[key] = state.nextIndex ?? 0;
-      state.nextIndex = (state.nextIndex ?? 0) + 1;
-    }
-    return state[key];
-  };
+  // Block indexes follow first appearance (Context.contentIndexer): a
+  // thinking or text segment that resumes after a tool call is a NEW
+  // block, and every call is its own (text-only responses keep text at 0).
+  const index = (state.index ??= contentIndexer());
   const closeThinking = () => {
     if (state.thinkingOpen) {
       events.push({ type: "thinking_end", contentIndex: state.thinkIndex });
@@ -210,7 +200,8 @@ function msg2events(msg, state = {}, aiio) {
 
   if (typeof m?.thinking === "string" && m.thinking !== "") {
     if (!state.thinkingOpen) {
-      events.push({ type: "thinking_start", contentIndex: alloc("thinkIndex") });
+      state.thinkIndex = index.next(); // a resumed segment is a NEW block
+      events.push({ type: "thinking_start", contentIndex: state.thinkIndex });
       state.thinkingOpen = true;
     }
     events.push({ type: "thinking_delta", contentIndex: state.thinkIndex, text: m.thinking });
@@ -219,7 +210,8 @@ function msg2events(msg, state = {}, aiio) {
   if (typeof m?.content === "string" && m.content !== "") {
     closeThinking();
     if (!state.textOpen) {
-      events.push({ type: "text_start", contentIndex: alloc("textIndex") });
+      state.textIndex = index.next(); // a resumed segment is a NEW block
+      events.push({ type: "text_start", contentIndex: state.textIndex });
       state.textOpen = true;
     }
     events.push({ type: "text_delta", contentIndex: state.textIndex, text: m.content });
@@ -229,18 +221,17 @@ function msg2events(msg, state = {}, aiio) {
     closeThinking();
     closeText();
     for (const call of m.tool_calls) {
-      const i = alloc("callIndex");
-      delete state.callIndex; // every call gets its own fresh index
+      const i = index.next(); // every call is its own block
       const callId = `ollama-${(state.callSeq = (state.callSeq ?? 0) + 1)}`;
       const args = call.function?.arguments ?? {};
       events.push({
-        type: "toolcall_start",
+        type: "tool_call_start",
         contentIndex: i,
         callId,
         name: call.function?.name,
         arguments: args,
       });
-      events.push({ type: "toolcall_end", contentIndex: i, arguments: args });
+      events.push({ type: "tool_call_end", contentIndex: i, arguments: args });
     }
   }
 
@@ -249,7 +240,7 @@ function msg2events(msg, state = {}, aiio) {
     closeText();
     // the exact context consumption the server measured for this request
     if (Number.isFinite(msg.prompt_eval_count)) {
-      aiio?.setContextUsage?.({ used: msg.prompt_eval_count });
+      aiio?.contextUsageSet?.({ used: msg.prompt_eval_count });
     }
     const usage =
       Number.isFinite(msg.prompt_eval_count) && Number.isFinite(msg.eval_count)
@@ -275,62 +266,46 @@ function stripFrame(msg) {
 
 /**
  * Model list from the local API as a MAP (unique model names as keys,
- * optional metadata as values), cached in the endpoint's auth
- * namespace on every successful fetch; falls back to the cache (or a
- * static config list) when the server is unreachable. Each model's
- * context window comes from `/api/show` (its model_info carries
- * `<family>.context_length`, which /api/tags lacks) — best-effort,
- * parallel, failures leave the window unknown.
- * @param {object} aiio
+ * optional metadata as values); an unreachable server throws (Env keeps
+ * the cached map). Each model's context window comes from `/api/show`
+ * (its model_info carries `<family>.context_length`, which /api/tags
+ * lacks) — best-effort, parallel, failures leave the window unknown.
  * @returns {Promise<Object>} the model map
  */
-async function models(aiio, url = DEFAULT_URL) {
-  try {
-    const response = await fetch(`${url}/api/tags`, singleShot({ signal: aiio?.requestSignal }));
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    const map = {};
-    for (const m of data.models ?? []) {
-      if (typeof m?.name !== "string" || m.name === "") continue;
-      map[m.name] = {
-        label: m.name,
-        reasoning: false,
-        input: ["text"],
-        ...(Number.isFinite(m.details?.context_length) ? { contextWindow: m.details.context_length } : {}),
-        ...(Number.isFinite(m.size) ? { size: m.size } : {}),
-        ...(typeof m.details?.family === "string" ? { family: m.details.family } : {}),
-      };
-    }
-    await Promise.all(Object.keys(map).map(async (name) => {
-      if (map[name].contextWindow !== undefined) return;
-      try {
-        const show = await fetch(`${url}/api/show`, singleShot({
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model: name }),
-          signal: aiio?.requestSignal,
-        }));
-        if (!show.ok) return;
-        const info = (await show.json()).model_info ?? {};
-        const key = Object.keys(info).find((k) => k.endsWith(".context_length"));
-        if (key && Number.isFinite(info[key]) && info[key] > 0) {
-          map[name].contextWindow = info[key];
-        }
-      } catch { /* the window stays unknown for this model */ }
-    }));
-    aiio?.authSet?.({ models: map }); // refresh the cached snapshot
-    return map;
-  } catch {
-    const cached = aiio?.settings?.models;
-    return cached !== null && typeof cached === "object" && !Array.isArray(cached) ? cached : {};
+async function models({ url = DEFAULT_URL, signal } = {}) {
+  url = String(url).replace(/\/$/, "");
+  const response = await fetch(`${url}/api/tags`, { headers: ONE_SHOT, signal });
+  if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
+  const data = await response.json();
+  const map = {};
+  for (const m of data.models ?? []) {
+    if (typeof m?.name !== "string" || m.name === "") continue;
+    map[m.name] = {
+      label: m.name,
+      input: ["text"],
+      ...(Number.isFinite(m.details?.context_length) ? { contextWindow: m.details.context_length } : {}),
+      ...(Number.isFinite(m.size) ? { size: m.size } : {}),
+      ...(typeof m.details?.family === "string" ? { family: m.details.family } : {}),
+    };
   }
-}
-
-/** Trivial no-auth login: records the marker in the provider namespace. */
-async function login(aiio, input = {}) {
-  const auth = { type: "none" };
-  aiio?.authSet?.({ auth }, input);
-  return auth;
+  await Promise.all(Object.keys(map).map(async (name) => {
+    if (map[name].contextWindow !== undefined) return;
+    try {
+      const show = await fetch(`${url}/api/show`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...ONE_SHOT },
+        body: JSON.stringify({ model: name }),
+        signal,
+      });
+      if (!show.ok) return;
+      const info = (await show.json()).model_info ?? {};
+      const key = Object.keys(info).find((k) => k.endsWith(".context_length"));
+      if (key && Number.isFinite(info[key]) && info[key] > 0) {
+        map[name].contextWindow = info[key];
+      }
+    } catch { /* the window stays unknown for this model */ }
+  }));
+  return map;
 }
 
 /** Ollama REST protocol: constructed with the endpoint URL, exposing the
@@ -343,10 +318,10 @@ export default class OllamaProvider {
     { name: "ollama", label: "Ollama (local)", url: DEFAULT_URL },
   ];
 
-  static async detectEndpoints({ endpoints = {}, signal } = {}) {
+  static async detect({ endpoints = {}, signal } = {}) {
     if (endpoints.ollama) return {};
     try {
-      const response = await fetch(`${DEFAULT_URL}/api/tags`, singleShot({ signal }));
+      const response = await fetch(`${DEFAULT_URL}/api/tags`, { headers: ONE_SHOT, signal });
       if (!response.ok) return {};
       // dynamic: the server is environment-defined (running today,
       // maybe gone tomorrow) — never persisted
@@ -354,6 +329,21 @@ export default class OllamaProvider {
     } catch {
       return {};
     }
+  }
+
+  static async models(options) { return models(options); }
+
+  /** No credentials: a local server needs none. */
+  static login() { return { type: "none" }; }
+
+  /** Strict connection verification (login flows): throw on failure. */
+  static async testConnection({ url = DEFAULT_URL, auth, signal } = {}) {
+    const headers = { ...ONE_SHOT };
+    if (auth?.token) headers.authorization = `Bearer ${auth.token}`;
+    const response = await fetch(`${String(url).replace(/\/$/, "")}/api/tags`, { headers, signal });
+    if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status} ${response.statusText}`), { status: response.status });
+    const data = await response.json();
+    return { models: Array.isArray(data.models) ? data.models.length : 0 };
   }
 
   constructor(url = DEFAULT_URL, aiio) {
@@ -364,20 +354,4 @@ export default class OllamaProvider {
 
   context2msg(context, aiio = this.aiio) { return context2msg(context, aiio); }
   msg2events(message, state, aiio = this.aiio) { return msg2events(message, state, aiio); }
-  async models() { return models(this.aiio, this.baseUrl); }
-  async login(input) { return login(this.aiio, input); }
-
-  /** Strict connection verification (login flows): throw on failure. */
-  async testConnection() {
-    const headers = {};
-    const token = this.aiio?.settings?.auth?.token;
-    if (token) headers.authorization = `Bearer ${token}`;
-    const response = await fetch(`${this.baseUrl}/api/tags`, singleShot({
-      headers,
-      signal: this.aiio?.requestSignal,
-    }));
-    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    const data = await response.json();
-    return { models: Array.isArray(data.models) ? data.models.length : 0 };
-  }
 }

@@ -56,6 +56,45 @@ test("frozen rows cache only frozen data properties, never accessor content", ()
   expect(layoutView(immutable, { width: 4, height: 3 }).snapshot.sources).toContainEqual({ row: 0, start: 0, end: 1, source: { itemKey: "frozen", start: 0, end: 1 } });
 });
 
+test("remembered frozen verdicts never make a node with a mutable part cacheable", () => {
+  const shared = deepFreeze({ itemKey: "shared", start: 0 });
+  // Remember `shared` as deep-frozen through a fully frozen node first.
+  const frozen = deepFreeze({ type: "text", margin: 0, source: shared, content: "frozen" });
+  expect(layoutView(frozen, { width: 10, height: 1 }).snapshot.lines).toEqual(["frozen"]);
+  // A frozen shell around the same frozen part plus a mutable span.
+  const span = { text: "before" };
+  const node = Object.freeze({ type: "text", margin: 0, source: shared, content: Object.freeze([span]) });
+  expect(layoutView(node, { width: 10, height: 1 }).snapshot.lines).toEqual(["before"]);
+  span.text = "after";
+  expect(layoutView(node, { width: 10, height: 1 }).snapshot.lines).toEqual(["after"]);
+  // Freezing it later makes it cacheable; the content is now fixed.
+  Object.freeze(span);
+  expect(layoutView(node, { width: 10, height: 1 }).snapshot.lines).toEqual(["after"]);
+  expect(layoutView(node, { width: 10, height: 1 }).snapshot.lines).toEqual(["after"]);
+});
+
+test("cached text rows re-wrap on every width change (resize and back)", () => {
+  const node = deepFreeze({ type: "text", margin: 0, content: "alpha beta gamma delta" });
+  const at = (width) => layoutView(node, { width, height: 6 }).snapshot.lines;
+  expect(at(30)).toEqual(["alpha beta gamma delta"]);
+  expect(at(12)).toEqual(["alpha beta", "gamma delta"]);
+  expect(at(30)).toEqual(["alpha beta gamma delta"]);
+  expect(at(6)).toEqual(["alpha", "beta", "gamma", "delta"]);
+  expect(at(12)).toEqual(["alpha beta", "gamma delta"]);
+  // Mutable content at an unchanged width is never served stale.
+  const mutable = { type: "text", margin: 0, content: "one" };
+  expect(layoutView(mutable, { width: 12, height: 1 }).snapshot.lines).toEqual(["one"]);
+  mutable.content = "two";
+  expect(layoutView(mutable, { width: 12, height: 1 }).snapshot.lines).toEqual(["two"]);
+});
+
+test("layout builds the semantic snapshot only when it is read", () => {
+  const scene = layoutView({ type: "text", margin: 0, content: "lazy" }, { width: 8, height: 1 });
+  expect(Object.getOwnPropertyDescriptor(scene, "snapshot").get).toBeFunction();
+  expect(scene.snapshot).toBe(scene.snapshot); // built once
+  expect(scene.snapshot.lines).toEqual(["lazy"]);
+});
+
 test("scroll culls historical rows while preserving visible source mappings", () => {
   const items = Array.from({ length: 20 }, (_, index) => ({ node: {
     type: "text", margin: 0, selectionKey: `m${index}`, sourceText: `line ${index}`,

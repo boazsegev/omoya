@@ -38,6 +38,19 @@ function app() {
 }
 
 describe("GTUI terminal inline host", () => {
+  test("repaints Omoya in light mode on a terminal background reply", async () => {
+    const input = new FakeInput(), output = new FakeOutput();
+    const theme = { text: {}, accent: { fg: { light: "#087568", dark: "#ef5a4c" } } };
+    const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode: "inline", colorfgbg: "" }), theme });
+    const running = ui.run({ init: () => ({ model: {}, effects: [] }), update: (model) => ({ model, effects: [] }),
+      view: () => GTUI.view.text({ role: "accent", margin: 0 }, "Omoya") });
+    expect(output.bytes()).toContain("\x1b]11;?\x07");
+    input.emit("data", Buffer.from("\x1b]11;rgb:ffff/ffff/ffff\x07"));
+    await tick();
+    expect(output.bytes()).toContain("\x1b[38;2;8;117;104mOmoya");
+    ui.stop();
+    await running;
+  });
   test("retains completed feed nodes only while an end-anchored scroll is above the tail", () => {
     const root = (offset) => GTUI.view.scroll({ id: "history", anchor: "end", offset }, [GTUI.view.feed({ items: [{ key: "old", done: true, node: GTUI.view.text({}, "old") }] })]);
     const retained = [];
@@ -365,6 +378,27 @@ describe("GTUI terminal inline host", () => {
     await tick();
     expect(output.bytes()).toContain("\x1b[?1006h");
     ui.dispatch({ type: "hide" });
+    await tick();
+    expect(output.bytes()).toContain("\x1b[?1006l");
+    ui.stop();
+    await running;
+  });
+
+  test("a keyboard-focused toolbar claims pointer reporting until it loses focus", async () => {
+    const input = new FakeInput();
+    const output = new FakeOutput();
+    const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode: "inline" }) });
+    const running = ui.run({
+      init: () => ({ model: false, effects: [] }),
+      update: (_, message) => ({ model: message.type === "focus.tools", effects: [] }),
+      view: (focus) => GTUI.view.toolbar({ id: "tools", focus }, [GTUI.view.button({ action: "go" }, "go")]),
+    });
+    await tick();
+    expect(output.bytes()).not.toContain("\x1b[?1006h");
+    ui.dispatch({ type: "focus.tools" });
+    await tick();
+    expect(output.bytes()).toContain("\x1b[?1006h");
+    ui.dispatch({ type: "blur" });
     await tick();
     expect(output.bytes()).toContain("\x1b[?1006l");
     ui.stop();

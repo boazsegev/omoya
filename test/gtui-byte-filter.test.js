@@ -6,6 +6,18 @@
 import { describe, expect, test } from "bun:test";
 import { createByteFilter } from "../lib/app/gtui/byte-filter.js";
 
+describe("OSC 11 background replies", () => {
+  test("BEL and ST replies split across chunks are consumed without typing their payload", () => {
+    const backgrounds = [], forwarded = [];
+    const filter = createByteFilter({ onPaste() {}, onShiftEnter() {}, onBackground: (value) => backgrounds.push(value), forward: (value) => forwarded.push(value) });
+    filter("a\x1b]11;rgb:ffff/");
+    filter("ffff/ffff\x07b\x1b]11;rgb:0000/0000/0000\x1b");
+    filter("\\c");
+    expect(backgrounds).toEqual(["rgb:ffff/ffff/ffff", "rgb:0000/0000/0000"]);
+    expect(forwarded.join("")).toBe("abc");
+  });
+});
+
 describe("createByteFilter (paste / Shift-Enter recognition)", () => {
   const harness = () => {
     const pastes = [];

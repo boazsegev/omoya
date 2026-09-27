@@ -6,10 +6,12 @@
 // backstop via lib/finish.js, and resume loads it tolerantly
 // (non-message records quietly ignored).
 import { NAMES } from "../lib/namespace.js";
+import { defaultSettingsDir } from "../lib/env/paths.js";
 import { describe, expect, test, afterEach } from "bun:test";
 import { rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, basename, join } from "node:path";
-import { SessionStore, loadMessages, findSessionFile } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
+import { loadMessages } from "../lib/context/store.js";
 import { adoptResumeOrigin } from "../lib/cli.js";
 import { Agent } from "../lib/agent.js";
 import { Env } from "../lib/env.js";
@@ -24,45 +26,62 @@ const lines = (file) => readFileSync(file, "utf8").trim().split("\n").map(JSON.p
 /** The file's metadata record (first line). */
 const metadata = (file) => JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0]);
 
-describe("SessionStore", () => {
+describe("Context", () => {
   test("Agent with saving disabled never resumes a same-named disk session", () => {
     const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: {} });
-    const saved = new Agent({ env, session: "same-id", context: [USER("saved")], createIO: () => null });
-    saved.session.flush();
+    const saved = new Agent({ env, contextId: "same-id", context: [USER("saved")], createIO: () => null });
+    saved.context.flush();
     saved.close();
 
-    const memory = new Agent({ env, session: "same-id", sessionSave: false, context: [USER("live")], createIO: () => null });
-    expect(memory.sessionSave).toBe(false);
-    expect(memory.context.filter((message) => message.type === 2)).toEqual([USER("live")]);
-    memory.session.flush();
-    expect(SessionStore.resume({ id: "same-id", dir: memory._sessionDir }).context.filter((message) => message.type === 2)).toEqual([USER("saved")]);
+    const memory = new Agent({ env, contextId: "same-id", contextSave: false, context: [USER("live")], createIO: () => null });
+    expect(memory.context.save).toBe(false);
+    expect(memory.context.messages().filter((message) => message.type === 2)).toEqual([USER("live")]);
+    memory.context.flush();
+    expect(Context.resume({ id: "same-id", dir: env.settings.sessions }).messages().filter((message) => message.type === 2)).toEqual([USER("saved")]);
     memory.close();
   });
 
-  test("Agent defaults sessions to its Env settings folder", () => {
+  test("Agent follows the Env sessions folder: <settings folder>/sessions by default", () => {
     const settingsDir = join(ROOT, "agent-settings");
     const env = new Env({ settingsDir, cwd: ROOT, settings: {} });
-    const agent = new Agent({ env, session: "default-folder", createIO: () => null });
-    expect(agent._sessionDir).toBe(join(settingsDir, NAMES.sessionsDir));
-    expect(agent.session.dir).toBe(join(settingsDir, NAMES.sessionsDir));
+    expect(env.settings.sessions).toBe(join(settingsDir, NAMES.sessionsDir));
+    const agent = new Agent({ env, contextId: "default-folder", createIO: () => null });
+    expect(agent.context.dir).toBe(env.settings.sessions);
     agent.close();
   });
 
-  test("Agent with a user-layer-disabled Env still uses the default settings sessions folder", () => {
-    const env = new Env({ settingsDir: null, cwd: ROOT, settings: {} });
-    const agent = new Agent({ env, session: "disabled-layer", createIO: () => null });
-    expect(agent._sessionDir).toBe(join(Env.defaultSettingsDir(), NAMES.sessionsDir));
+  test("settings.settings.sessions moves the folder; a relative path resolves against the settings folder", () => {
+    const settingsDir = resolve(ROOT, "agent-settings-configured");
+    expect(new Env({ settingsDir, cwd: ROOT, settings: { sessions: "logs" } }).settings.sessions).toBe(join(settingsDir, "logs"));
+    const absolute = resolve(ROOT, "elsewhere");
+    const env = new Env({ settingsDir, cwd: ROOT, settings: { sessions: absolute } });
+    const agent = new Agent({ env, contextId: "configured-folder", createIO: () => null });
+    expect(agent.context.dir).toBe(absolute);
     agent.close();
+  });
+
+  test("a project settings file cannot redirect the sessions folder into the agent-writable tree", () => {
+    const project = resolve(ROOT, "project-redirect");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ sessions: join(project, "logs") }));
+    const settingsDir = resolve(ROOT, "project-redirect-settings");
+    const env = new Env({ settingsDir, cwd: project });
+    expect(env.settings.sessions).toBe(join(settingsDir, NAMES.sessionsDir));
+  });
+
+  test("an Env without a user settings layer uses the default settings folder's sessions", () => {
+    const env = new Env({ settingsDir: null, cwd: ROOT, settings: {} });
+    expect(env.settings.sessions).toBe(join(defaultSettingsDir(), NAMES.sessionsDir));
   });
 
   test("saving disabled retains context without creating a directory or file, then persists the full live context when enabled", () => {
     const dir = join(ROOT, "memory-only");
-    const store = new SessionStore({ id: "memory", dir, save: false });
+    const store = new Context({ id: "memory", dir, save: false });
     store.append(USER("private"));
     store.flush();
     expect(existsSync(dir)).toBe(false);
     expect(existsSync(store.file)).toBe(false);
-    expect(store.context).toEqual([USER("private")]);
+    expect(store.messages()).toEqual([USER("private")]);
     expect(store.save).toBe(false);
 
     expect(store.saveSet(true)).toBe(true);
@@ -72,7 +91,7 @@ describe("SessionStore", () => {
   });
 
   test("writes the context as plain messages — one metadata line, then one message per line", () => {
-    const store = new SessionStore({ id: "s1", dir: ROOT });
+    const store = new Context({ id: "s1", dir: ROOT });
     store.append(USER("one"));
     store.append({ type: 3, content: [{ type: "text", text: "two" }] });
     expect(existsSync(store.file)).toBe(false); // buffered until flush
@@ -82,7 +101,7 @@ describe("SessionStore", () => {
     expect(records).toEqual([USER("one"), { type: 3, content: [{ type: "text", text: "two" }] }]);
     expect(records.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     expect(store.file).toContain("s1.jsonl"); // date + uuid8 prefix, then the given name
-    expect(store.context).toHaveLength(2);
+    expect(store.messages()).toHaveLength(2);
     // the metadata line maps the session to its origin folder
     const meta = metadata(store.file);
     expect(meta.type).toBe("session-metadata");
@@ -92,7 +111,7 @@ describe("SessionStore", () => {
   });
 
   test("flush rewrites the whole file (edits are rewrites, not tombstones)", () => {
-    const store = new SessionStore({ id: "s1b", dir: ROOT });
+    const store = new Context({ id: "s1b", dir: ROOT });
     store.append(USER("one"));
     store.append({ type: 3, content: [{ type: "text", text: "two" }] });
     store.flush();
@@ -103,14 +122,14 @@ describe("SessionStore", () => {
   });
 
   test("resume loads the file into a fresh in-memory array", () => {
-    const store = new SessionStore({ id: "s2", dir: ROOT });
+    const store = new Context({ id: "s2", dir: ROOT });
     store.append(USER("a"));
     store.append({ type: 3, content: [{ type: "text", text: "b" }] });
     store.flush();
     store.close();
 
-    const resumed = SessionStore.resume({ id: "s2", dir: ROOT });
-    expect(resumed.context).toEqual([USER("a"), { type: 3, content: [{ type: "text", text: "b" }] }]);
+    const resumed = Context.resume({ id: "s2", dir: ROOT });
+    expect(resumed.messages()).toEqual([USER("a"), { type: 3, content: [{ type: "text", text: "b" }] }]);
     expect(resumed.id).toBe("s2");
     // resume continues the same file
     resumed.append(USER("c"));
@@ -123,7 +142,7 @@ describe("SessionStore", () => {
   });
 
   test("resume quietly ignores non-message records (metadata coexists)", () => {
-    const store = new SessionStore({ id: "s2b", dir: ROOT });
+    const store = new Context({ id: "s2b", dir: ROOT });
     store.append(USER("real"));
     store.flush();
     store.close();
@@ -136,8 +155,8 @@ describe("SessionStore", () => {
       "{not json\n" +
       JSON.stringify({ note: "no type here" }) + "\n");
 
-    const resumed = SessionStore.resume({ id: "s2b", dir: ROOT });
-    expect(resumed.context).toEqual([USER("real")]); // only the message survives
+    const resumed = Context.resume({ id: "s2b", dir: ROOT });
+    expect(resumed.messages()).toEqual([USER("real")]); // only the message survives
   });
 
   test("loadMessages reads JSONL, keeping records, ignoring the shapeless", () => {
@@ -154,11 +173,11 @@ describe("SessionStore", () => {
   });
 
   test("resume of a missing session is a clear error", () => {
-    expect(() => SessionStore.resume({ id: "nope", dir: ROOT })).toThrow(/no session "nope"/);
+    expect(() => Context.resume({ id: "nope", dir: ROOT })).toThrow(/no session "nope"/);
   });
 
   test("pure tail appends flush as just the new lines; edits still rewrite", () => {
-    const store = new SessionStore({ id: "fast-path", dir: ROOT });
+    const store = new Context({ id: "fast-path", dir: ROOT });
     store.append(USER("one"));
     store.flush();
     const full = readFileSync(store.file, "utf8");
@@ -178,21 +197,21 @@ describe("SessionStore", () => {
   });
 
   test("a resumed store appends via the fast-path and stays resumable", () => {
-    const store = new SessionStore({ id: "fast-resume", dir: ROOT });
+    const store = new Context({ id: "fast-resume", dir: ROOT });
     store.append(USER("seed"));
     store.close();
-    const resumed = SessionStore.resume({ id: "fast-resume", dir: ROOT });
+    const resumed = Context.resume({ id: "fast-resume", dir: ROOT });
     const before = readFileSync(resumed.file, "utf8");
     resumed.append({ type: 3, content: [{ type: "text", text: "more" }] }, { merge: false });
     resumed.flush();
     expect(readFileSync(resumed.file, "utf8").startsWith(before)).toBe(true);
-    const again = SessionStore.resume({ id: "fast-resume", dir: ROOT });
-    expect(again.context).toEqual([USER("seed"), { type: 3, content: [{ type: "text", text: "more" }] }]);
+    const again = Context.resume({ id: "fast-resume", dir: ROOT });
+    expect(again.messages()).toEqual([USER("seed"), { type: 3, content: [{ type: "text", text: "more" }] }]);
     again.close();
   });
 
   test("flush is idempotent; close detaches", () => {
-    const store = new SessionStore({ id: "s3", dir: ROOT });
+    const store = new Context({ id: "s3", dir: ROOT });
     store.append(USER("x"));
     store.flush();
     store.flush(); // no-op
@@ -204,9 +223,9 @@ describe("SessionStore", () => {
   });
 
   test("live async flush never commits an obsolete snapshot after a synchronous mutation", async () => {
-    const store = new SessionStore({ id: "async-race", dir: ROOT });
+    const store = new Context({ id: "async-race", dir: ROOT });
     store.append(USER("first"));
-    const pending = store._flushAsync();
+    const pending = store.flushAsync();
     store.append(USER("second"));
     store.flush();
     await pending;
@@ -214,23 +233,23 @@ describe("SessionStore", () => {
   });
 
   test("a stale live async snapshot leaves the later mutation dirty for the next async flush", async () => {
-    const store = new SessionStore({ id: "async-dirty", dir: ROOT });
+    const store = new Context({ id: "async-dirty", dir: ROOT });
     store.append(USER("first"));
-    const pending = store._flushAsync();
+    const pending = store.flushAsync();
     store.append(USER("second"));
     await pending;
     expect(store._dirty).toBeTruthy(); // "append" | "full", never false
-    await store._flushAsync();
+    await store.flushAsync();
     expect(lines(store.file)).toEqual([USER("first\n\nsecond")]);
     expect(store._dirty).toBe(false);
   });
 });
 
-describe("SessionStore file naming (date + sessionUUID prefix + name, no \"session-\" noise)", () => {
+describe("Context file naming (date + sessionUUID prefix + name, no \"session-\" noise)", () => {
   const STEM = /^(\d{4}-\d{2}-\d{2}) ([0-9a-f]{8})(?: (.+))?\.jsonl$/;
 
   test("an EXPLICIT id is the name from the start: date + uuid8 + id", () => {
-    const store = new SessionStore({ id: "my-project", dir: ROOT });
+    const store = new Context({ id: "my-project", dir: ROOT });
     store.append(USER("hello"));
     store.flush();
     const m = STEM.exec(basename(store.file));
@@ -243,7 +262,7 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
   });
 
   test("an UNNAMED session (default random-uuid id) derives its name from the first real message, then freezes it", () => {
-    const store = new SessionStore({ dir: ROOT }); // no id: a fresh random UUID
+    const store = new Context({ dir: ROOT }); // no id: a fresh random UUID
     store.append(USER("please fix the flaky login test once and for all today"));
     store.flush();
     const base = basename(store.file);
@@ -259,7 +278,7 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
   });
 
   test("a pure-thinking assistant message never qualifies as the first real message", () => {
-    const store = new SessionStore({ dir: ROOT });
+    const store = new Context({ dir: ROOT });
     store.append({ type: 3, content: [{ type: "thinking", text: "hmm let me think about this" }] });
     store.append(USER("the actual question, finally"));
     store.flush();
@@ -269,7 +288,7 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
   });
 
   test("rename() keeps the SAME date/uuid8 prefix — only the name segment changes", () => {
-    const store = new SessionStore({ id: "old-name", dir: ROOT });
+    const store = new Context({ id: "old-name", dir: ROOT });
     store.append(USER("x"));
     store.flush();
     const before = STEM.exec(basename(store.file));
@@ -282,7 +301,7 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
   });
 
   test("resuming, then reconstructing under the SAME id (restart-in-place) lands on the SAME file", () => {
-    const store = new SessionStore({ id: "restartable", dir: ROOT });
+    const store = new Context({ id: "restartable", dir: ROOT });
     store.append(USER("x"));
     store.flush();
     const originalFile = store.file;
@@ -290,7 +309,7 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
     // a fresh store built for the SAME id (e.g. /session-delete!'s
     // restart-in-place) adopts the existing file's uuid/name/created —
     // never orphans the old file under a new random uuid8
-    const fresh = new SessionStore({ id: "restartable", dir: ROOT, context: [] });
+    const fresh = new Context({ id: "restartable", dir: ROOT, messages: [] });
     expect(fresh.file).toBe(originalFile);
     fresh.flush(); // empty content: this removes the (now stale) file
     expect(existsSync(originalFile)).toBe(false);
@@ -306,15 +325,15 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
       JSON.stringify({ type: "session-metadata", version: 1, id: "old-label", uuid: "deadbeef-0000-0000-0000-000000000000", name: "old-label", cwd: ROOT, created: "2026-01-01T00:00:00.000Z" }),
       JSON.stringify(USER("still here")),
     ].join("\n") + "\n");
-    expect(findSessionFile(ROOT, "old-label")).toBe(legacyFile);
-    const resumed = SessionStore.resume({ id: "old-label", dir: ROOT });
-    expect(resumed.context).toEqual([USER("still here")]);
+    expect(Context.fileOf({ dir: ROOT, id: "old-label" })).toBe(legacyFile);
+    const resumed = Context.resume({ id: "old-label", dir: ROOT });
+    expect(resumed.messages()).toEqual([USER("still here")]);
     expect(resumed.file).toBe(legacyFile); // pinned — never silently renamed
     resumed.close();
   });
 
   test("an EMPTY session never gets a file (flush/close write nothing)", () => {
-    const store = new SessionStore({ id: "empty1", dir: ROOT });
+    const store = new Context({ id: "empty1", dir: ROOT });
     store.flush();
     expect(existsSync(store.file)).toBe(false); // nothing to persist
     store.close(); // close flushes — still no file
@@ -322,21 +341,21 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
   });
 
   test("emptying an ACTIVE session REMOVES its file (rollback to zero)", () => {
-    const store = new SessionStore({ id: "empty2", dir: ROOT });
+    const store = new Context({ id: "empty2", dir: ROOT });
     store.append(USER("one"));
     store.append({ type: 3, content: [{ type: "text", text: "two" }] });
     store.flush();
     expect(existsSync(store.file)).toBe(true);
     store.rollback(0); // the whole conversation goes away
     store.flush();
-    expect(store.context).toHaveLength(0);
+    expect(store.messages()).toHaveLength(0);
     expect(existsSync(store.file)).toBe(false); // the stale file is gone
   });
 
   test("flush on an untouched empty session still removes a stale file", () => {
     // a foreign/leftover file under this session's id: not dirty, yet
     // the empty active session owns no file
-    const store = new SessionStore({ id: "empty3", dir: ROOT });
+    const store = new Context({ id: "empty3", dir: ROOT });
     writeFileSync(store.file, JSON.stringify(USER("stale")) + "\n");
     store.flush(); // not dirty — but empty contexts never hold a file
     expect(existsSync(store.file)).toBe(false);
@@ -345,42 +364,39 @@ describe("SessionStore file naming (date + sessionUUID prefix + name, no \"sessi
 
 describe("Agent session wiring (wholly inside Agent)", () => {
   test("sessionId creates the file store; appends mirror; synced onDone", async () => {
-    const env = await testEnv();
-    env.registerTool("t", () => "out", { description: "t", inputSchema: {} });
+    const env = await testEnv({ sessions: resolve(ROOT) });
+    env.toolAdd("t", () => "out", { description: "t", inputSchema: {} });
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
       [...TEXT(0, "final"), { type: "done" }],
     ]);
     const agent = new Agent({
-      env, model: "p/m", session: "wired", sessionDir: ROOT,
-      context: [USER("go")], createIO: () => io,
+      env, model: "p/m", contextId: "wired", context: [USER("go")], createIO: () => io,
     });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
 
     // synced onDone: the file already holds the full mirror — no manual flush
-    const records = lines(agent.session.file);
-    expect(records).toEqual(agent.context.slice(0)); // full ordered mirror
+    const records = lines(agent.context.file);
+    expect(records).toEqual(agent.context.messages().slice(0)); // full ordered mirror
     expect(records.map((m) => m.type)).toEqual([2, 3, 4, 3]); // seed, assistant, tool result, assistant
   });
 
   test("resume restores the context; the next run continues it", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io1 = scriptedIO([[...TEXT(0, "first answer"), { type: "done" }]]);
     const first = new Agent({
-      env, model: "p/m", session: "cont", sessionDir: ROOT,
-      context: [USER("q1")], createIO: () => io1,
+      env, model: "p/m", contextId: "cont", context: [USER("q1")], createIO: () => io1,
     });
     await first.run();
-    first.session.close();
+    first.context.close();
 
     const io2 = scriptedIO([[...TEXT(0, "second answer"), { type: "done" }]]);
     const resumed = new Agent({
-      env, model: "p/m", session: "cont", sessionDir: ROOT,
-      context: [USER("q2")], createIO: () => io2,
+      env, model: "p/m", contextId: "cont", context: [USER("q2")], createIO: () => io2,
     });
     // loaded history + fresh input CONTINUES the session
-    expect(resumed.context).toEqual([
+    expect(resumed.context.messages()).toEqual([
       USER("q1"),
       { type: 3, content: [{ type: "text", text: "first answer" }] },
       USER("q2"),
@@ -389,13 +405,13 @@ describe("Agent session wiring (wholly inside Agent)", () => {
     expect(resumed.context.at(-1)).toEqual({ type: 3, content: [{ type: "text", text: "second answer" }] });
     expect(io2.writes[0].context).toHaveLength(3); // continued context went to the provider
     // the continuation reached the file
-    resumed.session.close();
-    const continued = SessionStore.resume({ id: "cont", dir: ROOT });
-    expect(continued.context).toEqual(resumed.context);
+    resumed.context.close();
+    const continued = Context.resume({ id: "cont", dir: ROOT });
+    expect(continued.messages()).toEqual(resumed.context.messages());
   });
 
   test("no sessionId/session: purely in-memory, no files appear", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io = scriptedIO([[{ type: "done" }]]);
     const agent = new Agent({ env, model: "p/m", context: [USER("x")], createIO: () => io });
     await agent.run();
@@ -403,34 +419,34 @@ describe("Agent session wiring (wholly inside Agent)", () => {
   });
 });
 
-describe("context merging at append (Agent + SessionStore)", () => {
+describe("context merging at append (Agent + Context)", () => {
   test("consecutive same-type appends merge into one message", () => {
-    const store = new SessionStore({ id: "merge-1", dir: ROOT });
+    const store = new Context({ id: "merge-1", dir: ROOT });
     store.append(USER("queued one"));
     store.append(USER("queued two"));
-    expect(store.context).toHaveLength(1);
-    expect(store.context[0].content).toEqual([{ type: "text", text: "queued one\n\nqueued two" }]);
+    expect(store.messages()).toHaveLength(1);
+    expect(store.at(0).content).toEqual([{ type: "text", text: "queued one\n\nqueued two" }]);
     store.flush();
     expect(lines(store.file)).toHaveLength(1); // the merge persists
   });
 
   test("tool results never merge — call→answer linkage stays per-message", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "alpha", {}), ...TOOLCALL(1, "c2", "alpha", {})],
       [...TEXT(0, "done")],
     ]);
-    env.registerTool?.("alpha", async () => "ok"); // programmatic tools when supported
+    env.toolAdd?.("alpha", async () => "ok"); // programmatic tools when supported
     const agent = new Agent({ env, model: "p/m", createIO: () => io });
     agent._callTool = async () => "ok"; // bypass dispatch: linkage is what matters here
     await agent.run();
-    const results = agent.context.filter((m) => m.type === 4);
+    const results = agent.context.messages().filter((m) => m.type === 4);
     expect(results).toHaveLength(2); // one result per call, never folded
     expect(results.map((m) => m.callId)).toEqual(["c1", "c2"]);
   });
 
   test("a cancel-partial assistant message merges with the next turn's", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const io = scriptedIO([
       [{ type: "error", error: "cancelled", kind: "cancelled", cancelled: true,
          message: { type: 3, content: [{ type: "thinking", text: "half a thought" }] } }],
@@ -442,7 +458,7 @@ describe("context merging at append (Agent + SessionStore)", () => {
     const agent = new Agent({ env, model: "p/m", createIO: () => io });
     await agent.run(); // cancelled: partial assistant persisted
     await agent.run(); // next turn: consecutive assistant messages merge
-    const assistants = agent.context.filter((m) => m.type === 3);
+    const assistants = agent.context.messages().filter((m) => m.type === 3);
     expect(assistants).toHaveLength(1);
     expect(assistants[0].content).toEqual([
       { type: "thinking", text: "half a thought\n\nthe rest" },
@@ -451,13 +467,13 @@ describe("context merging at append (Agent + SessionStore)", () => {
   });
 });
 
-describe("SessionStore.list / latest (session folder overview)", () => {
+describe("Context.list / latest (session folder overview)", () => {
   const seed = async () => {
-    const older = new SessionStore({ id: "older", dir: ROOT });
+    const older = new Context({ id: "older", dir: ROOT });
     older.append(USER("first question about apples and pears and more fruit besides"));
     older.close();
     await Bun.sleep(20); // distinct mtimes
-    const newer = new SessionStore({ id: "newer", dir: ROOT });
+    const newer = new Context({ id: "newer", dir: ROOT });
     newer.append(USER("second question"));
     newer.append({ type: 3, content: [{ type: "text", text: "second answer" }] });
     newer.close();
@@ -465,7 +481,7 @@ describe("SessionStore.list / latest (session folder overview)", () => {
 
   test("lists sessions latest-first with message counts and first-user-message previews", async () => {
     await seed();
-    const list = SessionStore.list({ dir: ROOT });
+    const list = Context.list({ dir: ROOT });
     expect(list.map((s) => s.id)).toEqual(["newer", "older"]);
     expect(list[0].messages).toBe(2);
     expect(list[0].preview).toBe("second question");
@@ -476,16 +492,16 @@ describe("SessionStore.list / latest (session folder overview)", () => {
 
   test("long previews truncate with an ellipsis; a system-message-only session persists nothing", async () => {
     await seed();
-    const verbose = new SessionStore({ id: "verbose", dir: ROOT });
+    const verbose = new Context({ id: "verbose", dir: ROOT });
     verbose.append(USER("x".repeat(200)));
     verbose.close();
-    const empty = new SessionStore({ id: "system-only", dir: ROOT });
+    const empty = new Context({ id: "system-only", dir: ROOT });
     empty.append({ type: 1, content: [{ type: "text", text: "no user here" }] });
     empty.close();
     // only system messages = the seeded prompt awaiting the first user
     // message — the conversation hasn't started, so no file exists
     expect(existsSync(empty.file)).toBe(false);
-    const list = SessionStore.list({ dir: ROOT });
+    const list = Context.list({ dir: ROOT });
     const v = list.find((s) => s.id === "verbose");
     expect(v.preview.length).toBe(72);
     expect(v.preview.endsWith("…")).toBe(true);
@@ -493,20 +509,20 @@ describe("SessionStore.list / latest (session folder overview)", () => {
   });
 
   test("latest() is the most recently modified session's id; a missing folder lists empty", async () => {
-    expect(SessionStore.list({ dir: `${ROOT}/nope` })).toEqual([]);
-    expect(SessionStore.latest({ dir: `${ROOT}/nope` })).toBeUndefined();
+    expect(Context.list({ dir: `${ROOT}/nope` })).toEqual([]);
+    expect(Context.latest({ dir: `${ROOT}/nope` })).toBeUndefined();
     await seed();
-    expect(SessionStore.latest({ dir: ROOT })).toBe("newer");
+    expect(Context.latest({ dir: ROOT })).toBe("newer");
   });
 
   test("listAsync exactly matches synchronous metadata, ordering, and previews", async () => {
     await seed();
-    const foreign = new SessionStore({ id: "foreign-async", dir: ROOT, origin: `${ROOT}/elsewhere` });
+    const foreign = new Context({ id: "foreign-async", dir: ROOT, origin: `${ROOT}/elsewhere` });
     foreign.append(USER("foreign question"));
     foreign.close();
-    const sync = SessionStore.list({ dir: ROOT, cwd: process.cwd() });
-    expect(await SessionStore.listAsync({ dir: ROOT, cwd: process.cwd() })).toEqual(sync);
-    expect(await SessionStore.listAsync({ dir: `${ROOT}/nope` })).toEqual([]);
+    const sync = Context.list({ dir: ROOT, cwd: process.cwd() });
+    expect(await Context.listAsync({ dir: ROOT, cwd: process.cwd() })).toEqual(sync);
+    expect(await Context.listAsync({ dir: `${ROOT}/nope` })).toEqual([]);
   });
 
   test("previews start at the first meaningful line: courtesy and intro lines skip, bullets strip", () => {
@@ -519,27 +535,27 @@ describe("SessionStore.list / latest (session folder overview)", () => {
       ["Please add a login page", "Please add a login page"], // nothing else: the first line stands
     ];
     for (const [text, preview] of cases) {
-      const store = new SessionStore({ id: `p${cases.findIndex((c) => c[0] === text)}`, dir: ROOT });
+      const store = new Context({ id: `p${cases.findIndex((c) => c[0] === text)}`, dir: ROOT });
       store.append(USER(text));
       store.close();
-      expect(SessionStore.list({ dir: ROOT }).find((s) => s.id === store.id).preview).toBe(preview);
+      expect(Context.list({ dir: ROOT }).find((s) => s.id === store.id).preview).toBe(preview);
     }
   });
 
   test("lists carry a non-default agent name; default agent-N names stay out", () => {
-    const named = new SessionStore({ id: "named-agent", dir: ROOT, settings: { name: "reviewer" } });
+    const named = new Context({ id: "named-agent", dir: ROOT, settings: { name: "reviewer" } });
     named.append(USER("q"));
     named.close();
-    const plain = new SessionStore({ id: "plain-agent", dir: ROOT, settings: { name: "agent-3" } });
+    const plain = new Context({ id: "plain-agent", dir: ROOT, settings: { name: "agent-3" } });
     plain.append(USER("q"));
     plain.close();
-    const list = SessionStore.list({ dir: ROOT });
+    const list = Context.list({ dir: ROOT });
     expect(list.find((s) => s.id === "named-agent").agent).toBe("reviewer");
     expect("agent" in list.find((s) => s.id === "plain-agent")).toBe(false);
   });
 
   test("a derived name moves an early-flushed session: the unnamed file goes away, the id lists once", async () => {
-    const store = new SessionStore({ dir: ROOT });
+    const store = new Context({ dir: ROOT });
     store.append({ type: 3, content: [{ type: "thinking", text: "no text to name by" }] });
     store.flush();
     const unnamed = store.file;
@@ -552,186 +568,229 @@ describe("SessionStore.list / latest (session folder overview)", () => {
     store.close();
     // a leftover copy from before the fix still lists once (newest wins)
     writeFileSync(unnamed, readFileSync(store.file, "utf8").split("\n").slice(0, 2).join("\n") + "\n");
-    expect(SessionStore.list({ dir: ROOT }).filter((s) => s.id === store.id)).toHaveLength(1);
-    expect((await SessionStore.listAsync({ dir: ROOT })).filter((s) => s.id === store.id)).toHaveLength(1);
+    expect(Context.list({ dir: ROOT }).filter((s) => s.id === store.id)).toHaveLength(1);
+    expect((await Context.listAsync({ dir: ROOT })).filter((s) => s.id === store.id)).toHaveLength(1);
   });
 
   test("renameById / deleteById manage a stored session without a live store", () => {
-    const store = new SessionStore({ id: "stored", dir: ROOT });
+    const store = new Context({ id: "stored", dir: ROOT });
     store.append(USER("keep me"));
     store.close();
-    const renamed = SessionStore.renameById({ id: "stored", name: "renamed", dir: ROOT });
+    const renamed = Context.renameById({ id: "stored", name: "renamed", dir: ROOT });
     expect(renamed.id).toBe("renamed");
-    expect(SessionStore.list({ dir: ROOT }).map((s) => s.id)).toEqual(["renamed"]);
-    expect(SessionStore.list({ dir: ROOT })[0].preview).toBe("keep me");
-    expect(SessionStore.deleteById({ id: "renamed", dir: ROOT })).toEqual({ deleted: 1 });
-    expect(SessionStore.list({ dir: ROOT })).toEqual([]);
-    expect(() => SessionStore.renameById({ id: "gone", name: "x", dir: ROOT })).toThrow(/no session/);
+    expect(Context.list({ dir: ROOT }).map((s) => s.id)).toEqual(["renamed"]);
+    expect(Context.list({ dir: ROOT })[0].preview).toBe("keep me");
+    expect(Context.deleteById({ id: "renamed", dir: ROOT })).toEqual({ deleted: 1 });
+    expect(Context.list({ dir: ROOT })).toEqual([]);
+    expect(() => Context.renameById({ id: "gone", name: "x", dir: ROOT })).toThrow(/no session/);
   });
 });
 
-describe("Agent.newSession / forkSession anonymous semantics", () => {
-  test("new and fork preserve the current SessionStore save setting", () => {
+describe("Agent.contextNew / contextFork anonymous semantics", () => {
+  test("new and fork preserve the current Context save setting", () => {
     const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: {} });
-    const agent = new Agent({ env, session: "memory", sessionSave: false, createIO: () => null });
-    expect(agent.newSession("next").id).toBe("next");
-    expect(agent.sessionSave).toBe(false);
-    expect(agent.fork("fork").id).toBe("fork");
-    expect(agent.sessionSave).toBe(false);
-    expect(existsSync(agent.session.dir)).toBe(false);
+    const agent = new Agent({ env, contextId: "memory", contextSave: false, createIO: () => null });
+    expect(agent.contextNew("next").id).toBe("next");
+    expect(agent.context.save).toBe(false);
+    expect(agent.contextFork("fork").id).toBe("fork");
+    expect(agent.context.save).toBe(false);
+    expect(existsSync(agent.context.dir)).toBe(false);
     agent.close();
   });
-  test("anon/0/false all select an anonymous session; /session-new from anonymous STAYS anonymous", async () => {
-    const env = await testEnv();
+  test("anonymous spellings (false/0/false/anon) select a session that is not logged; ids never switch logging", async () => {
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "named", dir: ROOT }), createIO: () => null,
+      context: new Context({ id: "named", dir: ROOT }), createIO: () => null,
     });
-    // the anonymous spellings
-    for (const id of ["anon", "0", "false"]) {
-      const result = agent.newSession(id);
-      expect(result.anonymous).toBe(true);
-      expect(agent.session).toBeNull();
-      const named = agent.newSession(`n-${id}`); // back to persisted
-      expect(named.anonymous).toBeUndefined();
-      expect(agent.session.id).toBe(`n-${id}`);
+    for (const id of [false, "anon", "0", "false"]) {
+      agent.context.saveSet(true);
+      const result = agent.contextNew(id);
+      expect(result.save).toBe(false);
+      expect(agent.context.save).toBe(false);
+      expect(agent.context).toBeInstanceOf(Context); // always a store, never null
+      expect(agent.context.id).not.toBe(id); // the spelling is not an id
+      expect(existsSync(agent.context.file)).toBe(false);
     }
-    // anonymous STAYS anonymous: no id from an anonymous session must
-    // not silently start persisting
-    agent.newSession("anon");
-    const again = agent.newSession();
-    expect(again.anonymous).toBe(true);
-    expect(agent.session).toBeNull();
-    // fork accepts the anon spelling too
-    agent.newSession("named2");
-    const forked = agent.fork("anon");
-    expect(forked.anonymous).toBe(true);
-    expect(agent.session).toBeNull();
+    // a session that is not logged stays so — with or without a new id
+    expect(agent.contextNew().save).toBe(false);
+    expect(agent.contextNew("named2").save).toBe(false);
+    expect(agent.context.id).toBe("named2");
+    // logging is one switch; fork keeps it, an anonymous spelling drops it
+    agent.context.saveSet(true);
+    expect(agent.contextFork().save).toBe(true);
+    expect(agent.contextFork("anon").save).toBe(false);
+    agent.close();
+  });
+  test("session: false (or omitted) gives a memory-only store; logging it later writes the WHOLE conversation", () => {
+    const dir = resolve(ROOT, "memory-first-sessions");
+    const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: { sessions: dir } });
+    for (const options of [{ session: false }, {}, { session: "anon" }]) {
+      const agent = new Agent({ env, context: [USER("keep me")], createIO: () => null, ...options });
+      expect(agent.context).toBeInstanceOf(Context);
+      expect(agent.context.save).toBe(false);
+      expect(agent.context.dir).toBe(dir);
+      expect(agent.context.summary).toBe(`${agent.context.id} — not logged (memory only)`);
+      agent.context.flush();
+      expect(existsSync(agent.context.file)).toBe(false);
+      const context = agent.context;
+      expect(agent.context.saveSet(true)).toBe(true);
+      agent.context.flush();
+      expect(agent.context).toBe(context); // the same conversation, now logged
+      expect(readFileSync(agent.context.file, "utf8")).toContain("keep me");
+      expect(agent.context.summary).toBe(`${agent.context.id} — ${agent.context.file}`);
+      agent.close();
+    }
+    expect(() => new Agent({ env, contextId: null, createIO: () => null })).toThrow(/contextId must be an id or false/);
+  });
+  test("a session that is not logged can be named first; logging then writes under that name", () => {
+    const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: { sessions: resolve(ROOT, "named-later") } });
+    const agent = new Agent({ env, context: [USER("hello")], contextId: false, createIO: () => null });
+    expect(agent.context.rename("later").id).toBe("later");
+    expect(existsSync(agent.context.file)).toBe(false);
+    agent.context.saveSet(true);
+    agent.context.flush();
+    expect(basename(agent.context.file)).toContain("later");
+    expect(existsSync(agent.context.file)).toBe(true);
+    agent.close();
+  });
+  test("fork from a session that is not logged keeps its context under the env's sessions folder", () => {
+    const dir = resolve(ROOT, "anonymous-fork-sessions");
+    const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: { sessions: dir } });
+    const agent = new Agent({ env, context: [], createIO: () => null });
+    agent.context.append(USER("carried"));
+    const before = agent.context;
+    const forked = agent.contextFork();
+    expect(forked.save).toBe(false);
+    expect(agent.context.dir).toBe(dir);
+    expect(agent.context).not.toBe(before); // a new Context under a new id …
+    expect(agent.context.messages()).toEqual(before.messages()); // … carrying the same conversation
+    agent.close();
   });
 });
 
-describe("Agent.resumeSession / listSessions / latestSessionId", () => {
-  test("resumeSession switches the live context to the stored session's", async () => {
-    const stored = new SessionStore({ id: "stored", dir: ROOT });
+describe("Agent.contextResume / Context.list / Context.latest", () => {
+  test("contextResume switches the live context to the stored session's", async () => {
+    const stored = new Context({ id: "stored", dir: ROOT });
     stored.append(USER("stored question"));
     stored.append({ type: 3, content: [{ type: "text", text: "stored answer" }] });
     stored.close();
 
     const agent = new Agent({
-      env: await testEnv(), model: "p/m",
-      session: new SessionStore({ id: "live", dir: ROOT }), createIO: () => null,
+      env: await testEnv({ sessions: resolve(ROOT) }), model: "p/m",
+      context: new Context({ id: "live", dir: ROOT }), createIO: () => null,
     });
-    expect(agent.context).toEqual([]);
-    const result = agent.resumeSession("stored");
+    expect(agent.context.messages()).toEqual([]);
+    const result = agent.contextResume("stored");
     expect(result.id).toBe("stored");
-    expect(agent.session.id).toBe("stored");
-    expect(agent.context.map((m) => m.type)).toEqual([2, 3]);
-    expect(() => agent.resumeSession("missing")).toThrow(/no session "missing"/);
-    expect(agent.session.id).toBe("stored"); // unchanged on failure
+    expect(agent.context.id).toBe("stored");
+    expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3]);
+    expect(() => agent.contextResume("missing")).toThrow(/no session "missing"/);
+    expect(agent.context.id).toBe("stored"); // unchanged on failure
   });
 
-  test("listSessions/latestSessionId read only the agent ORIGIN folder's sessions", async () => {
-    const env = await testEnv();
-    const a = new SessionStore({ id: "a", dir: ROOT, origin: env.cwd });
+  test("Context.list/latest read only the ORIGIN folder's sessions", async () => {
+    const env = await testEnv({ sessions: resolve(ROOT) });
+    const a = new Context({ id: "a", dir: ROOT, origin: env.cwd });
     a.append(USER("question a"));
     a.close();
     await Bun.sleep(20); // distinct mtimes
-    const live = new SessionStore({ id: "b", dir: ROOT, origin: env.cwd });
+    const live = new Context({ id: "b", dir: ROOT, origin: env.cwd });
     live.append(USER("question b"));
     live.close(); // only flushed sessions have a file to list
     // a session that ran in ANOTHER folder never lists for this project
-    const foreign = new SessionStore({ id: "foreign", dir: ROOT, origin: process.cwd() });
+    const foreign = new Context({ id: "foreign", dir: ROOT, origin: process.cwd() });
     foreign.append(USER("elsewhere"));
     foreign.close();
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "c", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "c", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    expect(agent.latestSessionId()).toBe("b"); // the newest file OF THIS ORIGIN
-    const ids = agent.listSessions().map((s) => s.id);
+    expect(Context.latest({ dir: agent.env.settings.sessions, cwd: agent.env.cwd })).toBe("b"); // the newest file OF THIS ORIGIN
+    const ids = Context.list({ dir: agent.env.settings.sessions, cwd: agent.env.cwd }).map((s) => s.id);
     expect(ids).toContain("a");
     expect(ids).toContain("b");
     expect(ids).not.toContain("foreign"); // filtered by the origin metadata
-    // an anonymous agent reads the same folder via its sessionDir
+    // an anonymous agent reads the same folder: the env's sessionsDir
     const anon = new Agent({
       env, model: "p/m",
-      sessionDir: ROOT, createIO: () => null,
+      createIO: () => null,
     });
-    expect(anon.listSessions().map((s) => s.id)).toContain("a");
+    expect(Context.list({ dir: anon.env.settings.sessions, cwd: anon.env.cwd }).map((s) => s.id)).toContain("a");
     // an explicit id resumes even across origins (the user asked by name)
-    const resumed = agent.resumeSession("foreign");
+    const resumed = agent.contextResume("foreign");
     expect(resumed.id).toBe("foreign");
   });
 
-  test("resumeSession adopts the session's ORIGIN folder as the cwd (resume anywhere)", async () => {
+  test("contextResume adopts the session's ORIGIN folder as the cwd (resume anywhere)", async () => {
     // a session recorded against ANOTHER folder: resuming it moves the
     // process (and the environment's project-folder surface) there —
     // the bins' shape, where env.cwd IS the process folder
     const elsewhere = `${ROOT}/elsewhere`;
     mkdirSync(elsewhere, { recursive: true });
-    const foreign = new SessionStore({ id: "faraway", dir: ROOT, origin: elsewhere });
+    const foreign = new Context({ id: "faraway", dir: ROOT, origin: elsewhere });
     foreign.append(USER("from another folder"));
     foreign.close();
-    expect(SessionStore.originOf({ id: "faraway", dir: ROOT })).toBe(elsewhere);
-    expect(SessionStore.originOf({ id: "missing", dir: ROOT })).toBeUndefined();
+    expect(Context.originOf({ id: "faraway", dir: ROOT })).toBe(elsewhere);
+    expect(Context.originOf({ id: "missing", dir: ROOT })).toBeUndefined();
 
     const { Env } = await import("../lib/env.js");
-    const env = new Env({ dir: ROOT, cwd: process.cwd(), settings: { providers: { p: { provider: "test", url: "test://script" } } }, settingsDir: ROOT });
+    const env = new Env({ dir: ROOT, cwd: process.cwd(), settings: { sessions: resolve(ROOT), providers: { p: { provider: "test", url: "test://script" } } }, settingsDir: ROOT });
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "home", dir: ROOT }), createIO: () => null,
+      context: new Context({ id: "home", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
     const elsewhereAbs = resolve(elsewhere); // BEFORE the chdir below
     try {
-      const result = agent.resumeSession("faraway");
+      const result = agent.contextResume("faraway");
       expect(result.cwd).toBe(elsewhere);
       expect(result.originMissing).toBe(false);
       expect(process.cwd()).toBe(elsewhereAbs);
       expect(env.cwd).toBe(elsewhere); // the environment followed (the recorded origin)
-      expect(env.environment.folders.find((f) => f.title === "project folder").path).toBe(elsewhere);
+      expect(env.folders.find((f) => f.kind === "project").path).toBe(elsewhere);
     } finally {
       process.chdir(before); // the rest of the suite runs from the project
     }
   });
 
-  test("resumeSession on an EMBEDDED host (env.cwd elsewhere) adopts env-side only", async () => {
+  test("contextResume on an EMBEDDED host (env.cwd elsewhere) adopts env-side only", async () => {
     // the process must NOT move when the environment doesn't track it
     const elsewhere = `${ROOT}/embedded-origin`;
     mkdirSync(elsewhere, { recursive: true });
-    const foreign = new SessionStore({ id: "embedded", dir: ROOT, origin: elsewhere });
+    const foreign = new Context({ id: "embedded", dir: ROOT, origin: elsewhere });
     foreign.append(USER("x"));
     foreign.close();
-    const env = await testEnv(); // env.cwd is a temp folder, not the process's
+    const env = await testEnv({ sessions: resolve(ROOT) }); // env.cwd is a temp folder, not the process's
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "emb-home", dir: ROOT }), createIO: () => null,
+      context: new Context({ id: "emb-home", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
-    const result = agent.resumeSession("embedded");
+    const result = agent.contextResume("embedded");
     expect(result.cwd).toBe(elsewhere);
     expect(process.cwd()).toBe(before); // untouched
     expect(env.cwd).toBe(elsewhere); // the environment adopted the origin
   });
 
-  test("resumeSession with a VANISHED origin folder stays put and reports it", async () => {
+  test("contextResume with a VANISHED origin folder stays put and reports it", async () => {
     const gone = `${ROOT}/gone`;
     mkdirSync(gone, { recursive: true });
-    const foreign = new SessionStore({ id: "ghost", dir: ROOT, origin: gone });
+    const foreign = new Context({ id: "ghost", dir: ROOT, origin: gone });
     foreign.append(USER("from a deleted folder"));
     foreign.close();
     rmSync(gone, { recursive: true, force: true });
 
     const agent = new Agent({
-      env: await testEnv(), model: "p/m",
-      session: new SessionStore({ id: "home2", dir: ROOT }), createIO: () => null,
+      env: await testEnv({ sessions: resolve(ROOT) }), model: "p/m",
+      context: new Context({ id: "home2", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
-    const result = agent.resumeSession("ghost");
+    const result = agent.contextResume("ghost");
     expect(result.originMissing).toBe(true);
     expect(result.cwd).toBeUndefined();
     expect(process.cwd()).toBe(before); // stayed
-    expect(agent.session.id).toBe("ghost"); // the session itself resumed fine
+    expect(agent.context.id).toBe("ghost"); // the session itself resumed fine
   });
 
   test("adoptResumeOrigin (the bins' --resume <id>): chdir, latest/anonymous never move, failures are clear", () => {
@@ -741,7 +800,7 @@ describe("Agent.resumeSession / listSessions / latestSessionId", () => {
     const sessionsDir = `${settingsHome}/${NAMES.sessionsDir}`;
     const elsewhere = `${ROOT}/bin-resume`;
     mkdirSync(elsewhere, { recursive: true });
-    const foreign = new SessionStore({ id: "binres", dir: sessionsDir, origin: elsewhere });
+    const foreign = new Context({ id: "binres", dir: sessionsDir, origin: elsewhere });
     foreign.append(USER("x"));
     foreign.close();
 
@@ -766,67 +825,68 @@ describe("Agent.resumeSession / listSessions / latestSessionId", () => {
   test("deleteAll empties the sessions folder (every session file; foreign .jsonl files stay)", () => {
     const target = `${ROOT}/delete-all`;
     for (const id of ["x", "y"]) {
-      const store = new SessionStore({ id, dir: target });
+      const store = new Context({ id, dir: target });
       store.append(USER("q"));
       store.close();
     }
     writeFileSync(`${target}/keep.txt`, "foreign");
     writeFileSync(`${target}/notes.jsonl`, "not ours"); // foreign .jsonl: no metadata header
-    expect(SessionStore.deleteAll({ dir: target })).toEqual({ deleted: 2 });
+    expect(Context.deleteAll({ dir: target })).toEqual({ deleted: 2 });
     expect(existsSync(`${target}/x.jsonl`)).toBe(false); // new naming: no prefix
     expect(existsSync(`${target}/keep.txt`)).toBe(true); // foreign files stay
     expect(existsSync(`${target}/notes.jsonl`)).toBe(true); // foreign .jsonl stays too
-    expect(SessionStore.deleteAll({ dir: target })).toEqual({ deleted: 0 });
+    expect(Context.deleteAll({ dir: target })).toEqual({ deleted: 0 });
   });
 });
 
 describe("Session-persisted agent settings (resume restores the configuration)", () => {
-  test("SessionStore persists the settings record in the metadata line and carries it on resume", () => {
-    const store = new SessionStore({ id: "prefs", dir: ROOT });
+  test("Context persists the settings record in the metadata line and carries it on resume", () => {
+    const store = new Context({ id: "prefs", dir: ROOT });
     store.append(USER("q"));
-    store.settings = { safe: true, thinking: "high", endpoint: "p", model: "m" };
+    store.settingsSet({ safe: true, thinking: "high", endpoint: "p", model: "m" });
     store.flush();
     const meta = metadata(store.file);
     expect(meta.agent).toEqual({ safe: true, thinking: "high", endpoint: "p", model: "m" });
     store.close();
 
-    const resumed = SessionStore.resume({ id: "prefs", dir: ROOT });
+    const resumed = Context.resume({ id: "prefs", dir: ROOT });
     expect(resumed.settings).toEqual({ safe: true, thinking: "high", endpoint: "p", model: "m" });
     resumed.close();
   });
 
   test("a session without a settings record resumes with none (tolerant reader)", () => {
-    const store = new SessionStore({ id: "plain", dir: ROOT });
+    const store = new Context({ id: "plain", dir: ROOT });
     store.append(USER("q"));
     store.close();
     expect(metadata(store.file).agent).toBeUndefined();
-    const resumed = SessionStore.resume({ id: "plain", dir: ROOT });
+    const resumed = Context.resume({ id: "plain", dir: ROOT });
     expect(resumed.settings).toBeUndefined();
     resumed.close();
   });
 
-  test("agent mutations record into the store; resumeSession restores them", async () => {
-    const env = await testEnv();
+  test("agent mutations record into the store; contextResume restores them", async () => {
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "configured", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "configured", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    agent.append(USER("hello"));
-    agent.setSafe(true);
-    agent.setThinking("high");
-    agent.setModel("p1/m");
-    agent.name = "pilot";
-    agent.description = "the flying one";
-    agent.setSpawnPermission(true);
-    agent.sessionSaveSet(false);
-    agent.sessionSaveSet(true); // net: saving on
-    agent.session.flush();
-    const meta = metadata(agent.session.file);
-    expect(meta.agent).toMatchObject({ safe: true, thinking: "high", endpoint: "p1", model: "m", name: "pilot", description: "the flying one", spawnPermission: true, sessionSave: true });
+    agent.context.append(USER("hello"));
+    agent.safeSet(true);
+    agent.thinkingSet("high");
+    agent.modelSet("p1/m");
+    agent.nameSet("pilot");
+    agent.descriptionSet("the flying one");
+    agent.spawnPermissionSet(true);
+    agent.context.saveSet(false);
+    agent.context.saveSet(true); // net: saving on
+    agent.context.flush();
+    const meta = metadata(agent.context.file);
+    expect(meta.agent).toMatchObject({ safe: true, thinking: "high", endpoint: "p1", model: "m", name: "pilot", description: "the flying one", spawnPermission: true });
+    expect(meta.agent.sessionSave).toBeUndefined(); // logging is the context's own flag, not an agent setting
 
-    const bare = new Agent({ env, session: new SessionStore({ id: "scratch", dir: ROOT, origin: env.cwd }), createIO: () => null });
+    const bare = new Agent({ env, context: new Context({ id: "scratch", dir: ROOT, origin: env.cwd }), createIO: () => null });
     expect(bare.safe).toBe(false);
-    bare.resumeSession("configured");
+    bare.contextResume("configured");
     expect(bare.safe).toBe(true);
     expect(bare.thinking).toBe("high");
     expect(bare.endpoint).toBe("p1");
@@ -834,92 +894,85 @@ describe("Session-persisted agent settings (resume restores the configuration)",
     expect(bare.name).toBe("pilot");
     expect(bare.description).toBe("the flying one");
     expect(bare.spawnPermission).toBe(true);
-    expect(bare.sessionSave).toBe(true);
+    expect(bare.context.save).toBe(true);
   });
 
   test("an explicit caller model wins over the stored one; an unnamed agent keeps its name", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const stored = new Agent({
       env, model: "p/m", name: "kept",
-      session: new SessionStore({ id: "stored", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "stored", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    stored.append(USER("q"));
-    stored.session.flush();
+    stored.context.append(USER("q"));
+    stored.context.flush();
     stored.close();
 
     // constructor resume with an explicit --model: the caller's selection
     // stands — and on close it becomes the session's new stored selection
-    const explicit = new Agent({ env, model: "p2/m", session: "stored", sessionDir: ROOT, createIO: () => null });
+    const explicit = new Agent({ env, model: "p2/m", contextId: "stored", createIO: () => null });
     expect(explicit.endpoint).toBe("p2");
     expect(explicit.name).toBe("kept"); // stored name fills the default
     explicit.close(); // close flushes: p2/m now rides the file
 
     // constructor resume with NO model: the stored selection applies
-    const plain = new Agent({ env: await testEnv(), session: "stored", sessionDir: ROOT, createIO: () => null });
+    const plain = new Agent({ env: await testEnv({ sessions: resolve(ROOT) }), contextId: "stored", createIO: () => null });
     expect(plain.endpoint).toBe("p2");
     expect(plain.model).toBe("m");
     plain.close();
 
     // an explicitly named agent resuming mid-flight keeps ITS name
-    const named = new Agent({ env: await testEnv(), name: "explicit-name", session: new SessionStore({ id: "tmp", dir: ROOT }), createIO: () => null });
-    named.resumeSession("stored");
+    const named = new Agent({ env: await testEnv({ sessions: resolve(ROOT) }), name: "explicit-name", context: new Context({ id: "tmp", dir: ROOT }), createIO: () => null });
+    named.contextResume("stored");
     expect(named.name).toBe("explicit-name");
     expect(named.endpoint).toBe("p2"); // no caller model: the stored one applies
   });
 
   test("a stored endpoint gone from the env never breaks resume", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "gone-endpoint", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "gone-endpoint", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    agent.append(USER("q"));
-    agent.session.flush();
+    agent.context.append(USER("q"));
+    agent.context.flush();
     // simulate a provider disappearing: rewrite the metadata with a dead endpoint
-    const file = agent.session.file;
+    const file = agent.context.file;
     const meta = metadata(file);
     meta.agent = { ...meta.agent, endpoint: "vanished", model: "m" };
     const rest = readFileSync(file, "utf8").split("\n").slice(1).join("\n");
     writeFileSync(file, `${JSON.stringify(meta)}\n${rest}`);
     agent.close();
 
-    const resumed = new Agent({ env, model: "p/m", session: "gone-endpoint", sessionDir: ROOT, createIO: () => null });
+    const resumed = new Agent({ env, model: "p/m", contextId: "gone-endpoint", createIO: () => null });
     expect(resumed.endpoint).toBe("p"); // the caller's selection stands
     resumed.close();
   });
 
   test("the default agent-N name never rides the file; a chosen name still does", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ sessions: resolve(ROOT) });
     const agent = new Agent({
       env, model: "p/m",
-      session: new SessionStore({ id: "unnamed", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "unnamed", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    agent.append(USER("q"));
-    agent.setSafe(true); // a settings mutation: records the snapshot (name included)
-    agent.session.flush();
-    expect(metadata(agent.session.file).agent.name).toBeUndefined();
+    agent.context.append(USER("q"));
+    agent.safeSet(true); // a settings mutation: records the snapshot (name included)
+    agent.context.flush();
+    expect(metadata(agent.context.file).agent.name).toBeUndefined();
     agent.close();
 
     // a chosen name still persists — resume restores it onto a default-named agent
     const named = new Agent({
       env, model: "p/m", name: "keeper",
-      session: new SessionStore({ id: "named", dir: ROOT, origin: env.cwd }), createIO: () => null,
+      context: new Context({ id: "named", dir: ROOT, origin: env.cwd }), createIO: () => null,
     });
-    named.append(USER("q"));
-    named.setSafe(true); // record the snapshot
-    named.session.flush();
-    expect(metadata(named.session.file).agent.name).toBe("keeper");
+    named.context.append(USER("q"));
+    named.safeSet(true); // record the snapshot
+    named.context.flush();
+    expect(metadata(named.context.file).agent.name).toBe("keeper");
     named.close();
-    const resumed = new Agent({ env, model: "p/m", session: "named", sessionDir: ROOT, createIO: () => null });
+    const resumed = new Agent({ env, model: "p/m", contextId: "named", createIO: () => null });
     expect(resumed.name).toBe("keeper");
     resumed.close();
   });
 
-  test("an injected plain store without the settings setter is left alone", async () => {
-    const env = await testEnv();
-    const store = { context: [] };
-    const agent = new Agent({ env, model: "p/m", session: store, createIO: () => null });
-    expect(() => { agent.setSafe(true); agent.setThinking("low"); agent.name = "x"; }).not.toThrow();
-    expect(store.settings).toBeUndefined();
-  });
 });

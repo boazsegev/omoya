@@ -94,8 +94,8 @@ for (const mode of ["inline", "alt"]) {
       for (const ch of "hi") { input.emit("data", Buffer.from(ch)); await tick(); }
       expect(output.bytes()).toContain("hi"); // the draft box echoes the typed text
       input.emit("data", Buffer.from("\r")); // Enter, as a real byte
-      await until(() => agent.context.some((m) => m.type === 2)); // the submit landed
-      expect(agent.context.find((m) => m.type === 2)).toMatchObject({ content: [{ text: "hi" }] });
+      await until(() => agent.context.messages().some((m) => m.type === 2)); // the submit landed
+      expect(agent.context.messages().find((m) => m.type === 2)).toMatchObject({ content: [{ text: "hi" }] });
       ui.stop();
       await running;
     });
@@ -111,7 +111,7 @@ for (const mode of ["inline", "alt"]) {
       await tick();
       for (const ch of "second line") { input.emit("data", Buffer.from(ch)); await tick(); }
       input.emit("data", Buffer.from("\r"));
-      expect(await until(() => agent.context.some((message) => message.type === 2 && message.content[0]?.text === "after endpoint\nsecond line"))).toBe(true);
+      expect(await until(() => agent.context.messages().some((message) => message.type === 2 && message.content[0]?.text === "after endpoint\nsecond line"))).toBe(true);
 
       ui.dispatch({ type: "key", key: "ctrl+m" });
       await tick();
@@ -124,7 +124,7 @@ for (const mode of ["inline", "alt"]) {
       await tick();
       for (const ch of "second line") { input.emit("data", Buffer.from(ch)); await tick(); }
       input.emit("data", Buffer.from("\r"));
-      expect(await until(() => agent.context.some((message) => message.type === 2 && message.content[0]?.text === "after model\nsecond line"))).toBe(true);
+      expect(await until(() => agent.context.messages().some((message) => message.type === 2 && message.content[0]?.text === "after model\nsecond line"))).toBe(true);
       ui.stop();
       await running;
     });
@@ -139,7 +139,7 @@ for (const mode of ["inline", "alt"]) {
       await tick();
       for (const ch of "second line") { input.emit("data", Buffer.from(ch)); await tick(); }
       input.emit("data", Buffer.from("\r"));
-      expect(await until(() => app.currentAgent().context.some((message) => message.type === 2 && message.content[0]?.text === "after new\nsecond line"))).toBe(true);
+      expect(await until(() => app.currentAgent().context.messages().some((message) => message.type === 2 && message.content[0]?.text === "after new\nsecond line"))).toBe(true);
       ui.stop();
       await running;
     });
@@ -167,8 +167,8 @@ for (const mode of ["inline", "alt"]) {
       input.emit("data", Buffer.from("b"));
       await tick();
       input.emit("data", Buffer.from("\r"));
-      await until(() => agent.context.some((message) => message.type === 2));
-      expect(agent.context.find((message) => message.type === 2)?.content[0].text).toBe("a\nb");
+      await until(() => agent.context.messages().some((message) => message.type === 2));
+      expect(agent.context.messages().find((message) => message.type === 2)?.content[0].text).toBe("a\nb");
       ui.stop();
       await running;
     });
@@ -215,7 +215,7 @@ for (const mode of ["inline", "alt"]) {
 
     test("Block View copies logical text through OSC 52 in both terminal modes", async () => {
       const { agent, input, output, ui, running } = await harness(mode);
-      agent.append({ type: 2, content: [{ type: "text", text: "copy שלום" }] });
+      agent.context.append({ type: 2, content: [{ type: "text", text: "copy שלום" }] });
       input.emit("data", Buffer.from([0x0f])); // Ctrl+O
       await tick();
       expect(output.bytes()).toContain("םולש"); // visual order

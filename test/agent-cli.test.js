@@ -7,7 +7,7 @@ import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, afterEach } from "bun:test";
 import { binName, cli } from "./bin-names.js";
 import { writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { findSessionFile } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
 
 let server;
 let pending = []; // never-resolving handlers park here; afterEach releases them
@@ -24,7 +24,7 @@ import { mkdtempSync, mkdirSync } from "node:fs";
 // failure-class exit-code assertions past their timeouts
 mkdirSync("./ai-tmp", { recursive: true });
 const SPAWN_SETTINGS = mkdtempSync("./ai-tmp/agent-cli-settings-");
-writeFileSync(`${SPAWN_SETTINGS}/settings.json`, JSON.stringify({ maxAttempts: 1 }));
+writeFileSync(`${SPAWN_SETTINGS}/settings.json`, JSON.stringify({ retry: { attempts: 1 } }));
 
 const ROOT = `./ai-tmp/agent-cli-${process.pid}`;
 
@@ -99,7 +99,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
       tool_calls: [{ function: { name: "read", arguments: expect.any(Object) } }],
     });
     expect(requests[1].messages.at(-1)).toEqual({
-      role: "tool", name: "read", content: "target file body",
+      role: "tool", name: "read", content: "[text/plain]\ntarget file body",
     });
     // both requests carried the tool catalog (built-in + read)
     expect(requests[0].tools.map((t) => t.function.name)).toContain("read");
@@ -107,7 +107,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
 
     // stdout: every request's events stream in order; final done wins
     const types = events.map((e) => e.type);
-    expect(types).toContain("toolcall_start");
+    expect(types).toContain("tool_call_start");
     expect(types.at(-1)).toBe("done");
     expect(events.at(-1).message.content).toEqual([{ type: "text", text: "loop finished" }]);
     expect(events.at(-1).usage).toEqual({ inputTokens: 9, outputTokens: 4, source: "provider" });
@@ -131,7 +131,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
   test("--session writes the JSONL mirror; --resume continues it", async () => {
     const sessionId = `cli-${process.pid}`;
     const dir = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-    const stale = findSessionFile(dir, sessionId);
+    const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
     const first = toolLoopServer("read", { path: "./AI-TODO.md" }, "answer one");
@@ -143,7 +143,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
     // a chosen --session id finalizes the file's NAME at construction
     // (see lib/agent/session.js) — only the uuid8 disambiguator prefix
     // is unknown ahead of time, so find it by id, not by path
-    const file = findSessionFile(dir, sessionId);
+    const file = Context.fileOf({ dir: dir, id: sessionId });
     expect(file).not.toBeUndefined();
     expect(existsSync(file)).toBe(true);
     // a leading system message, filtered out, is the real package

@@ -3,7 +3,10 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
-import { IO, connectBudget, bodyBytes } from "../lib/io.js";
+import { IO } from "../lib/io.js";
+import { connectBudget } from "../lib/io/request.js";
+import { bodyBytes } from "../lib/io/sanitize.js";
+import { providerAdd, providerOf } from "./env-internals.js";
 
 let dir, env;
 beforeEach(() => {
@@ -25,11 +28,11 @@ function fakeProvider(hooks = {}) {
 }
 
 function makeIO({ Protocol = fakeProvider(), environment = env, endpoint = {}, ...options } = {}) {
-  if (!environment.provider("fake")) environment.registerProvider("fake", Protocol);
-  environment.endpoints.fake = {
+  if (!providerOf(environment, "fake")) providerAdd(environment, "fake", Protocol);
+  environment._endpoints.fake = {
     provider: "fake",
     url: "http://fake",
-    ...(environment.endpoints.fake ?? {}),
+    ...(environment._endpoints.fake ?? {}),
     ...endpoint,
   };
   return new IO({ env: environment, model: "fake/m", ...options });
@@ -80,7 +83,10 @@ describe("IO timeouts: the three-timeout model", () => {
     expect(bodyBytes(null)).toBe(0);
     expect(bodyBytes({ a: "é" })).toBe(Buffer.byteLength(JSON.stringify({ a: "é" }), "utf8"));
     const aiio = makeIO({
-      Protocol: fakeProvider({ send: () => new Promise((resolve) => setTimeout(resolve, 100)) }),
+      Protocol: fakeProvider({
+        send: () => new Promise((resolve) => setTimeout(resolve, 100)),
+        read: (connection) => (connection.answered ? null : (connection.answered = true, { events: [{ type: "text_delta", contentIndex: 0, text: "ok" }] })),
+      }),
       connectTimeout: 30, timeout: 60_000, stuckTimeout: 60_000,
     });
     expect((await aiio.write([{ type: 2, content: [{ type: "text", text: "x".repeat(200) }] }])).type).toBe("done");

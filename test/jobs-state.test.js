@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { admitOccurrence, allocateArchive, archiveExists, createTaskState, dispatchJobs, loadTaskState, moveToArchive, newAttemptId, recordAttempt, reconcileAttempt, resolveArchiveReference, saveTaskState, snapshotAndArchive, initializeJobs, validateArchiveReference, validateTaskState } from "../lib/jobs.js";
+import { admitOccurrence, createTaskState, loadTaskState, newAttemptId, recordAttempt, reconcileAttempt, resolveArchiveReference, saveTaskState, validateArchiveReference, validateTaskState } from "../lib/jobs/state.js";
+import { allocateArchive, archiveExists, moveToArchive, snapshotAndArchive } from "../lib/jobs/archive.js";
+import { dispatchJobs } from "../lib/jobs/dispatcher.js";
+import { initializeJobs } from "../lib/jobs/lifecycle.js";
 
 const roots = []; afterEach(async () => { await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
 async function root() { const path = await mkdtemp(join(tmpdir(), "jobs-state-")); roots.push(path); await initializeJobs(path); return path; }

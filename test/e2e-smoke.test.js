@@ -15,7 +15,8 @@ import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { appAlias, cli } from "./bin-names.js";
-import { findSessionFile } from "../lib/agent.js";
+import { Context } from "../lib/context.js";
+import { providersLoad, toolsLoad } from "./env-internals.js";
 
 // spawned children get a THROWAWAY user settings folder (see agent-cancel)
 mkdirSync("./ai-tmp", { recursive: true });
@@ -31,7 +32,7 @@ const SESSION = `e2e-smoke-${process.pid}`;
 // direct function of the id (a date + sessionUUID prefix leads it —
 // see the module doc), so it's found by a scan, not built from a string.
 const SESSIONS_DIR = `${SPAWN_SETTINGS}/${NAMES.sessionsDir}`;
-const sessionFile = () => findSessionFile(SESSIONS_DIR, SESSION);
+const sessionFile = () => Context.fileOf({ dir: SESSIONS_DIR, id: SESSION });
 const SCRIPT = `./ai-tmp/e2e-smoke-script-${process.pid}.json`;
 const T = 30_000; // per-test budget (scripted provider: no model latency)
 
@@ -136,25 +137,25 @@ describe("e2e smoke (MVP gate): scripted test provider + read + sessions + all b
     const { default: API } = await import("../lib/index.js");
     const Env = API.Env;
     const Agent = API.Agent;
-    const { userMessage } = API.Context;
+    const { messageUser } = API.Context;
     // resume the CLI-written session from the same pinned settings folder
     const env = new Env({ settingsDir: SPAWN_SETTINGS });
-    await env.loadProviders();
-    await env.loadTools({ dirs: ["./tools"] }); // explicit root keeps the proof self-contained
+    await providersLoad(env);
+    await toolsLoad(env, { dirs: ["./tools"] }); // explicit root keeps the proof self-contained
 
     const agent = new Agent({
-      env, model: "test/test-model", session: SESSION,
+      env, model: "test/test-model", contextId: SESSION,
       // inline script through per-invocation settings (the in-process path)
       settings: { script: [[{ text: `Still: ${NONCE}` }]] },
     });
     // resume restored the prior exchange before this turn
     expect(agent.context.length).toBeGreaterThanOrEqual(4);
 
-    agent.append(userMessage("Again, what was the passphrase? Reply with only the passphrase."));
+    agent.context.append(messageUser("Again, what was the passphrase? Reply with only the passphrase."));
     let text = "";
     agent.onEvent(Agent.EVENT.TEXT_DELTA, (event) => { text += event.text ?? ""; });
     const terminal = await agent.run();
-    agent.session?.close?.();
+    agent.context?.close?.();
     expect(terminal.type).toBe("done");
     expect(alnum(text)).toContain(alnum(NONCE));
   }, T);

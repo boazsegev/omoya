@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { Env } from "../lib/env.js";
 import { loginEndpoint, runLoginWizard } from "../lib/cli.js";
+import { authSetOf, endpointOf, namesOf, providerAdd, scope, settingsOf } from "./env-internals.js";
 
 let dir, cwd;
 const projectAuth = (name) => `${NAMES.projectAuthPrefix}${name}.json`;
@@ -25,21 +26,15 @@ afterEach(() => {
 
 class LoginProtocol {
   static provider = { label: "Login", capabilities: {} };
-  constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-  async login({ token }) { return { type: "api_key", token }; }
-  async testConnection() { return { models: 1 }; } // login always verifies
-  async models() {
-    const models = { "model-1": { label: "Model 1" } };
-    this.aiio.authSet({ models });
-    return models;
-  }
-  async close() {}
+  static login({ token }) { return { type: "api_key", token }; }
+  static async testConnection() { return { models: 1 }; } // login always verifies
+  static async models() { return { "model-1": { label: "Model 1" } }; }
 }
 
 describe("loginEndpoint", () => {
   test("package scope writes the endpoint record to its auth file — never settings.json", async () => {
     const env = new Env({ dir, cwd });
-    env.registerProvider("wire", LoginProtocol);
+    providerAdd(env, "wire", LoginProtocol);
     await loginEndpoint(env, {
       name: "remote", provider: "wire", url: "https://remote.test/v1", token: "secret", scope: "package",
     });
@@ -53,16 +48,16 @@ describe("loginEndpoint", () => {
     // and the auth file AUTO-CATALOGS the endpoint: a fresh environment
     // lists it without any settings.providers entry
     const fresh = new Env({ dir, cwd });
-    expect(fresh.endpoint("remote")).toMatchObject({
-      provider: "wire", url: "https://remote.test/v1", auth: { token: "secret", type: "api_key" },
-    });
-    expect(fresh.endpointNames()).toContain("remote");
-    expect(fresh.endpointSettings("remote").auth.token).toBe("secret");
+    // endpoint() is the effective CONNECTION view: credentials stay on
+    // the settings view, never in connection policy
+    expect(endpointOf(fresh, "remote")).toEqual({ provider: "wire", url: "https://remote.test/v1" });
+    expect(namesOf(fresh)).toContain("remote");
+    expect(settingsOf(fresh, "remote").auth.token).toBe("secret");
   });
 
   test("local scope writes only the project's namespaced auth file", async () => {
     const env = new Env({ dir, cwd });
-    env.registerProvider("wire", LoginProtocol);
+    providerAdd(env, "wire", LoginProtocol);
     await loginEndpoint(env, {
       name: "local-wire", provider: "wire", url: "http://localhost:9999", token: "local", scope: "local",
     });
@@ -71,15 +66,13 @@ describe("loginEndpoint", () => {
     expect(auth).toMatchObject({ provider: "wire", url: "http://localhost:9999", auth: { token: "local" } });
     expect(existsSync(join(cwd, NAMES.projectSettings))).toBe(false); // a login never writes providers settings
     const fresh = new Env({ dir, cwd });
-    expect(fresh.endpoint("local-wire")).toMatchObject({
-      provider: "wire", url: "http://localhost:9999", auth: { token: "local", type: "api_key" },
-    });
-    expect(fresh.endpointSettings("local-wire").auth.token).toBe("local");
-    expect(fresh.endpointScope("local-wire")).toBe("local"); // the project auth layer
+    expect(endpointOf(fresh, "local-wire")).toEqual({ provider: "wire", url: "http://localhost:9999" });
+    expect(settingsOf(fresh, "local-wire").auth.token).toBe("local");
+    expect(scope(fresh, "local-wire")).toBe("local"); // the project auth layer
   });
 });
 
-describe("Env.knownEndpoints (login wizard presets)", () => {
+describe("Env.endpointPresets (login wizard presets)", () => {
   test("collects protocol-published presets, skips secret protocols, dedupes by name", () => {
     const env = new Env({ dir, cwd });
     class WireA {
@@ -98,10 +91,10 @@ describe("Env.knownEndpoints (login wizard presets)", () => {
       static provider = { label: "S", secret: true };
       static knownEndpoints = [{ name: "hidden", url: "https://hidden" }];
     }
-    env.registerProvider("wire-a", WireA);
-    env.registerProvider("wire-b", WireB);
-    env.registerProvider("secret", Secret);
-    expect(env.knownEndpoints()).toEqual([
+    providerAdd(env, "wire-a", WireA);
+    providerAdd(env, "wire-b", WireB);
+    providerAdd(env, "secret", Secret);
+    expect(env.loginPresets()).toEqual([
       { name: "cloud-a", label: "Cloud A", url: "https://a", provider: "wire-a" },
       { name: "dup", label: "dup", url: "https://dup-a", provider: "wire-a" },
     ]);
@@ -112,29 +105,29 @@ describe("loginEndpoint connection verification", () => {
   test("a failed connection test rolls the endpoint back and fails loudly", async () => {
     const env = new Env({ dir, cwd });
     class DeadProtocol extends LoginProtocol {
-      async testConnection() {
+      static async testConnection() {
         const error = new Error("HTTP 401 Unauthorized");
         error.status = 401;
         throw error;
       }
     }
-    env.registerProvider("dead", DeadProtocol);
+    providerAdd(env, "dead", DeadProtocol);
     await expect(loginEndpoint(env, {
       name: "dead-end", provider: "dead", url: "https://dead.test/v1", token: "bad", scope: "package",
     })).rejects.toThrow(/connection test failed for dead-end.*401/);
-    expect(env.endpoint("dead-end")).toBeUndefined(); // rolled back
+    expect(endpointOf(env, "dead-end")).toBeUndefined(); // rolled back
+    expect(env._endpoints["dead-end"]).toBeUndefined(); // no live registry trace either
+    expect(namesOf(env, { includeSecret: true })).not.toContain("dead-end");
   });
 
   test("a null-returning verifier leaves the login best-effort", async () => {
     const env = new Env({ dir, cwd });
     class QuietProtocol {
       static provider = { label: "Q" };
-      constructor(url, aiio) { this.url = url; this.aiio = aiio; }
-      async login() { return { type: "none" }; }
-      async testConnection() { return null; } // nothing to verify
-      async close() {}
+      static login() { return { type: "none" }; }
+      static async testConnection() { return null; } // nothing to verify
     }
-    env.registerProvider("quiet", QuietProtocol);
+    providerAdd(env, "quiet", QuietProtocol);
     const result = await loginEndpoint(env, {
       name: "quiet-end", provider: "quiet", url: "test://quiet", scope: "package",
     });
@@ -171,8 +164,8 @@ describe("runLoginWizard", () => {
         { name: "cloud-b", label: "Cloud B", url: "https://cloud-b/v1", note: "bills extra credits, not the plan" },
       ];
     }
-    env.registerProvider("wire-a", WireA);
-    env.registerProvider("wire-b", class WireB extends LoginProtocol {
+    providerAdd(env, "wire-a", WireA);
+    providerAdd(env, "wire-b", class WireB extends LoginProtocol {
       static provider = { label: "B" };
     });
     return env;
@@ -187,7 +180,7 @@ describe("runLoginWizard", () => {
     expect(login.name).toBe("cloud-b");
     expect(login.endpoint).toEqual({ provider: "wire-a", url: "https://cloud-b/v1" });
     expect(login.auth).toEqual({ type: "api_key", token: "tok-1" });
-    expect(env.endpoint("cloud-b")).toEqual({ provider: "wire-a", url: "https://cloud-b/v1" });
+    expect(endpointOf(env, "cloud-b")).toEqual({ provider: "wire-a", url: "https://cloud-b/v1" });
   });
 
   test("the manual option asks protocol and URL — new endpoints are the point", async () => {
@@ -213,34 +206,34 @@ describe("runLoginWizard", () => {
   });
 });
 
-describe("Env.knownEndpoints oauth extras + endpointScope", () => {
+describe("Env.endpointPresets oauth extras + endpointScope", () => {
   test("a preset's oauth descriptor rides along (the wizards drive browser sign-in from it)", () => {
     const env = new Env({ dir, cwd });
-    env.registerProvider("wire", class Wire {
+    providerAdd(env, "wire", class Wire {
       static provider = { label: "W" };
       static knownEndpoints = [
         { name: "cloud", label: "Cloud", url: "https://cloud/v1", oauth: { label: "Cloud OAuth", clientId: "c1" } },
       ];
     });
-    const [preset] = env.knownEndpoints();
+    const [preset] = env.loginPresets();
     expect(preset.oauth).toEqual({ label: "Cloud OAuth", clientId: "c1" });
     expect(preset.provider).toBe("wire");
   });
 
   test("endpointScope reports where the endpoint lives (local settings beat package)", () => {
     const env = new Env({ dir, cwd });
-    expect(env.endpointScope("nowhere")).toBe("package"); // unknown defaults to package
-    env.endpoints["proj"] = { provider: "wire", url: "https://x" };
+    expect(scope(env, "nowhere")).toBe("package"); // unknown defaults to package
+    env._endpoints["proj"] = { provider: "wire", url: "https://x" };
     env._endpointScopes.set("proj", "local"); // what a local settings.json scan records
-    expect(env.endpointScope("proj")).toBe("local");
+    expect(scope(env, "proj")).toBe("local");
   });
 
   test("a verified login clears a stale loginRequired mark", async () => {
     const env = new Env({ dir, cwd });
-    env.registerProvider("wire", LoginProtocol);
-    env.authSet("wire", { loginRequired: true });
+    providerAdd(env, "wire", LoginProtocol);
+    authSetOf(env, "wire", { loginRequired: true });
     const login = await loginEndpoint(env, { name: "wire", provider: "wire", url: "https://x", token: "tok" });
     expect(login.verified).toEqual({ models: 1 }); // testConnection's report
-    expect(env.endpointSettings("wire").loginRequired).toBe(false);
+    expect(settingsOf(env, "wire").loginRequired).toBe(false);
   });
 });

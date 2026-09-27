@@ -211,11 +211,13 @@
     },
     {
       "toolCall": {
-        "name": "worker",
+        "name": "worker-create",
         "arguments": {
-          "name": "ui-response-demo",
-          "description": "UI response demonstrator",
-          "model": "test/ui-response",
+          "workers": [{
+            "name": "ui-response-demo",
+            "description": "UI response demonstrator",
+            "model": "test/ui-response"
+          }],
           "prompt": "Reply with the child-worker UI demonstration."
         }
       }

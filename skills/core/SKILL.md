@@ -1,6 +1,6 @@
 ---
 name: core
-description: "A core project management skill for AI agents, load unless pre-loaded."
+description: "A core project management skill for AI agents."
 version: "4.0.0"
 ---
 <core-rules>

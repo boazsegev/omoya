@@ -12,7 +12,7 @@ mkdirSync("./ai-tmp", { recursive: true });
 
 async function run(args, { tools, env = {} } = {}) {
   const settingsDir = mkdtempSync("./ai-tmp/ai-tool-cli-");
-  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: [tools] }));
+  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: { folders: [tools] } }));
   const proc = Bun.spawn(["bun", cli.tool, ...args], {
     stdout: "pipe", stderr: "pipe",
     env: { ...process.env, [NAMES.settingsEnv]: settingsDir, ...env },
@@ -39,7 +39,7 @@ describe("the tool CLI wrapper", () => {
     const tools = mkdtempSync("./ai-tmp/ai-tool-env-import-");
     writeFileSync(`${tools}/explicit.js`, `
 import Env from "../../lib/env.js";
-const loadedAt = Env.toolTimestamp();
+const loadedAt = typeof Env.create;
 export function explicit() { return loadedAt; }
 export function toolDescription() {
   return { explicit: { description: "explicit Env import probe", inputSchema: { type: "object", properties: {} } } };
@@ -57,9 +57,9 @@ export function toolDescription() {
       const marker = `${tools}/closed-${fails}`;
       writeFileSync(`${tools}/cleanup.js`, `
 import { writeFileSync } from "node:fs";
-import Env from "../../lib/env.js";
-export function cleanup() {
-  Env.mcpPool.set("probe", { child: { kill: () => writeFileSync(${JSON.stringify(marker)}, "closed") } });
+export function cleanup(_args, context) {
+  // a pooled MCP connection stand-in: env.close() stops it on exit
+  context.env._mcpPool.set("probe", { close: () => writeFileSync(${JSON.stringify(marker)}, "closed") });
   if (${fails}) throw new Error("expected failure");
   return "ok";
 }
