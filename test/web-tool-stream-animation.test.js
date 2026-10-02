@@ -67,10 +67,11 @@ function harness(kind) {
     return card;
   };
   const flush = new Function("scope", `with (scope) { ${source}; return flushRender; }`)({
-    blocks, nodes, dirty, rowBlocks: new WeakMap(), resetTranscript: false, transcriptContainer: container, scrollEl: { scrollTop: 0, scrollHeight: 0, clientHeight: 0 }, jumpBtn: {},
+    blocks, nodes, dirty, rowBlocks: new WeakMap(), resetTranscript: false, stickBottom: false, transcriptContainer: container, scrollEl: { scrollTop: 0, scrollHeight: 0, clientHeight: 0 }, jumpBtn: {}, jumpTopBtn: {},
     get fullRender() { return fullRender; }, set fullRender(value) { fullRender = value; },
     frame: 0, frameTimer: 0, el: element, renderBlock, emptyState: () => element("welcome"),
     renderWorkingIndicator() {}, nearBottom: () => true,
+    syncJumpButtons() { this.jumpBtn.hidden = this.nearBottom(); this.jumpTopBtn.hidden = this.scrollEl.scrollTop < this.scrollEl.clientHeight; },
     cancelAnimationFrame() {}, clearTimeout() {},
   });
   return { block, nodes, dirty, flush, refresh() { fullRender = true; flush(); } };

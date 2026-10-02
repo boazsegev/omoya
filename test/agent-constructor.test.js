@@ -32,8 +32,8 @@ describe("Agent construction", () => {
   test("normalizes one endpoint/model selector", async () => {
     const env = await testEnv();
     const agent = new Agent({ env, model: model(env, "p", "org/model") });
-    expect(agent.endpoint).toBe("p");
-    expect(agent.model).toBe("org/model");
+    expect(agent.endpoint).toBeUndefined();
+    expect(agent.model).toBe("p/org/model");
   });
 
   test("rejects malformed, unknown-endpoint, and unknown-model selectors before registration", async () => {
@@ -51,8 +51,8 @@ describe("Agent construction", () => {
     const env = await testEnv();
     env._endpoints.p.models = { known: {} };
     const agent = new Agent({ env, model: "p/known" });
-    expect(() => agent.modelSet("p/missing")).toThrow(/unknown model/);
-    expect(`${agent.endpoint}/${agent.model}`).toBe("p/known");
+    expect(() => (agent.model = "p/missing")).toThrow(/unknown model/);
+    expect(agent.model).toBe("p/known");
   });
 
   test("a string session resumes an existing id and otherwise creates it", async () => {

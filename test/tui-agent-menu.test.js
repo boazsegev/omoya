@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { layoutView } from "../lib/app/gtui/layout.js";
 import { createControls } from "../lib/app/gtui/controls.js";
-import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions } from "../lib/app/tui/menu-sources.js";
+import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions, modelMenuOptions } from "../lib/app/tui/menu-sources.js";
 import { buildMenuItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/app/tui/menu-data.js";
 import { resolveMenuAction } from "../lib/app/tui/menu-actions.js";
 import { openMenu, previewMenu } from "../lib/app/tui/overlay-controller.js";
@@ -73,6 +73,12 @@ describe("active-agent menu snapshots", () => {
       expect.objectContaining({ label: "llama | 2/3 available", value: { type: "session-add", endpoint: "ollama", model: "llama" } }),
       expect.objectContaining({ kind: "info", label: "qwen | 0/0 available" }),
     ]));
+  });
+
+  test("model menu uses the endpoint portion of a qualified Agent.model", () => {
+    const env = { models: () => new Map([["p/group/m", { endpoint: "p", model: "group/m", listed: true }]]) };
+    expect(modelMenuOptions({ model: "p/group/m" }, env)).toEqual({ value: "p", models: ["group/m"] });
+    expect(modelMenuOptions({ model: undefined }, env)).toBeNull();
   });
 
   test("offers a Close submenu with a frozen active-agent target list", () => {

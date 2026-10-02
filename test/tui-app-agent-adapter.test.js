@@ -249,7 +249,7 @@ describe("agent adapter: real-agent tool hook bridge", () => {
     const listeners = Array.from({ length: Object.keys(Agent.EVENT).length }, () => []);
     let nextHandle = 0;
     const real = {
-      pending: [], questionSet() {}, cancel() {},
+      pending: [], questionInstall() { return () => {}; }, cancel() {},
       onEvent(event, callback) { const handle = ++nextHandle; listeners[event].push([callback, handle]); return handle; },
       offEvent(handle) { for (const entries of listeners) { const index = entries.findIndex((entry) => entry[1] === handle); if (index >= 0) { entries.splice(index, 1); return true; } } return false; },
       emit(event, value) { for (const [callback] of listeners[event]) callback(value); },
@@ -263,7 +263,7 @@ describe("agent adapter: real-agent tool hook bridge", () => {
     };
     real.onEvent(Agent.EVENT.TOOL_EXECUTE, (call) => seen.push(["prior-execute", call.callId]));
     real.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => seen.push(["prior-result", result.callId]));
-    const proxy = { pending: [], questionSet() {}, cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
+    const proxy = { pending: [], questionInstall() { return () => {}; }, cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
     const adapter = createAgentAdapter(proxy);
     const sent = [];
     await adapter.turnEffect().run({ send: (message) => sent.push(message), signal: new AbortController().signal });
@@ -326,7 +326,7 @@ describe("agent adapter: the question bridge", () => {
 
     expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
     expect(agent.children).toHaveLength(1);
-    expect(agent.children[0]).toMatchObject({ name: "ui-response-demo", endpoint: "p", model: "ui-response" });
+    expect(agent.children[0]).toMatchObject({ name: "ui-response-demo", model: "p/ui-response" });
     ui.stop();
     await running;
   });
@@ -352,7 +352,7 @@ describe("agent adapter: the question bridge", () => {
 
     expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
     expect(agent.children).toHaveLength(1);
-    expect(agent.children[0]).toMatchObject({ name: "reviewer", endpoint: "p", model: "m" });
+    expect(agent.children[0]).toMatchObject({ name: "reviewer", model: "p/m" });
     ui.stop();
     await running;
   });
@@ -430,8 +430,8 @@ describe("agent adapter: the question bridge", () => {
     let capturedBridge;
     const fakeAgent = {
       pending: [], send() {}, cancel() {}, run: () => new Promise(() => {}),
-      questionSet(bridge) { capturedBridge = bridge; },
-      _toolContext: () => ({ resetTimeout() {} }),
+      questionInstall(bridge) { capturedBridge = bridge; return () => {}; },
+      questionTimeoutReset() {},
     };
     const adapter = createAgentAdapter(fakeAgent);
     const sent = [];

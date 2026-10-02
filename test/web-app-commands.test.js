@@ -25,6 +25,23 @@ describe("web-app commands: /agent-name", () => {
   });
 });
 
+describe("web-app commands: qualified model selection", () => {
+  test("shows native model IDs in command feedback and accepts a bare model on the current endpoint", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, model: "p/m", context: [] });
+    expect((await runCommand(agent, "/endpoint-model other")).text).toBe("endpoint: p, model: other");
+    expect(agent.model).toBe("p/other");
+    expect((await runCommand(agent, "/endpoint-model")).text).toContain("model: p/other");
+  });
+
+  test("rejects an unknown bare model without a selected endpoint", async () => {
+    const env = await testEnv();
+    const agent = new Agent({ env, context: [] });
+    expect((await runCommand(agent, "/endpoint-model unknown")).text).toBe('unknown model "unknown"');
+    expect(agent.model).toBeUndefined();
+  });
+});
+
 describe("web-app commands: TUI parity", () => {
   test("a unique prefix resolves; an ambiguous one does not", async () => {
     const { resolveCommand } = await import("../lib/app/web/commands.js");

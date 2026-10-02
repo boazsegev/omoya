@@ -47,8 +47,8 @@ async function authoredCommand(env, args, context) {
   if (args.schedule !== undefined) metadata.schedule = args.schedule;
   // Jobs are fresh Agents; pin the caller's complete combo rather than letting
   // a later last-model selection silently change their endpoint or quota.
-  if (metadata.model === undefined && context.agent?.endpoint && context.agent?.model) {
-    metadata.model = `${context.agent.endpoint}/${context.agent.model}`;
+  if (metadata.model === undefined && context.agent?.model) {
+    metadata.model = context.agent.model;
   }
   if (typeof prompt !== "string" || !prompt.trim()) throw Object.assign(new Error("create requires a non-empty prompt"), { code: "JOBS_TASK_PROMPT" });
   return { action: args.action, filename: args.filename, source: taskSource(metadata, prompt) };

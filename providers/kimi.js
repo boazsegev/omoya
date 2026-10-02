@@ -104,7 +104,7 @@ function context2msg(context, aiio = this.aiio) {
   const headers = { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
   const body = {
-    model: aiio?.modelCurrent,
+    model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1),
     messages: [],
     stream: true,
     stream_options: { include_usage: true },
@@ -422,7 +422,7 @@ function msg2events(msg, state = {}, aiio) {
     closeCalls();
     // the exact context consumption the endpoint measured
     if (Number.isFinite(msg.usage.prompt_tokens)) {
-      io?.contextUsageSet?.({ used: msg.usage.prompt_tokens });
+      (io && (io.contextUsage = { used: msg.usage.prompt_tokens }));
     }
     events.push({
       type: "done",
@@ -578,7 +578,7 @@ async function reportBalance(connection, aiio) {
     const balance = Number(body?.data?.available_balance);
     if (!Number.isFinite(balance)) return;
     const unit = String(connection.baseUrl ?? "").includes(".cn") ? "cny" : "usd";
-    aiio.planUsageSet?.({ quotas: { balance: { remaining: balance, unit } } });
+    (aiio && (aiio.planUsage = { quotas: { balance: { remaining: balance, unit } } }));
   } catch { /* best-effort — a failed balance fetch never breaks the turn */ }
 }
 
@@ -642,7 +642,7 @@ async function reportSubscriptionUsage(connection, aiio) {
       const limit = quota(item.detail);
       if (limit) quotas[`${minutes / 60}h`] = limit;
     }
-    if (Object.keys(quotas).length > 0) aiio.planUsageSet?.({ quotas });
+    if (Object.keys(quotas).length > 0) (aiio && (aiio.planUsage = { quotas }));
   } catch { /* best-effort — account usage never breaks a turn */ }
 }
 
@@ -671,7 +671,7 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     if (Object.keys(bare).length > 0) quotas.requests = bare;
   }
   if (Object.keys(quotas).length > 0) {
-    aiio?.planUsageSet?.({ quotas });
+    (aiio && (aiio.planUsage = { quotas }));
     return;
   }
   if (supportsFiles(this)) return reportBalance(this, aiio);

@@ -285,12 +285,12 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     const env = new Env({ dir: project, cwd: project, settings: {} });
     await toolsLoad(env);
     const agent = new Agent({ env });
-    agent.folderSet("agent");
+    (agent.folder = "agent");
     const result = await callToolSandboxed({
       env, name: "write", file: fileOf(env, "write"), args: { path: "../sibling.txt", content: "sibling" },
       sandbox: true, cwd: agent.folder,
     });
-    expect(result).toEqual({ ok: true, value: "Successfully wrote to ../sibling.txt" });
+    expect(result).toEqual({ ok: true, value: "Successfully wrote 7 bytes to ../sibling.txt" });
     expect(readFileSync(`${project}/sibling.txt`, "utf8")).toBe("sibling");
   });
 

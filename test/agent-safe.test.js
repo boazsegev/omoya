@@ -154,9 +154,9 @@ describe("safe mode is the caller's argument (one Env, any number of consumers)"
     expect(cautious._toolContext().safe).toBe(true);
     expect(bold._toolContext().safe).toBe(false);
     // flipping one agent's mode never touches the other
-    bold.safeSet(true);
+    (bold.safe = true);
     expect(bold._toolContext().safe).toBe(true);
-    bold.safeSet(false);
+    (bold.safe = false);
     expect(bold._toolContext().safe).toBe(false);
     expect(cautious._toolContext().safe).toBe(true);
   });
@@ -176,10 +176,10 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     const agent = new Agent({ env, model: "p/m", context: [], createIO: factory });
     agent.context.append(USER("one"));
     await agent.run();
-    agent.safeSet(true);
+    (agent.safe = true);
     agent.context.append(USER("two"));
     await agent.run();
-    agent.safeSet(false);
+    (agent.safe = false);
     agent.context.append(USER("three"));
     await agent.run();
     const catalogs = await Promise.all(seen);
@@ -191,7 +191,7 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
   test("a toggle MID-TURN changes the catalog of the very next request (between tool rounds)", async () => {
     const env = await testEnv();
     env.toolAdd("unsafe-tool", () => "ran", { description: "u", inputSchema: {} });
-    env.toolAdd("lockdown", (_args, context) => { context.agent.safeSet(true); return "locked"; }, { description: "l", inputSchema: {}, safe: true });
+    env.toolAdd("lockdown", (_args, context) => { (context.agent.safe = true); return "locked"; }, { description: "l", inputSchema: {}, safe: true });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "lockdown", {})], [...TEXT(0, "done")]]);
     const seen = [];
     let current;
@@ -233,7 +233,7 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     const io = scriptedIO([[...TOOLCALL(0, "c1", "writer", {})], [...TEXT(0, "done")]]);
     const child = new Agent({ env, model: "p/m", parent, context: [USER("go")], createIO: () => io });
     expect(child.safe).toBe(true);
-    expect(await child.toolCallable("writer")).toBe(false);
+    expect((await child.tools).has("writer")).toBe(false);
     await child.run();
     expect(ran).toBe(0);
     // the Agent-level refusal (which also guards the forked worker path)
@@ -245,9 +245,9 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     const env = await testEnv();
     env.toolAdd("unsafe-builtin", () => "ran", { description: "u", inputSchema: {} });
     const agent = new Agent({ env, model: "p/m", context: [] });
-    agent.safeSet(true);
+    (agent.safe = true);
     await expect(env.toolCall("unsafe-builtin", {}, agent._toolContext())).rejects.toThrow(/safe mode/);
-    expect(agent.safeSet(true)).toBe(true); // idempotent
+    expect((agent.safe = true)).toBe(true); // idempotent
   });
 
   test("effective safety is evaluated from the parent on every access", async () => {
@@ -255,10 +255,11 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     const parent = new Agent({ env, model: "p/m" });
     const child = new Agent({ env, model: "p/m", parent });
     expect(child.safe).toBe(false);
-    parent.safeSet(true);
+    (parent.safe = true);
     expect(child.safe).toBe(true);
-    expect(child.safeSet(false)).toBe(true);
-    parent.safeSet(false);
+    child.safe = false;
+    expect(child.safe).toBe(true);
+    (parent.safe = false);
     expect(child.safe).toBe(false);
   });
 });
@@ -290,7 +291,8 @@ describe("agent: FORCED safe mode (no supported OS sandbox)", () => {
     withoutSandbox(() => {
       const agent = new Agent({ env, model: "p/m", context: [] });
       expect(agent.safe).toBe(true); // forced — the caller never asked
-      expect(agent.safeSet(false)).toBe(true); // refused: stays safe
+      agent.safe = false;
+      expect(agent.safe).toBe(true); // refused: stays safe
       const explicit = new Agent({ env, model: "p/m", context: [], safe: false });
       expect(explicit.safe).toBe(true); // even an explicit safe:false is overridden
     });

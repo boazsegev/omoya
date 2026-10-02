@@ -288,7 +288,8 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     const source = readFileSync("lib/index.js", "utf8");
     expect(source).toContain('import Agent from "./agent.js";');
     expect(source).toContain('import Jobs from "./jobs.js";');
-    expect(source).toContain("export default { ...Agent, Agent, Jobs };");
+    expect(source).not.toContain("...Agent");
+    expect(source).toContain("Context: Agent.Context");
     expect(source).not.toContain('"./app.js"');
     const fullSource = readFileSync("lib/index_app.js", "utf8");
     expect(fullSource).toContain('import Core from "./index.js";');
@@ -318,6 +319,8 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     for (const name of ["Markdown", "TUI", "GTUI", "Web"]) expect(full.default[name], `no top-level ${name}`).toBeUndefined();
     expect(core.default.App).toBeUndefined();
     expect(core.default.NAMES).toBe(NAMES);
+    expect(Object.keys(core.default).some((name) => name.startsWith("_"))).toBe(false);
+    expect(full.default.Env._loadThemes).toBeUndefined();
   });
 
   test("internal cross-façade dependencies import the canonical default namespace", () => {

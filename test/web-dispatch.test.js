@@ -232,8 +232,8 @@ describe("conventional web dispatch", () => {
     e.toolAdd("mcp-webfetch", async () => "ok", { safe: true, description: "x", inputSchema: { type: "object" } });
     const allowed = new Agent({ env: e, tools: ["web-search", "mcp-webfetch"] });
     const denied = new Agent({ env: e, tools: ["web-search"] });
-    expect(await allowed.toolCallable("mcp-webfetch")).toBe(true);
-    expect(await denied.toolCallable("mcp-webfetch")).toBe(false);
+    expect((await allowed.tools).has("mcp-webfetch")).toBe(true);
+    expect((await denied.tools).has("mcp-webfetch")).toBe(false);
     await allowed.close();
     await denied.close();
   });
@@ -615,8 +615,7 @@ describe("provider web backends", () => {
         { headers: { "content-type": "application/json" } }));
     const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
     const agent = new Agent({ env: e });
-    agent.endpoint = "test";
-    agent.model = "gpt-6-sol";
+    agent.model = "codex/gpt-6-sol";
     agent._connection = () => io;
     try {
       const started = Date.now();
@@ -638,8 +637,7 @@ describe("provider web backends", () => {
         { headers: { "content-type": "application/json" } }));
     const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
     const agent = new Agent({ env: e });
-    agent.endpoint = "test";
-    agent.model = "gpt-6-sol";
+    agent.model = "codex/gpt-6-sol";
     agent._connection = () => io;
     try {
       const started = Date.now();
@@ -683,8 +681,7 @@ describe("provider web backends", () => {
     }));
     const io = fakeAiio({ url: "https://api.openai.com/v1", auth: { type: "api_key", token: "k" }, env: e });
     const agent = new Agent({ env: e });
-    agent.endpoint = "test";
-    agent.model = "m";
+    agent.model = "test/m";
     agent._connection = () => io;
     try {
       const result = await webFetch({ url: "https://x.test/" }, { env: e, agent });

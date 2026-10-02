@@ -8,12 +8,12 @@ export function worker_status(args = {}, context = {}) {
       ["Busy Workers", agent.children.filter((worker) => worker.busy)],
       ["Idle Workers", agent.children.filter((worker) => !worker.busy)],
     ]) {
-      if (workers.length) lines.push(heading, ...workers.map((worker) => `    ${worker.name} (${worker.endpoint}/${worker.model})`));
+      if (workers.length) lines.push(heading, ...workers.map((worker) => `    ${worker.name} (${worker.model})`));
     }
   }
   if (both || args.models === true) {
-    const models = [...agent.env.models().values()];
-    if (models.length) lines.push("Models", ...models.map(({ endpoint, model, available }) => `    ${endpoint}/${model} (available: ${available})`));
+    const models = [...agent.env.models()];
+    if (models.length) lines.push("Models", ...models.map(([model, { available }]) => `    ${model} (available: ${available})`));
   }
   return lines.join("\n") || "No workers or models.";
 }

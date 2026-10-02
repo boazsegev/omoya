@@ -5,7 +5,7 @@
  * This standalone project's skills come from its own ACCUMULATED roots
  * (lib/env.js Env.skillRoots: package/settings/configured/
  * environment/project roots — see lib/env/registry.js for how
- * same-named skills across roots EXTEND rather than replace). The
+ * same-named skills across roots override with explicit references). The
  * package's own `skills/core/SKILL.md` is an ordinary local skill named
  * "core" — no sibling source tree or special-case loader is required.
  *
@@ -13,7 +13,7 @@
  * lines; `--debug` appends each skill's source root(s)).
  * With names: print the complete body of each named skill, wrapped in
  * <skill name="..."> tags — unknown names are reported on stderr and
- * set a nonzero exit, never fatal to the ones that DID resolve.
+ * set a nonzero exit; nothing prints unless all requested names resolve.
  */
 
 import { basename } from "node:path";
@@ -30,13 +30,14 @@ const USAGE = `Usage: ${NAME} [name...]
 Use when loading domain knowledge: no args prints the merged skill catalog, names print full skill bodies.
 
   ${NAME}            Print the skill catalog: one '- name — description' line per skill
-  ${NAME} --debug    Same catalog with sources appended (e.g. <dir>/skills+<dir2>)
+  ${NAME} --debug    Same catalog with the effective source appended
   ${NAME} <name...>  Print the complete content of one or more skills
 
 Skill roots ACCUMULATE: this package's own \`skills/\` folder, always,
 plus \`settings.skills\` (string or array), plus $${NAMES.skillsEnv}
-(delimiter-separated). A name repeated across roots EXTENDS (its
-bodies concatenate) rather than replacing the earlier one.
+(delimiter-separated). Later same-named bodies OVERRIDE earlier ones.
+Use {{name}} or {{name[L1-L2]}} for explicit body composition; self
+references include the previous layer. Lines are 1-based and inclusive.
 `;
 
 async function main() {
@@ -46,7 +47,7 @@ async function main() {
     return;
   }
   const debug = args.includes("--debug");
-  const names = args.filter((arg) => arg !== "--debug");
+  const names = [...new Set(args.filter((arg) => arg !== "--debug").map((arg) => arg.trim()).filter(Boolean))];
   // The factory returns a ready environment; skill lookup is synchronous after it.
   const env = await Env.create(undefined, { models: false }); // never reads the model catalog
   try {
@@ -55,15 +56,14 @@ async function main() {
       process.stdout.write(Agent.skillCatalog(skills, { debug }));
       return;
     }
-    const sections = [];
-    for (const name of names) {
-      if (skills.has(name)) sections.push(Agent.skillSection(skills.get(name)));
-      else {
-        console.error(`${NAME}: unknown skill: ${name}`);
-        process.exitCode = 1;
-      }
+    const unknown = names.filter((name) => !skills.has(name));
+    if (unknown.length) {
+      for (const name of unknown) console.error(`${NAME}: unknown skill: ${name}`);
+      process.exitCode = 1;
+      return;
     }
-    if (sections.length > 0) process.stdout.write(`${sections.join("\n\n")}\n`);
+    const sections = names.map((name) => Agent.skillSection(skills.get(name)));
+    process.stdout.write(`${sections.join("\n\n")}\n`);
   } finally {
     // Every executable closes through the shared teardown boundary.
     CLI.close({ env });

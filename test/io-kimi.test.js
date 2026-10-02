@@ -21,12 +21,11 @@ afterEach(() => {
   }
 });
 
-const aiio = (over = {}) => ({
-  modelCurrent: "kimi-k2-0905-preview",
+const aiio = (over = {}) => Object.defineProperties({
+  modelCurrent: "test/kimi-k2-0905-preview",
   settings: { auth: { token: "sk-test" } },
   tools: () => [],
-  ...over,
-});
+}, Object.getOwnPropertyDescriptors(over));
 
 const user = (text) => ({ type: 2, content: [{ type: "text", text }] });
 const system = (text) => ({ type: 1, content: [{ type: "text", text }] });
@@ -455,7 +454,7 @@ describe("kimi provider: msg2events (chunk translation)", () => {
   test("setContextUsage receives the endpoint-measured input tokens", () => {
     const io = aiio();
     let reported;
-    io.contextUsageSet = (u) => { reported = u; };
+    Object.defineProperty(io, "contextUsage", { set: (u) => { reported = u; } });
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.msg2events({ choices: [], usage: { prompt_tokens: 99, completion_tokens: 1 } }, {}, io);
     expect(reported).toEqual({ used: 99 });
@@ -493,7 +492,7 @@ describe("kimi provider: classifyError (403 usage-limit vs a dead credential)", 
 describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* dialect)", () => {
   test("the bare X-RateLimit-Limit/-Remaining/-Reset family lands as a \"requests\" quota (no requests/tokens split, unlike OpenAI)", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.reportPlanUsage(new Headers({
       "X-RateLimit-Limit": "300",
@@ -507,7 +506,7 @@ describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* di
 
   test("an OpenAI-suffixed response (a compatible proxy) is honored too, and wins over the bare family when both are present", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const connection = new Protocol("https://api.moonshot.ai/v1", io);
     connection.reportPlanUsage(new Headers({
       "x-ratelimit-limit-requests": "50",
@@ -539,7 +538,7 @@ describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* di
     };
     try {
       let reported;
-      const io = aiio({ planUsageSet: (u) => { reported = u; } });
+      const io = aiio({ set planUsage(u) { reported = u; } });
       const connection = new Protocol("https://api.kimi.com/coding/v1", io);
       await connection.reportPlanUsage(new Headers({ "content-type": "text/event-stream" }), io);
       expect(requested).toEqual({ url: "https://api.kimi.com/coding/v1/usages", authorization: "Bearer sk-test" });
@@ -559,7 +558,7 @@ describe("kimi provider: reportPlanUsage (Moonshot's unsuffixed X-RateLimit-* di
     };
     try {
       let reported = false;
-      const io = aiio({ planUsageSet: () => { reported = true; } });
+      const io = aiio({ set planUsage(value) { reported = true; } });
       const connection = new Protocol("https://api.kimi.com/coding/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       await connection.reportPlanUsage(new Headers(), io);
@@ -580,7 +579,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
       }), { status: 200 });
     };
     try {
-      const io = aiio({ planUsageSet: (u) => { io.reports = [...(io.reports ?? []), u]; } });
+      const io = aiio({ set planUsage(u) { io.reports = [...(io.reports ?? []), u]; } });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       expect(requested).toEqual({ url: "https://api.moonshot.ai/v1/users/me/balance", authorization: "Bearer sk-test" });
@@ -592,7 +591,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response(JSON.stringify({ data: { available_balance: 120.5 } }), { status: 200 });
     try {
-      const io = aiio({ planUsageSet: (u) => { io.reports = [...(io.reports ?? []), u]; } });
+      const io = aiio({ set planUsage(u) { io.reports = [...(io.reports ?? []), u]; } });
       const connection = new Protocol("https://api.moonshot.cn/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       expect(io.reports).toEqual([{ quotas: { balance: { remaining: 120.5, unit: "cny" } } }]);
@@ -604,7 +603,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => { fetches += 1; return new Response("{}", { status: 200 }); };
     try {
-      const io = aiio({ planUsageSet: () => {} });
+      const io = aiio({ set planUsage(value) {} });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers({ "X-RateLimit-Limit": "300", "X-RateLimit-Remaining": "297" }), io);
       expect(fetches).toBe(0);
@@ -616,7 +615,7 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => { fetches += 1; return new Response(JSON.stringify({ data: { available_balance: 1 } }), { status: 200 }); };
     try {
-      const io = aiio({ planUsageSet: () => {} });
+      const io = aiio({ set planUsage(value) {} });
       const connection = new Protocol("https://api.moonshot.ai/v1", io);
       await connection.reportPlanUsage(new Headers(), io);
       await connection.reportPlanUsage(new Headers(), io);
@@ -627,17 +626,17 @@ describe("kimi provider: reportBalance (platform-endpoint fallback when no heade
   test("no token, a failed fetch, or a non-2xx/malformed response never throw and never report", async () => {
     const originalFetch = globalThis.fetch;
     try {
-      const noToken = aiio({ settings: { auth: {} }, planUsageSet: () => { throw new Error("must not be called"); } });
+      const noToken = aiio({ settings: { auth: {} }, set planUsage(value) { throw new Error("must not be called"); } });
       const conn1 = new Protocol("https://api.moonshot.ai/v1", noToken);
       await conn1.reportPlanUsage(new Headers(), noToken);
 
       globalThis.fetch = async () => { throw new Error("network down"); };
-      const netErr = aiio({ planUsageSet: () => { throw new Error("must not be called"); } });
+      const netErr = aiio({ set planUsage(value) { throw new Error("must not be called"); } });
       const conn2 = new Protocol("https://api.moonshot.ai/v1", netErr);
       await expect(conn2.reportPlanUsage(new Headers(), netErr)).resolves.toBeUndefined();
 
       globalThis.fetch = async () => new Response("nope", { status: 500 });
-      const bad = aiio({ planUsageSet: () => { throw new Error("must not be called"); } });
+      const bad = aiio({ set planUsage(value) { throw new Error("must not be called"); } });
       const conn3 = new Protocol("https://api.moonshot.ai/v1", bad);
       await conn3.reportPlanUsage(new Headers(), bad);
     } finally { globalThis.fetch = originalFetch; }

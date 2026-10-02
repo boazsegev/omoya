@@ -13,7 +13,7 @@ const ollama = {
 };
 import { assemblerCreate } from "../lib/context.js";
 
-const aiio = { modelCurrent: "m", settings: {}, tools: () => [] };
+const aiio = { modelCurrent: "test/m", settings: {}, tools: () => [] };
 
 describe("Ollama thinking: wire -> normalized shape", () => {
   test("message.thinking frames become thinking events at block 0; text follows at 1", () => {
@@ -57,12 +57,12 @@ describe("Ollama thinking: wire -> normalized shape", () => {
   });
 
   test("the think request option passes from settings into the body", () => {
-    const withThink = { modelCurrent: "m", settings: { think: "low" }, tools: () => [] };
+    const withThink = { modelCurrent: "test/m", settings: { think: "low" }, tools: () => [] };
     const [, body] = ollama.context2msg([], withThink);
     expect(body.think).toBe("low");
-    const off = { modelCurrent: "m", settings: { think: "none" }, tools: () => [] };
+    const off = { modelCurrent: "test/m", settings: { think: "none" }, tools: () => [] };
     expect(ollama.context2msg([], off)[1].think).toBe(false);
-    const plain = { modelCurrent: "m", settings: {}, tools: () => [] };
+    const plain = { modelCurrent: "test/m", settings: {}, tools: () => [] };
     expect("think" in ollama.context2msg([], plain)[1]).toBe(false);
   });
 });

@@ -217,21 +217,18 @@ describe("tools/skill.js: the skill tool", () => {
     expect(answer.system[1]).toContain("DEMO BODY");
   });
 
-  test("unknown skills give an actionable catalog instruction; a mix loads the found", async () => {
+  test("unknown skills fail atomically and identify the missing names", async () => {
     fakeSkillDirs();
     const { skill } = await import("../tools/skill.js");
-    expect(await skill({ names: ["nope"] })).toBe("No requested skills are available. Call skill with no names to list available skills, then try again.");
-    const mixed = await skill({ names: ["demo", "nope"] });
-    expect(mixed.result).toBe("Loaded skills: demo. Call skill with no names to find the unavailable skills.");
-    expect(mixed.system).toHaveLength(1);
-    expect(mixed.system[0]).toContain("DEMO BODY");
+    await expect(skill({ names: ["nope"] })).rejects.toThrow("Unknown skills: nope");
+    await expect(skill({ names: ["demo", "nope"] })).rejects.toThrow("Unknown skills: nope");
   });
 
   test("published safe (read-only) with the catalog-loading schema", async () => {
     const { toolDescription } = await import("../tools/skill.js");
     const schema = toolDescription().skill;
     expect(schema.safe).toBe(true);
-    expect(schema.inputSchema.properties.names.type).toBe("array");
+    expect(schema.inputSchema.properties.names.anyOf.map((item) => item.type)).toEqual(["string", "array"]);
   });
 
   test("end to end through the Agent: answer in the result, payload in the context", async () => {

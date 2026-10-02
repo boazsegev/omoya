@@ -37,17 +37,19 @@ function harness(blocks) {
   };
   const nodes = [];
   const dirty = new Set();
-  const state = { fullRender: true, resetTranscript: false, frame: 0, frameTimer: 0 };
+  const state = { fullRender: true, resetTranscript: false, stickBottom: false, frame: 0, frameTimer: 0 };
   const scrollEl = { scrollTop: 0, scrollHeight: 100, clientHeight: 100 };
   const flush = new Function("scope", `with (scope) { ${source}; return flushRender; }`)({
-    transcriptContainer, blocks, nodes, dirty, rowBlocks: new WeakMap(), scrollEl, jumpBtn: { hidden: false },
+    transcriptContainer, blocks, nodes, dirty, rowBlocks: new WeakMap(), scrollEl, jumpBtn: { hidden: false }, jumpTopBtn: { hidden: true },
     get resetTranscript() { return state.resetTranscript; }, set resetTranscript(value) { state.resetTranscript = value; },
+    get stickBottom() { return state.stickBottom; }, set stickBottom(value) { state.stickBottom = value; },
     get fullRender() { return state.fullRender; }, set fullRender(value) { state.fullRender = value; },
     get frame() { return state.frame; }, set frame(value) { state.frame = value; },
     get frameTimer() { return state.frameTimer; },
     renderBlock: (block) => ({ ...makeNode(block.kind), className: `msg msg-${block.kind}` }), emptyState: () => makeNode("empty-state"),
     el: (_tag, className) => Object.assign(makeNode("message-row"), { className }),
     renderWorkingIndicator: () => {}, nearBottom: () => true,
+    syncJumpButtons() { this.jumpBtn.hidden = this.nearBottom(); this.jumpTopBtn.hidden = this.scrollEl.scrollTop < this.scrollEl.clientHeight; },
     cancelAnimationFrame: () => {}, clearTimeout: () => {},
   });
   return { children, nodes, dirty, flush, state };

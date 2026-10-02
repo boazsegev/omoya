@@ -1,16 +1,32 @@
 # Changelog
 
-All notable changes to Omoya are documented here. [Semantic Versioning](https://semver.org/) protects the embedded library; App and GTUI APIs are not semantically versioned.
+Notable changes to Omoya are listed by release, newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not.
 
-## 0.2.1 — unreleased
+## 0.2.1 — 2026-10-04
 
-(future updates/fixes will be listed here)
+### Breaking changes
+
+- Single-value controls use properties instead of `*Set()` methods on Agent (model, name, description, safe, thinking, folder, question, spawnPermission), Context (save, settings), and IO (model, contextUsage, planUsage). Keyed methods such as `IO.settingsSet(key, value)` remain. There are no compatibility aliases.
+- `Agent.run` no longer accepts model or endpoint overrides. Set `agent.model` instead; `io.model` can change only while idle and within its current endpoint. Removed `modelAccess` and endpoint local/remote classification; auth persistence scopes are unchanged.
+- Replace `Agent.toolCallable(name)` with lookup in `await agent.tools`, a Map of current model-facing tool descriptors. `Agent.toolContext` is no longer public. TUI and Web show a read-only tools block without adding it to conversation history.
+- `read` replaces flat range/pattern/maxMatches options with grouped `lines`, `characters`, `bytes`, and `search` options. Literal and regex searches combine with OR. Negative range indexes count from the end; `glob`, `exclude`, `limit`, and `offset` support bounded discovery. Ignore filtering is opt-in (`ignore: true`); direct file reads are unaffected. Symlinks are not followed.
+- `write` accepts exactly one of `content` or `read`. The latter saves a shared read-query result as text, a search report, base64, or raw bytes without a model round-trip. Failed validation or an incomplete query leaves the destination unchanged. Non-search saves omit annotations; searches honor `annotate`.
+- Same-named skill definitions now override rather than concatenate. To retain a lower layer, include `{{skill-name}}` explicitly (or `{{skill-name[L1-L2]}}` for a line range). Existing additive overrides need a self reference.
+- `/team` was replaced by `/task` for delegated tasks and `/author` for sourced document workflows; no alias remains.
+
+### Added and fixed
+
+- `skill` accepts one name or an array, deduplicates names, and rejects unknown names without partial activation. Already active skills are not reinjected; edits apply in a new context. Activation survives compaction, fork, and resume.
+- `skill-resource` lists available resource identifiers when given only a name, reads resources by path, and can export exact bytes to a new project file with `target`. Unlisted resources can still be read. Safe mode blocks exports; no skill is activated by listing or reading. `Env.skillResource(name, path)` provides bounded reads or, without a path, a list of identifiers.
+- Read queries now enforce scan, time, and output budgets and report incomplete results separately from content. `write.read` is atomic after successful validation.
+- Context copies constructor messages so forks do not share message objects; read APIs still expose live messages. Child initialization and close-listener failures no longer retain parent or registry state. Worker tool bootstrap excludes nested and disk-loaded auth.
+- Generated API documentation now covers public instance fields, namespace statics, and property accessors.
 
 ## 0.2.0 — 2026-10-02
 
 ### Highlights
 
-- **Improved UI/UX, tools and Provider fixes.** tokens were bought and API keys were tested for the builtin providers (OpwnAI, Anthropic and Kimi). The tools were overhauled with native web access and provider access where available (watch the token use on API calls, disable per endpoint / model with `search: false` and `fetch: false`). The `om --serve` web interface is now more powerful than ever.
+- **Updated tools, providers, and interfaces.** Tested built-in OpenAI, Anthropic, and Kimi providers with API keys. Web search and fetch can use provider-hosted tools where available; disable either per endpoint or model with `search: false` or `fetch: false` to control API use. Expanded the `om --serve` web interface.
 - **Read-only tools can run in parallel.** Calls marked `safe: true` run in contiguous groups, up to the configured `tools.concurrency` limit (default 3). Mutating or unmarked calls remain sequential barriers; results stay in call order. `toolCall.async` no longer allows mutating calls to overlap.
 - **Install trusted extension packages.** List installed npm package names in the user settings folder's `settings.json` under `extensions`. Their JSON settings, themes, providers, tools, skills, and prompts load after Omoya's package and before user settings. Project settings and extensions cannot activate further extensions. Providers and tools execute code with host access: install only packages you trust, and restart after changing them.
 - **Inspect and control more from the TUI and web app.** The web app gains the command palette, theme previews, endpoint sign-in, session and context editing, and TUI command parity. Both interfaces show endpoint, model, thinking, safety, and logging controls; the TUI adds a block-oriented transcript, context gauge, syntax-highlighted code fences, and a turn-activity footer.

@@ -20,6 +20,8 @@ Filesystem boundaries are enforced by the OS, not by prompt instructions. Every 
 
 ## Try it now
 
+Make sure you have [bun](https://bun.sh) installed.
+
 Run without installing:
 
 ```sh
@@ -57,7 +59,11 @@ Multi-line input, large-paste handling, queued follow-ups, mouse-aware overlays,
 
 Fresh sessions layer instructions from three `AGENTS.md` files — the harness's own, your user settings folder's, and the working project's — plus `settings.system` and anything you append live. There is no hidden third-party agent CLI between your instructions and the model provider.
 
-Reusable **skills** and **prompts** accumulate across package, user, and project roots (`ai-skills/`, `ai-prompts/`); the `skill` tool loads them into the conversation on demand.
+Reusable **skills** and **prompts** accumulate across package, user, and project roots (`ai-skills/`, `ai-prompts/`). Later same-named skills replace earlier instruction bodies; use `{{skill-name}}` to explicitly include another skill, or the previous definition when overriding that same skill. `{{skill-name[1-10]}}` includes 1-based, inclusive lines of its expanded body (excluding frontmatter). Cross-skill references resolve the effective definition; unknown placeholders stay literal, while cycles and invalid known ranges fail. Resource files overlay independently: the last existing match wins.
+
+The `skill` tool accepts one name or an array, trims surrounding whitespace without splitting names, and deduplicates requests. Activation is atomic: unknown names fail without loading any new instructions. Skills already active in the current context succeed without reinjection, even after disk edits; edits apply to a new session. Prefilled skills count as active, and compaction/fork/resume retain them. Portable authored names should still follow Agent Skills naming conventions.
+
+Use `skill-resource` with `{name: "web"}` to list available skill-relative resource identifiers (without activating the skill), or `{name: "web", path: "examples/build.js"}` to read an existing UTF-8 resource (up to 128 KiB); listings are optional and do not gate access. Add `target: "web/examples/build.js"` to save its exact bytes (including binary resources, up to 16 MiB) to a new project file, creating parent folders. Existing targets, traversal, and observed symlinks are refused; safe mode allows reads but refuses saving. Resources do not activate skills or execute code. Installation paths are not exposed. Ordinary `read` continues to read workspace files, with no skill-resource fallback.
 
 ## The project is the unit of memory
 
@@ -85,7 +91,7 @@ Omoya resolves each listed installed package at startup and treats its package r
 
 ## Tools with enforced boundaries
 
-The built-in tools — `read`, `edit`, `write`, `bash`, `question`, `skill`, `note`, `worker-create`, `worker-message`, `worker-close`, `worker-status`, `mcp`, `web-search`, `web-fetch` — cover file reading and search, exact-text edits (a unified diff shows what the agent did, and each edit can be rolled back), file writing, bounded shell commands with cancellation, structured questions, a skill catalog, scratchpad notes, named workers, MCP servers, and web search and fetch.
+The built-in tools — `read`, `edit`, `write`, `bash`, `question`, `skill`, `skill-resource`, `note`, `worker-create`, `worker-message`, `worker-close`, `worker-status`, `mcp`, `web-search`, `web-fetch` — cover file reading and search, exact-text edits (a unified diff shows what the agent did, and each edit can be rolled back), file writing, bounded shell commands with cancellation, structured questions, a skill catalog, scratchpad notes, named workers, MCP servers, and web search and fetch.
 
 ### Direct tool access from your shell
 
@@ -106,7 +112,7 @@ With no sandbox available, safe mode is forced: only read-only tools exist. `--s
 
 Further safeguards:
 
-- Session logs live outside the project tree, so cwd-scoped tools cannot rewrite their own history.
+- Session logs default to the user settings folder, outside the project tree. A project can explicitly redirect them inside its own tree; agents with write access there can then modify their own history.
 - Tool schemas never carry security metadata.
 - A package-shipped refusal list strips provider API keys from spawned child processes (a settings list you can extend — or disable).
 
@@ -120,6 +126,16 @@ import Agent from "omoya/agent";
 const env = await Agent.Env.create();   // providers, endpoint detection, tools
 const agent = new Agent({ env, model: "ollama/gpt-oss:20b", safe: true });
 ```
+
+To isolate saved sessions for one project, put `{"sessions":"ai-sessions"}` in that project's `ai-settings.json`. Relative paths there resolve against the project folder; paths in user settings resolve against the settings folder. For an embedded, non-persisted override, pass `sessionsDir` to Env: `new Agent.Env({ cwd: projectPath, sessionsDir: "private-sessions" })`. Relative overrides resolve against `cwd`; absolute paths work too. Each Env keeps its own override, and neither the override nor session data is written to settings files. Existing agents keep their current Context file; create or resume a session to use a changed folder.
+
+Model selection is always one qualified string, such as `"ollama/gpt-oss:20b"`. Assign `agent.model = "endpoint/model"` to validate the selection, update policy, remember it, and record session settings. `agent.run()` has no model override. IO also supports `io.model = "endpoint/model"` while idle, on its existing endpoint; its request-specific write override remains available. Construct another IO to switch endpoints. Web/TUI derive display fields, and provider adapters extract native model IDs only for wire translation.
+
+Inspect the tools published to an agent with `const tools = await agent.tools`: a `Map` from tool name to provider-neutral descriptor (`name`, `description`, `inputSchema`). For example, `tools.get("read")` returns its schema, and `tools.has("read")` checks publication. The catalog uses the same filtering as IO: availability, safe mode, configured selection, hidden-tool exclusion, and provider-specific tools/schema overrides. It describes the current catalog before provider dialect conversion, not a historical wire capture. Both block viewers (^O / Ctrl+O) show it as a read-only virtual system block before the real messages, with a Markdown heading and description for each tool followed by its full published descriptor/schema in a JSON code block; it never enters conversation history. Tool-call context construction is internal to Agent dispatch, not a public Agent factory.
+
+Single-value controls use property assignment: `agent.name`, `description`, `safe`, `thinking`, `spawnPermission`, `folder`, and `question`; `context.save` and `context.settings`; and provider reports `io.contextUsage` and `io.planUsage`. Keyed operations such as `io.settingsSet(key, value)` remain methods. Assignments evaluate to the supplied value—read the property afterwards to observe normalization or enforced safety.
+
+**Ownership:** `new Context({ messages })` deep-copies its seed, so forked conversations do not share message objects. `context.messages()` returns a new array of live message objects; `at()`/`blockAt()` also return live objects. Direct edits change that context but do not mark it dirty; use Context edit/update methods for persistence. Env settings and nested model/tool descriptor values may likewise reference shared global data; mutate deliberately, never assume a defensive copy. Settings arrays currently require replacement for persistence and change notifications; in-place array behavior remains under consideration.
 
 `omoya/agent` is the headless core — it publishes `Agent.Context`, `Agent.Env`, and `Agent.IO` without loading any CLI, Markdown, or UI code. Import `omoya/app` when you want those layers. See [API.md](API.md) and [API-schema.md](API-schema.md).
 
@@ -151,6 +167,25 @@ Math in messages can use explicit `\(x^2\)` inline delimiters (recommended when 
 ## The web, without an account
 
 **Web search and fetch** need no account: every call routes through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries a configured or auto-detected [SearXNG](https://docs.searxng.org/) instance first (`SEARXNG_URL`/`SEARXNG_BASE`), then falls back to the aggregate engines (DuckDuckGo and Mojeek by default; `BRAVE_API_KEY` adds Brave).
+
+## File queries without shell pipelines
+
+The read-only `read` tool handles cat/head/tail, listings, filename filters, and literal/regex search. `write.read` saves query payloads without sending them back through the model. Without an effective search it forces `annotate: false`, even if supplied true; searches honor `annotate` (default true) to retain source locations:
+
+```js
+read({ path: "README.md", annotate: false });
+read({ path: "log.txt", lines: { from: -8 } }); // last eight lines
+read({ path: "src", recursive: true, glob: ["*.js", "*.md"],
+  exclude: "generated/**", search: { text: "TODO", regex: "\\bFIXME\\b", before: 2, after: 2 }, limit: 20 });
+write({ path: "report.txt", read: { path: "src", recursive: true,
+  glob: "*.md", search: { text: "TODO" }, info: true } });
+```
+
+`lines` is 1-based/inclusive; `characters` and `bytes` are 0-based/exclusive at the end. Negative indexes count from end (`-1` is last; exclusive `to: -1` omits the last character/byte). `lines.last` is an alternative tail selection. Zero offsets, zero limits, and valid booleans are intentional; wrong-type model fillers normalize to absence. Old flat `startLine`/`endLine`/`pattern`/`maxMatches` arguments are no longer accepted.
+
+`ignore` defaults false: Git publishing exclusions often hide useful AI artifacts. Opt in with `ignore: true` to load `.gitignore` then `.ignore` and system exclusions; explicit files always bypass ignore rules. Symlinks are never followed. `info` gives contextual file metadata/listing counts/search paths and line counts. `annotate: false` strips payload decoration, not execution-status warnings. `binary` selects bytes; `base64` produces encoded text. No JSON format switch or separate copy API.
+
+Finite `read` settings bound work: `scanBytes` (64 MiB), `fileBytes` (16 MiB), `files` (10000), `entries` (20000), `grepFileSizeLimit` (5 MiB per discovered search file), `outputBytes` (64 KiB), `artifactBytes` (16 MiB for `write.read`), `regexMs` (1000), and `timeoutMs` (30000). Positive safe integers customize budgets; nonpositive values do not disable them. Counts stopped by budgets are incomplete. Explicit result limits are intentional; execution/serialization failures prevent saving. Raw binary saves contain bytes, not annotations; status is never inserted into saved data. `write` accepts exactly one `content` or `read` and still overwrites existing files, now through atomic replacement.
 
 ## Sessions and jobs
 

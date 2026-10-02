@@ -1,7 +1,7 @@
 /** test/api-schema.js — LIBRARY for the doc tests: generate the quiet
  *  public-contract schema reference (API-schema.md). No CLI —
  *  test/api-docs.test.js rewrites the file on every `bun test` run. */
-import { collect } from "./api-reference.js";
+import { collect, toolCatalog, toolContract } from "./api-reference.js";
 
 const tick = String.fromCharCode(96);
 const fence = `${tick}${tick}${tick}`;
@@ -71,19 +71,34 @@ function functionType(symbol) { return `(${parameters(symbol)}) => ${returnType(
 function memberType(member) {
   if (member.kind === "getter") return returnType(member);
   if (member.kind === "constructor") return `constructor(${parameters(member)})`;
-  if (member.kind === "field") return "unknown";
+  if (member.kind === "field") return returnType(member);
   return functionType(member);
 }
+function memberDeclaration(member) {
+  const prefix = member.static ? "static " : "";
+  if (member.kind === "constructor") return memberType(member);
+  if (member.kind === "getter") return `${prefix}get ${member.name}(): ${returnType(member)}`;
+  if (member.kind === "setter") return `${prefix}set ${member.name}(${parameters(member)})`;
+  return `${prefix}${member.name}: ${memberType(member)}`;
+}
 function inputSchema(schema) {
-  if (!schema?.properties || typeof schema.properties !== "object") return schema?.type || "unknown";
+  if (schema?.anyOf || schema?.oneOf) {
+    const variants = (schema.anyOf ?? schema.oneOf).map(inputSchema);
+    const unique = [...new Map(variants.map((variant) => [JSON.stringify(variant), variant])).values()];
+    return unique.length === 1 ? unique[0] : { union: unique };
+  }
+  if (schema?.enum) return schema.enum;
+  if (!schema?.properties || typeof schema.properties !== "object") {
+    if (schema?.const !== undefined) return { const: schema.const };
+    return schema?.type === "array" && schema.items ? { array: inputSchema(schema.items) } : schema?.type || "unknown";
+  }
   const required = new Set(schema.required || []);
-  return Object.fromEntries(Object.entries(schema.properties).map(([key, spec]) => [required.has(key) ? key : `${key}?`, spec?.enum || spec?.type || "unknown"]));
+  return Object.fromEntries(Object.entries(schema.properties).map(([key, spec]) => [required.has(key) ? key : `${key}?`, inputSchema(spec)]));
 }
 function publicSchemas(data) {
   const renderedClasses = new Set();
   let out = "";
   for (const module of data.modules) {
-    if (module.name === "index") continue; // aggregate re-exports add no contract
     const exports = module.exports.filter((symbol) => symbol.kind !== "class");
     if (exports.length > 0) {
       const lines = exports
@@ -92,14 +107,16 @@ function publicSchemas(data) {
           ? `export const ${symbol.name}: ${functionType(symbol)};`
           : `export const ${symbol.name}: unknown;`);
       out += typeSection(`${module.name} module`, lines.join("\n"));
+      for (const symbol of exports.filter((symbol) => symbol.members?.length)) {
+        out += typeSection(`${module.name}.${symbol.name}`, symbol.members.map((member) => `${memberDeclaration(member)};`).join("\n"));
+      }
     }
     for (const symbol of module.exports) {
       if (symbol.kind !== "class" || renderedClasses.has(symbol.name)) continue;
       renderedClasses.add(symbol.name);
       const lines = (symbol.members || [])
-        .filter((member) => !(symbol.name === "Env" && member.name === "settings"))
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
-        .map((member) => member.kind === "constructor" ? `  ${memberType(member)};` : `  ${member.static ? "static " : ""}${member.name}: ${memberType(member)};`);
+        .map((member) => `  ${memberDeclaration(member)};`);
       out += typeSection(symbol.name, `export class ${symbol.name} {\n${lines.join("\n")}\n}`);
     }
   }
@@ -118,13 +135,14 @@ function combine(base, contributed) {
   return Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(contributed)])]
     .map((key) => [key, combine(base[key], contributed[key])]));
 }
-function settingsSchemas(data) {
+/** Derive the live settings contract once for both the Markdown schema and website. */
+export function settingsSchemaValues(data) {
   const contract = data.contracts.find((item) => Array.isArray(item.entries));
-  const values = {};
-  for (const entry of contract?.entries || []) {
-    values[entry.key] = infer(combine(entry.coreDefault, entry.value), entry.key);
-  }
-  return schemaSection("Env.settings", values);
+  return Object.fromEntries((contract?.entries || []).map((entry) =>
+    [entry.key, infer(combine(entry.coreDefault, entry.value), entry.key)]));
+}
+function settingsSchemas(data) {
+  return schemaSection("Env.settings", settingsSchemaValues(data));
 }
 function typedefSchemas(data) {
   const context = data.contracts.find((item) => item.name.startsWith("Context schema"));
@@ -136,14 +154,19 @@ function typedefSchemas(data) {
   return out;
 }
 function contracts(data) {
-  const catalog = data.contracts.find((item) => Array.isArray(item.tools));
-  // Tool modules publish toolDescription() (or the describe() fallback);
-  // these call-time contracts are owned by Env's registry surface.
-  let out = schemaSection("Env.toolContext", { question: "{ ask(questions): Promise<answers> } | null", env: "Env", call: "ToolCallContent | undefined", agent: "Agent | undefined" });
+  const catalog = toolCatalog(data);
+  const contract = toolContract(data);
+  let out = `## ${contract.name}\n\n${contract.sources.map((source) => `- ${source.label ?? source.file} — \`${source.file}\``).join("\n")}\n\n`;
+  out += schemaSection("Env.toolArguments", { args: "object matching the tool's inputSchema (parsed JSON)", context: "Internal Agent dispatch context (in-process); serializable worker ctx with env, sandbox, deadline, onData, agent.folder and optional question bridge" });
+  out += schemaSection("Tool execution context (not a public constructor)", { question: "{ ask(questions): Promise<answers> } | null", env: "Env", safe: "boolean", selector: "string | undefined", io: "IO | undefined", call: "{callId: string, name: string} | undefined", agent: "Agent | undefined", storage: "object | undefined", trusted: "boolean", resetTimeout: "() => void", "statusSet?": "(info: object) => void" });
   out += schemaSection("Env.toolReturn", { result: "string | Content[] | { content: Content[] } | JSON", "system?": "string | string[]", "display?": "string | string[]" });
   out += schemaSection("Env.toolCallResult", { type: 4, callId: "string", name: "string", "error?": "boolean", content: "Content[]" });
-  out += schemaSection("Env.toolDescription", { description: "string", inputSchema: "JSON Schema", "safe?": "boolean", "interactive?": "boolean", "sandbox?": "boolean", "secret?": "boolean", "onTimeout?": "function(args, context)" });
-  for (const tool of catalog?.tools || []) out += schemaSection(`Env.toolDescription.${tool.name}.inputSchema`, inputSchema(tool.inputSchema));
+  out += schemaSection("Env.toolDescription", { description: "string", inputSchema: "JSON Schema", "safe?": "boolean", "trusted?": "boolean", "interactive?": "boolean", "sandbox?": "boolean", "secret?": "boolean", "fn?": "(args, context) => result | Promise<result>", "onTimeout?": "function(args, context)" });
+  out += "## Core tool catalog (live schemas)\n\n";
+  for (const tool of catalog?.tools || []) {
+    out += `${tool.description}\n\nSource: \`${tool.file}\`${tool.flags.length ? `; flags: ${tool.flags.join(", ")}` : ""}\n\n`;
+    out += schemaSection(`Env.toolDescription.${tool.name}.inputSchema`, inputSchema(tool.inputSchema));
+  }
   return out;
 }
-export async function generate() { const data = await collect(); return "# API schema\n\n" + settingsSchemas(data) + typedefSchemas(data) + contracts(data) + publicSchemas(data); }
+export async function generate() { const data = await collect(); return "# API schema\n\nCompact contract notation, not executable TypeScript or a validation schema. Getters and setters are listed separately; the full API reference contains their effects and ownership rules.\n\n" + settingsSchemas(data) + typedefSchemas(data) + contracts(data) + publicSchemas(data); }

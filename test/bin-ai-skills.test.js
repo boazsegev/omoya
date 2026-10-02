@@ -62,6 +62,16 @@ describe("the skills CLI (prefixed + unprefixed wrappers)", () => {
     expect(stdout).toBe("");
   });
 
+  test("mixed known/unknown names fail atomically; duplicates and surrounding spaces normalize", async () => {
+    const dir = extraSkillDir();
+    const mixed = await run(cli.skills, ["demo", "missing"], { skillsDir: dir });
+    expect(mixed.exit).toBe(1);
+    expect(mixed.stdout).toBe("");
+    const normalized = await run(cli.skills, [" demo ", "demo"], { skillsDir: dir });
+    expect(normalized.exit).toBe(0);
+    expect(normalized.stdout.match(/<skill name="demo">/g)).toHaveLength(1);
+  });
+
   test("--help prints usage under the invoked name and exits 0", async () => {
     const { stdout, exit } = await run(cli.skills, ["--help"], {});
     expect(exit).toBe(0);

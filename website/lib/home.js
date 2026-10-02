@@ -10,6 +10,9 @@
 import { escapeHtml, page } from "./html.js";
 import { site } from "../site.js";
 
+const BUN_LINK = '<a href="https://bun.sh/" target="_blank" rel="noopener noreferrer">Bun (opens in new tab)</a>';
+const SEARXNG_LINK = '<a href="https://docs.searxng.org/" target="_blank" rel="noopener noreferrer">SearXNG (opens in new tab)</a>';
+
 /** Install methods (README "Try it now"), shown as tabs (stacked without JS). */
 const INSTALL = [
   { id: "bunx", label: "bunx", note: "no install", code: "bunx omoya --login\nbunx omoya" },
@@ -31,7 +34,7 @@ const WHY = [
   ["Stop context leaks", "Where other agent tools stop at a project instructions file, Omoya makes the project the unit of everything: skills, prompts, settings, and scheduled jobs live in <code>ai-</code> files inside the folder they belong to."],
   ["Project memory and workflow", "The <code>core</code> skill encodes working conventions — memory files, task ledgers, delegation rules — leading to context-aware agents using practical conventions."],
   ["Transparency", "Inspect and edit the exact context the model receives, watch every tool call, read the unified diff of every edit."],
-  ["Convention over configuration", "Auto-detection for local Ollama / LM Studio models, SearXNG (<code>SEARXNG_URL</code>), and known endpoints (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, etc.) — zero-configuration functionality."],
+  ["Convention over configuration", `Auto-detection for local Ollama / LM Studio models, ${SEARXNG_LINK} (<code>SEARXNG_URL</code>), and known endpoints (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, etc.) — zero-configuration functionality.`],
 ];
 
 const SURFACES = [
@@ -95,7 +98,7 @@ const DETECTED = [
 const PRINCIPLES = [
   ["The system message is yours", "Fresh sessions layer instructions from three <code>AGENTS.md</code> files — the harness's own, your user settings folder's, and the working project's — plus <code>settings.system</code> and anything you append live. There is no hidden third-party agent CLI between your instructions and the model provider."],
   ["The project is the unit of memory", "<code>ai-settings.json</code>, <code>ai-auth-*.json</code>, <code>ai-skills/</code>, <code>ai-prompts/</code>, <code>ai-jobs/</code>, <code>AGENTS.md</code> — none of it is visible from another project. The <code>ai-</code> prefix never changes, even if the harness is renamed."],
-  ["The web, without an account", "Web search and fetch route through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries SearXNG first, then DuckDuckGo and Mojeek; <code>BRAVE_API_KEY</code> adds Brave."],
+  ["The web, without an account", `Web search and fetch route through the provider's own web backend, then a mapped MCP server, then a package backend — bounded, cached, and rate-limited. The package backend tries ${SEARXNG_LINK} first, then DuckDuckGo and Mojeek; <code>BRAVE_API_KEY</code> adds Brave.`],
   ["Direct tool access", "Run any installed Omoya tool directly, no agent required: <code>om-tool --list</code> to see them, <code>om-skills core</code> to print a skill, <code>om-tools2bash</code> to generate direct shell wrappers."],
 ];
 
@@ -135,7 +138,7 @@ export function homePage() {
   <svg class="hero-logo" viewBox="0 0 512 512" width="96" height="96" aria-hidden="true" focusable="false"><rect width="512" height="512" rx="112"/><circle cx="256" cy="256" r="142"/><path d="M218 207 274 256 218 305 M282 305h38"/></svg>
   <p class="eyebrow">Omoya · transparent Bun agent harness</p>
   <h1>See what your agent <em>sees</em>.</h1>
-  <p class="lede">One zero-dependency Bun core for a terminal interface, a scriptable headless loop, and an embeddable library. Filesystem boundaries are enforced by the OS, not by prompt instructions, and every shipped provider normalizes into one event model.</p>
+  <p class="lede">One zero-dependency ${BUN_LINK} core for a terminal interface, a scriptable headless loop, and an embeddable library. Filesystem boundaries are enforced by the OS, not by prompt instructions, and every shipped provider normalizes into one event model.</p>
   ${installBox()}
   <p class="hero-links"><a href="./api/">Read the docs →</a><a href="${site.repository}">Source on GitHub →</a><a href="https://www.npmjs.com/package/omoya">npm →</a></p>
 </section>

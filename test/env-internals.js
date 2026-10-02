@@ -1,7 +1,7 @@
 // test/env-internals.js — Env's PRIVATE registry steps, for the tests
 // that prove them directly (detection, refresh, provenance). Not a test
 // file. Public consumers read env.models() / env.connection() instead.
-import { detectEndpoints, refreshModels, isDynamic, endpointRegistered, endpointLocal, endpointScope, refreshEndpointSettings } from "../lib/env/endpoints.js";
+import { detectEndpoints, refreshModels, isDynamic, endpointRegistered, endpointScope, refreshEndpointSettings } from "../lib/env/endpoints.js";
 import { touchHistory } from "../lib/env/model-history.js";
 import { modelsChanged } from "../lib/env/models-changed.js";
 import { readLastCombo } from "../lib/cli/model.js";
@@ -10,7 +10,6 @@ export const detect = (env, options) => detectEndpoints(env, options);
 export const refresh = (env, options) => refreshModels(env, options);
 export const dynamic = (env, name) => isDynamic(env, name);
 export const registered = (env, name) => endpointRegistered(env, name);
-export const local = (env, name) => endpointLocal(env, name);
 export const scope = (env, name) => endpointScope(env, name);
 export const reread = (env, name) => refreshEndpointSettings(env, name);
 /** The newest last-used published pair (the CLI's selection rule). */

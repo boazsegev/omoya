@@ -5,7 +5,7 @@
 // executable name derives from bin-names.js — rename-safe.
 import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { binName, cli } from "./bin-names.js";
 
 mkdirSync("./ai-tmp", { recursive: true });
@@ -116,10 +116,42 @@ export function toolDescription() {
     expect(stderr).toContain('unknown tool "nope-not-a-tool"');
   });
 
-  test("non-JSON args are shell strings rather than a JSON usage error", async () => {
-    const { stdout, exit } = await run(["skill", "not json"]);
-    expect(exit).toBe(0);
-    expect(stdout.trim()).not.toBe("");
+  test("non-JSON args are single shell strings; unknown skill names fail activation", async () => {
+    const known = await run(["skill", "core"]);
+    expect(known.exit).toBe(0);
+    expect(known.stdout).toContain("Loaded skills: core.");
+    const unknown = await run(["skill", "not json"]);
+    expect(unknown.exit).toBe(2);
+    expect(unknown.stderr).toContain("Unknown skills: not json");
+  });
+
+  test("skill-resource reads and exports through the real scanned tool CLI", async () => {
+    const root = mkdtempSync("./ai-tmp/resource-cli-");
+    mkdirSync(`${root}/web`);
+    writeFileSync(`${root}/web/SKILL.md`, "---\nname: web\ndescription: test\n---\nbody\n");
+    writeFileSync(`${root}/web/example.js`, "exact example\n");
+    const options = { env: { [NAMES.skillsEnv]: root } };
+    const listed = await run(["skill-resource", JSON.stringify({ name: "web" })], options);
+    expect(listed.exit).toBe(0);
+    expect(listed.stdout).toContain("example.js");
+    const read = await run(["skill-resource", JSON.stringify({ name: "web", path: "example.js" })], options);
+    expect(read.exit).toBe(0);
+    expect(read.stdout.trim()).toBe("exact example");
+    const saved = await run(["skill-resource", JSON.stringify({ name: "web", path: "example.js", target: `${root}/saved.js` })], options);
+    expect(saved.exit).toBe(0);
+    expect(readFileSync(`${root}/saved.js`, "utf8")).toBe("exact example\n");
+  });
+
+  test("nested read queries and write.read execute through the real CLI", async () => {
+    const root = mkdtempSync("./ai-tmp/read-query-cli-");
+    writeFileSync(`${root}/source.txt`, "one\nTODO\nthree");
+    const query = { path: `${root}/source.txt`, lines: { from: -2 }, annotate: false };
+    const selected = await run(["read", JSON.stringify(query)]);
+    expect(selected.exit).toBe(0);
+    expect(selected.stdout.trim()).toBe("TODO\nthree");
+    const saved = await run(["write", JSON.stringify({ path: `${root}/out.txt`, read: { ...query, annotate: true } })]);
+    expect(saved.exit).toBe(0);
+    expect(readFileSync(`${root}/out.txt`, "utf8")).toBe("TODO\nthree");
   });
 
   test("a tool call that throws is exit 2, never a stack trace", async () => {

@@ -100,7 +100,7 @@ describe("Env protocol classes and endpoint settings", () => {
       providerAdd(env, "openai", OpenAIPlugin);
       await detect(env);
       expect(env._endpoints).toEqual({
-        ollama: { provider: "ollama", url: "http://localhost:11434", local: true },
+        ollama: { provider: "ollama", url: "http://localhost:11434" },
         "lm-studio": { provider: "openai", url: "http://localhost:1234/v1" },
       });
       expect(calls).toEqual(["http://localhost:11434/api/tags", "http://localhost:1234/v1/models"]);
@@ -109,7 +109,7 @@ describe("Env protocol classes and endpoint settings", () => {
     }
   });
 
-  test("Ollama login marks a new endpoint local unless its prior configuration is remote", async () => {
+  test("Ollama login publishes no local/remote classification", async () => {
     class OllamaLogin {
       static login() { return { type: "none" }; }
       static async testConnection() { return {}; }
@@ -118,10 +118,10 @@ describe("Env protocol classes and endpoint settings", () => {
     const env = new Env({ dir, cwd: dir });
     providerAdd(env, "ollama", OllamaLogin);
     await loginEndpoint(env, { name: "new-ollama", provider: "ollama", url: "http://host" });
-    expect(endpointOf(env, "new-ollama")).toMatchObject({ local: true });
-    env.settings.providers["remote-ollama"] = { provider: "ollama", url: "https://host", remote: true };
+    expect(endpointOf(env, "new-ollama").local).toBeUndefined();
+    env.settings.providers["remote-ollama"] = { provider: "ollama", url: "https://host" };
     await loginEndpoint(env, { name: "remote-ollama", provider: "ollama", url: "https://host" });
-    expect(endpointOf(env, "remote-ollama")).toMatchObject({ remote: true });
+    expect(endpointOf(env, "remote-ollama").remote).toBeUndefined();
     expect(endpointOf(env, "remote-ollama").local).toBeUndefined();
   });
 
@@ -358,7 +358,7 @@ describe("secret endpoints and models", () => {
 
     expect(listModelCandidates(env)).toEqual([]);
     expect(listEndpointModels(env)).toEqual([]);
-    expect(await resolveModelCombo("test/test-model", env)).toEqual({ endpoint: "test", model: "test-model" });
+    expect(await resolveModelCombo("test/test-model", env)).toBe("test/test-model");
   });
 });
 
@@ -398,8 +398,8 @@ describe("endpoint model filter (providers.<name>.filter)", () => {
     expect(candidates).not.toContain("codex/gpt-5-pro");
     // a filtered-out model is unknown as a bare id, but an explicit
     // endpoint/model combo still resolves (same rule as secret models)
-    expect(await resolveModelCombo("gpt-5-pro", env)).toEqual({ model: "gpt-5-pro" });
-    expect(await resolveModelCombo("codex/gpt-5-pro", env)).toEqual({ endpoint: "codex", model: "gpt-5-pro" });
+    expect(await resolveModelCombo("gpt-5-pro", env)).toBeUndefined();
+    expect(await resolveModelCombo("codex/gpt-5-pro", env)).toBe("codex/gpt-5-pro");
   });
 
   test("a live models() refresh is filtered the same way", async () => {
@@ -432,7 +432,7 @@ describe("endpoint model filter (providers.<name>.filter)", () => {
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-5-pro" }));
     expect(lastPair(env)).toBeNull();
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-6-astra" }));
-    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
+    expect(lastPair(env)).toBe("codex/gpt-6-astra");
   });
 });
 
@@ -457,7 +457,7 @@ describe("partial providers entries (endpoint preferences placeholders)", () => 
     // no URL anywhere: nothing registers, menus stay empty
     expect(namesOf(env)).toEqual([]);
     expect(listEndpointModels(env)).toEqual([]);
-    expect(await resolveModelCombo("future/some-model", env)).toEqual({ model: "future/some-model" });
+    expect(await resolveModelCombo("future/some-model", env)).toBeUndefined();
     // detection ADOPTS the preferences instead of being shadowed
     const added = await detect(env);
     if (added.includes("ollama")) { // a local server is running
@@ -568,7 +568,7 @@ describe("partial providers entries (endpoint preferences placeholders)", () => 
     try {
       authSetOf(env, "xai", { models: { "grok-4": null } }); // in-memory cache, dynamic-style
       await detect(env);
-      expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
+      expect(lastPair(env)).toBe("xai/grok-4");
     } finally {
       if (saved === undefined) delete process.env.XAI_API_KEY;
       else process.env.XAI_API_KEY = saved;
@@ -858,7 +858,7 @@ describe("last-model.json history (8 newest combos)", () => {
   test("a legacy single-combo record migrates and keeps selecting", () => {
     const env = historyEnv();
     writeFileSync(join(dir, "last-model.json"), JSON.stringify({ endpoint: "codex", model: "gpt-6-astra" }));
-    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-6-astra" });
+    expect(lastPair(env)).toBe("codex/gpt-6-astra");
   });
 
   test("selection walks to the first AVAILABLE entry — removed endpoints are skipped", () => {
@@ -868,7 +868,7 @@ describe("last-model.json history (8 newest combos)", () => {
       { endpoint: "xai", model: "grok-4", ts: "2026-11-13T09:00:00.000Z" },
       { endpoint: "codex", model: "gpt-5-pro", ts: "2026-11-13T08:00:00.000Z" },
     ]));
-    expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
+    expect(lastPair(env)).toBe("xai/grok-4");
   });
 
   test("a placeholder endpoint is skipped in favor of an older registered one", () => {
@@ -879,7 +879,7 @@ describe("last-model.json history (8 newest combos)", () => {
       { endpoint: "xai", model: "grok-4", ts: "2026-11-13T10:00:00.000Z" },
       { endpoint: "codex", model: "gpt-5-pro", ts: "2026-11-13T09:00:00.000Z" },
     ]));
-    expect(lastPair(env)).toEqual({ endpoint: "codex", model: "gpt-5-pro" });
+    expect(lastPair(env)).toBe("codex/gpt-5-pro");
   });
 
   test("remembering adds, refreshes and re-sorts, and evicts the oldest past 8", async () => {
@@ -918,6 +918,6 @@ describe("last-model.json history (8 newest combos)", () => {
       "garbage",
       { endpoint: "xai", model: "grok-4", ts: "2026-11-13T09:00:00.000Z" },
     ]));
-    expect(lastPair(env)).toEqual({ endpoint: "xai", model: "grok-4" });
+    expect(lastPair(env)).toBe("xai/grok-4");
   });
 });

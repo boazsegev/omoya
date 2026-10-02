@@ -127,7 +127,7 @@ function authHeaders(auth = {}) {
 /** Convert normalized context to a /messages request. */
 function context2msg(context, aiio = this.aiio) {
   const settings = aiio?.settings ?? {};
-  const model = aiio?.modelCurrent;
+  const model = aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1);
   const meta = settings.models?.[model] ?? presetOf(this.constructor, this.baseUrl)?.models?.[model];
   const headers = { "content-type": "application/json", ...authHeaders(settings.auth) };
   const body = {
@@ -346,7 +346,7 @@ function msg2events(msg, state = {}, aiio) {
     state.inputTokens = countInput(usage);
     // the exact context consumption the endpoint measured (cache
     // reads and creation are context too — input_tokens excludes them)
-    if (Number.isFinite(state.inputTokens)) io?.contextUsageSet?.({ used: state.inputTokens });
+    if (Number.isFinite(state.inputTokens)) (io && (io.contextUsage = { used: state.inputTokens }));
     return [];
   }
   if (type === "content_block_start") {
@@ -749,7 +749,7 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     };
     if (Object.keys(quota).length > 0) quotas[key] = quota;
   }
-  if (Object.keys(quotas).length > 0) aiio?.planUsageSet?.({ quotas });
+  if (Object.keys(quotas).length > 0) (aiio && (aiio.planUsage = { quotas }));
 }
 
 /** The auth record an Anthropic API-key login stores. */
@@ -800,7 +800,7 @@ function apiWire(aiio, body) {
  */
 async function serverToolRequest(aiio, wire, tool, prompt, { signal, deadline }) {
   const [headers, payload] = wire(aiio, {
-    model: aiio.modelCurrent,
+    model: aiio.modelCurrent.slice(aiio.modelCurrent.indexOf("/") + 1),
     max_tokens: 1024,
     messages: [{ role: "user", content: prompt }],
     tools: [{ ...tool }],

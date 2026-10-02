@@ -184,6 +184,17 @@ describe("the TUI REPL: one long-lived Agent across turns", () => {
     expect(stdout).toContain("answer two");
   });
 
+  test("/endpoint-model bare unknown model uses the currently selected endpoint", async () => {
+    const { requests, url } = scriptServer(["answer"], { models: [{ name: "m" }] });
+    const { stderr, exit } = await runRepl({
+      input: "/endpoint-model other-model\nquestion\n",
+      args: ["--model", "ollama/m", "--url", url, "--session", "0"],
+    });
+    expect(exit).toBe(0);
+    expect(stderr).toContain("endpoint: ollama, model: other-model");
+    expect(requests[0].model).toBe("other-model");
+  });
+
   test("/endpoint-model with only a provider selects its first available model (live /api/tags)", async () => {
     const requests = [];
     const url = startServer(async (req) => {

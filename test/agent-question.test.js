@@ -129,7 +129,7 @@ describe("Agent: the question bridge wiring", () => {
     const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.content[0].text).toContain("from the constructor");
     // setQuestion replaces the bridge at runtime
-    agent.questionSet({ ask: async () => [{ labels: ["B"] }] });
+    (agent.question = { ask: async () => [{ labels: ["B"] }] });
     const direct = await env.toolCall("question", { questions: [Q()] }, agent._toolContext());
     expect(direct).toContain("A: B");
   });

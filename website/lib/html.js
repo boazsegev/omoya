@@ -68,10 +68,16 @@ export function page({ title, description, path, body, apiNav, apiSections, root
     const current = item.href === "/" ? path === "/" : path.startsWith(item.href);
     return `<a href="${href(item.href)}"${current ? ' aria-current="page"' : ""}>${item.label}</a>`;
   }).join("");
-  const sectionList = (sections) => `<ul class="api-sections">${sections.map((s) =>
-    `<li><a href="#${escapeHtml(s.hash)}">${escapeHtml(s.label)}</a>${s.children?.length
+  // A section carrying children is an object group (a class/namespace and
+  // its members); mark it so the stylesheet can separate group headers from
+  // plain top-level functions and keep members visually nested on every
+  // layout (the mobile chip layout otherwise fuses members into one list).
+  const sectionList = (sections) => `<ul class="api-sections">${sections.map((s) => {
+    const grouped = Boolean(s.children?.length);
+    return `<li${grouped ? ' class="api-group"' : ""}><a href="#${escapeHtml(s.hash)}">${escapeHtml(s.label)}</a>${grouped
       ? `<ul>${s.children.map((c) => `<li><a href="#${escapeHtml(c.hash)}">${escapeHtml(c.label)}</a></li>`).join("")}</ul>`
-      : ""}</li>`).join("")}</ul>`;
+      : ""}</li>`;
+  }).join("")}</ul>`;
   const sidebar = apiNav
     ? `<nav class="api-nav" aria-label="API sections"><h2 class="api-nav-title">API sections</h2><ul>${apiNav.map((item) => {
         const current = item.href === path;

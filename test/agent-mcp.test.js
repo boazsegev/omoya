@@ -31,6 +31,43 @@ async function fixtureContext(settings = {}) {
   return { env, context: { env } };
 }
 
+describe("package startup after the MCP API migration", () => {
+  async function packageEnv(settings = {}) {
+    const dir = mkdtempSync("./ai-tmp/mcp-startup-");
+    return Env.create({ dir, cwd: dir, settingsDir: dir, settings }, { providers: false, models: false });
+  }
+
+  test("loads and refreshes package tools without MCP configuration", async () => {
+    const env = await packageEnv();
+    try {
+      expect((await env.tools()).has("read")).toBe(true);
+      expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]);
+      await env.toolCall("tool-refresh", {});
+      expect((await env.tools()).has("read")).toBe(true);
+      expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]);
+    } finally {
+      env.close();
+    }
+  });
+
+  test("keeps configured MCP tools Env-owned across package scans and drops them when unconfigured", async () => {
+    const env = await packageEnv({ mcp: { fixture: { command: process.execPath, args: [SERVER], safe: true } } });
+    try {
+      expect((await env.tools()).get("mcp").builtin).toBe(true);
+      expect((await env.tools(true)).get("mcp-fixture").builtin).toBe(true);
+      expect(await env.toolCall("mcp-fixture", { tool: "echo", arguments: { text: "startup" } }, { safe: true })).toBe("startup");
+      await env.toolCall("tool-refresh", {});
+      expect((await env.tools()).get("mcp").builtin).toBe(true);
+      expect(await env.toolCall("mcp", { action: "servers" }, { safe: true })).toBe("fixture: connected");
+      env.settings.mcp = {};
+      await env.toolCall("tool-refresh", {});
+      expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]);
+    } finally {
+      env.close();
+    }
+  });
+});
+
 describe("the mcp tool", () => {
   test("servers lists the configured servers with their connection state", async () => {
     const { context } = await fixtureContext();

@@ -51,6 +51,47 @@ function makeIO({ Protocol = fakeProvider(), environment = env, endpoint = {}, .
   return new IO({ env: environment, model: "fake/m", ...options });
 }
 
+describe("IO qualified model contract", () => {
+  test("retains qualified current models, native metadata and tool selectors across overrides", async () => {
+    const models = [], catalogs = [];
+    const aiio = makeIO({ model: "fake/org/base", Protocol: fakeProvider([], {
+      context2msg(context, io) {
+        models.push([io.model, io.modelCurrent, io.settings.think]);
+        return [{}, { context }];
+      },
+    }), endpoint: { models: {
+      "org/base": { thinking: ["off", "high"] },
+      "org/next": { thinking: ["off", "low"] },
+    } }, settings: { think: "high" } });
+    const tools = env.tools.bind(env);
+    env.tools = async (safe, model) => { catalogs.push(model); return tools(safe, model); };
+    expect(aiio.endpoint).toBeUndefined();
+    await aiio.write([], {}, { model: "fake/org/next" });
+    expect(aiio.modelCurrent).toBe("fake/org/base");
+    await aiio.write([]);
+    expect(models).toEqual([
+      ["fake/org/base", "fake/org/next", "low"],
+      ["fake/org/base", "fake/org/base", "high"],
+    ]);
+    expect(catalogs).toEqual(["fake/org/next", "fake/org/base"]);
+    await aiio.close();
+  });
+
+  test("rejects split, bare, unknown and cross-endpoint overrides before reserving IO", async () => {
+    const aiio = makeIO({ Protocol: fakeProvider(doneScript) });
+    env._endpoints.other = { provider: "fake" };
+    expect(() => new IO({ env, endpoint: "fake", model: "m" })).toThrow(/use model/);
+    for (const model of ["m", "missing/m", "other/m"]) {
+      await expect(aiio.write([], {}, { model })).rejects.toThrow();
+      expect(aiio.state).toBe("idle");
+      expect(aiio.modelCurrent).toBe("fake/m");
+    }
+    await expect(aiio.write([], {}, { endpoint: "fake", model: "fake/m" })).rejects.toThrow(/use model/);
+    expect((await aiio.write([])).type).toBe("done");
+    await aiio.close();
+  });
+});
+
 const doneScript = [
   { events: [{ type: "text_start", contentIndex: 0 }, { type: "text_delta", contentIndex: 0, text: "hi" }] },
   { events: [{ type: "done", usage: { inputTokens: 3, outputTokens: 1 } }] },
@@ -60,8 +101,8 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
   test("setContextUsage merges finite numbers; the getter copies", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     expect(aiio.contextUsage).toEqual({ used: undefined, total: undefined });
-    aiio.contextUsageSet({ used: 1200.9 });
-    aiio.contextUsageSet({ total: 128000, used: "junk" });
+    (aiio.contextUsage = { used: 1200.9 });
+    (aiio.contextUsage = { total: 128000, used: "junk" });
     expect(aiio.contextUsage).toEqual({ used: 1200, total: 128000 });
     // the getter copies: mutating its result never leaks back
     const copy = aiio.contextUsage;
@@ -91,7 +132,7 @@ describe("IO context-usage reporting (provider → IO → consumer)", () => {
       [{ events: [{ type: "done", usage: { inputTokens: 5, outputTokens: 1 } }] }],
       {
         msg2events: (native, state, aiio) => {
-          aiio?.contextUsageSet?.({ total: 99999 });
+          (aiio && (aiio.contextUsage = { total: 99999 }));
           return native.events ?? [];
         },
       },
@@ -106,8 +147,8 @@ describe("IO plan-usage reporting (provider → IO → consumer)", () => {
   test("planUsageSet keeps only numbers/non-empty strings; each call is ONE COMPLETE SNAPSHOT that REPLACES the last report", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     expect(aiio.planUsage).toBeNull();
-    aiio.planUsageSet({ label: "Plan", quotas: { requests: { total: 500, remaining: 480, junk: undefined, bad: NaN } } });
-    aiio.planUsageSet({ quotas: { requests: { remaining: 470, reset: "1s" }, tokens: { total: 100000 } } });
+    (aiio.planUsage = { label: "Plan", quotas: { requests: { total: 500, remaining: 480, junk: undefined, bad: NaN } } });
+    (aiio.planUsage = { quotas: { requests: { remaining: 470, reset: "1s" }, tokens: { total: 100000 } } });
     expect(aiio.planUsage).toEqual({
       quotas: {
         requests: { remaining: 470, reset: "1s" }, // replaced, not merged: the first report's fields/label are gone
@@ -123,10 +164,10 @@ describe("IO plan-usage reporting (provider → IO → consumer)", () => {
   test("a report that drops a quota never leaves the stale one behind (the endpoint-switch leak)", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
     // Endpoint A (an Anthropic key, say) publishes its windows…
-    aiio.planUsageSet({ quotas: { "5h": { total: 100, used: 50, remaining: 50 }, requests: { total: 500, remaining: 499 } } });
+    (aiio.planUsage = { quotas: { "5h": { total: 100, used: 50, remaining: 50 }, requests: { total: 500, remaining: 499 } } });
     // …then the agent switched to endpoint B whose responses publish only
     // a bare requests family: A's "5h" window must NOT keep showing.
-    aiio.planUsageSet({ quotas: { requests: { total: 500, remaining: 490 } } });
+    (aiio.planUsage = { quotas: { requests: { total: 500, remaining: 490 } } });
     expect(aiio.planUsage).toEqual({ quotas: { requests: { total: 500, remaining: 490 } } });
   });
 
@@ -259,9 +300,9 @@ describe("IO provider surface", () => {
     const env2 = new Env({ dir, cwd: dir });
     const configured = makeIO({ environment: env2, Protocol });
     expect(configured.url).toBe("http://settings");
-    expect(configured.model).toBe("m"); // explicit selector owns the model
+    expect(configured.model).toBe("fake/m"); // explicit selector owns the model
     expect(makeIO({ environment: env2, Protocol, url: "http://explicit", model: "fake/m-x" }).url).toBe("http://explicit");
-    expect(makeIO({ environment: env2, Protocol, model: "fake/m-x" }).model).toBe("m-x");
+    expect(makeIO({ environment: env2, Protocol, model: "fake/m-x" }).model).toBe("fake/m-x");
   });
 
   test("tools() returns the request's Env catalog snapshot", async () => {
@@ -290,7 +331,8 @@ describe("IO provider surface", () => {
 
   test("endpoint resolves its protocol through the Env registry", () => {
     const aiio = makeIO({ Protocol: fakeProvider() });
-    expect(aiio.endpoint).toBe("fake");
+    expect(aiio.endpoint).toBeUndefined();
+    expect(aiio.model).toBe("fake/m");
     expect(aiio.protocol).toBe("fake");
   });
 

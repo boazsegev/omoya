@@ -7,6 +7,7 @@
 import { escapeHtml, page } from "./html.js";
 import { markdownHtml } from "./markdown.js";
 import { site } from "../site.js";
+import { settingsSchemaValues } from "../../test/api-schema.js";
 
 /** "Env" → "env", for /api/<slug>/ paths. */
 export const slugOf = (name) => name.toLowerCase();
@@ -112,14 +113,10 @@ export function linkApiReferences(html, links, moduleName) {
   );
 }
 
-/** One exported symbol as a definition block (signature + doc + params/returns). */
-function symbolHtml(symbol, moduleName, links) {
-  const qualified = moduleName === "index" ? symbol.name : `${moduleName}.${symbol.name}`;
-  const doc = symbol.doc ?? {};
-  const prose = (text) => linkApiReferences(markdownHtml(text), links, moduleName);
-  const parts = [`<section class="symbol" id="${escapeHtml(symbol.name)}">`,
-    `<h3><code>${escapeHtml(symbol.signature ?? qualified)}</code> <span class="kind">${escapeHtml(symbol.kind)}</span></h3>`];
-  if (doc.description) parts.push(prose(doc.description));
+/** A parsed doc block as prose + params/returns (shared by symbols and members). */
+function docBodyHtml(doc, moduleName, links) {
+  const parts = [];
+  if (doc.description) parts.push(linkApiReferences(markdownHtml(doc.description), links, moduleName));
   if (doc.params?.length) {
     parts.push(`<dl class="params">${doc.params.map((p) =>
       `<dt><code>${escapeHtml(p.name)}</code>${p.type ? ` <span class="type">${escapeHtml(p.type)}</span>` : ""}</dt><dd>${linkApiReferences(escapeHtml(p.description), links, moduleName)}</dd>`).join("")}</dl>`);
@@ -127,6 +124,16 @@ function symbolHtml(symbol, moduleName, links) {
   if (doc.returns && (doc.returns.type || doc.returns.description)) {
     parts.push(`<p class="returns">Returns${doc.returns.type ? ` <code>${escapeHtml(doc.returns.type)}</code>` : ""}${doc.returns.description ? ` — ${linkApiReferences(escapeHtml(doc.returns.description), links, moduleName)}` : ""}</p>`);
   }
+  return parts.join("\n");
+}
+
+/** One exported symbol as a definition block (signature + doc + params/returns). */
+function symbolHtml(symbol, moduleName, links) {
+  const qualified = moduleName === "index" ? symbol.name : `${moduleName}.${symbol.name}`;
+  const doc = symbol.doc ?? {};
+  const parts = [`<section class="symbol" id="${escapeHtml(symbol.name)}">`,
+    `<h3><code>${escapeHtml(symbol.signature ?? qualified)}</code> <span class="kind">${escapeHtml(symbol.kind)}</span></h3>`,
+    docBodyHtml(doc, moduleName, links)];
   if (symbol.from && !symbol.from.endsWith(`/${moduleName.toLowerCase()}.js`)) {
     parts.push(`<p class="from">Defined in <code>${escapeHtml(symbol.from)}</code></p>`);
   }
@@ -134,12 +141,11 @@ function symbolHtml(symbol, moduleName, links) {
   return parts.join("\n");
 }
 
-/** One class/namespace member block. */
+/** One class/namespace member block (signature + doc + params/returns). */
 function memberHtml(member, moduleName, links, anchor = member.name) {
-  const doc = member.doc ?? {};
   return `<section class="symbol member" id="${escapeHtml(anchor)}">
   <h4><code>${escapeHtml(member.signature)}</code> <span class="kind">${escapeHtml(member.kind)}</span></h4>
-  ${doc.description ? linkApiReferences(markdownHtml(doc.description), links, moduleName) : ""}
+  ${docBodyHtml(member.doc ?? {}, moduleName, links)}
 </section>`;
 }
 
@@ -204,14 +210,14 @@ function architectureBody(arch) {
 <p class="lede">Public façades, their true dependencies (including lazy-loaded engines), owned helper folders, executables, and built-in IO modes — collected from the source tree on every build.</p>
 <h2>Public modules</h2>
 ${layers}
-<h2>Executables</h2>
+<h2 id="executables">Executables</h2>
 <ul>
     ${executables}
 </ul>
-<h2>Built-in IO modes</h2>
+<h2 id="built-in-io-modes">Built-in IO modes</h2>
 <p>${connectors}</p>
-<h2>Environment auto-detection</h2>
-<p>At startup <a href="/api/env/#Env-endpointsDetect"><code>Env.endpointsDetect()</code></a> lets every loaded provider probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection. Dynamic model discovery may take time; configuring an API-key endpoint lets the model list be cached for later use.</p>
+<h2 id="environment-auto-detection">Environment auto-detection</h2>
+<p>At startup <a href="/api/env/#Env-create"><code>Env.create()</code></a> loads providers and, by default, lets them probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection. Dynamic model discovery may take time; configuring an API-key endpoint lets the model list be cached for later use.</p>
 <table>
   <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
   <tbody>
@@ -225,7 +231,7 @@ ${layers}
     <tr><td>LM Studio server probe, <code>http://localhost:1234/v1/models</code></td><td><code>lm-studio</code> (OpenAI-compatible)</td></tr>
   </tbody>
 </table>
-<h2>Harness environment variables</h2>
+<h2 id="harness-environment-variables">Harness environment variables</h2>
 <p>The namespace-derived set the harness itself reads (<code>OMOYA_</code>/<code>omoya</code> become <code>&lt;NS&gt;_</code>/<code>&lt;ns&gt;</code> when the package is renamed; the plain <code>AI_*</code> settings names are the still-honored legacy spellings):</p>
 <table>
   <thead><tr><th>variable</th><th>effect</th></tr></thead>
@@ -284,7 +290,7 @@ ${c.sources.map((s) => contractSourceHtml(s, links)).join("\n")}`).join("\n")}`;
 // companion note about runtime behavior a JSON schema cannot express
 // (routing order, environment auto-detection). Keyed by tool name.
 const TOOL_NOTES = {
-  "web-search": `<p>Each call routes provider web backend → MCP mapping (<code>settings.web.mcp</code>) → package backend. The package backend tries configured SearXNG instances first (auto-detected from <code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code>, or <code>web.search.backends</code>), then aggregates the enabled engines — DuckDuckGo and Mojeek by default, Brave when <code>BRAVE_API_KEY</code> is set, optional Swisscows — with reciprocal-rank fusion, de-duplication, and tracking-parameter removal. Results are bounded, cached briefly, and rate-limited; <code>settings.web.debug</code> prefixes the taken code path.</p>`,
+  "web-search": `<p>Each call routes provider web backend → MCP mapping (<code>settings.web.mcp</code>) → package backend. The package backend tries configured <a href="https://docs.searxng.org/" target="_blank" rel="noopener noreferrer">SearXNG (opens in new tab)</a> instances first (auto-detected from <code>SEARXNG_URL</code>/<code>SEARXNG_BASE</code>, or <code>web.search.backends</code>), then aggregates the enabled engines — DuckDuckGo and Mojeek by default, Brave when <code>BRAVE_API_KEY</code> is set, optional Swisscows — with reciprocal-rank fusion, de-duplication, and tracking-parameter removal. Results are bounded, cached briefly, and rate-limited; <code>settings.web.debug</code> prefixes the taken code path.</p>`,
   "web-fetch": `<p>Same provider → MCP → package routing as web-search. The package backend converts HTML to Markdown (using the optional <code>@mozilla/readability</code> when installed — <code>settings.web.readability: false</code> forces the built-in converter), returning text and JSON bodies as-is. Redirects, size, timeouts, caching, and rate limits are all bounded.</p>`,
 };
 function toolsBody(data, links) {
@@ -308,13 +314,14 @@ ${catalog.tools.map((tool) => `<section class="symbol" id="${escapeHtml(tool.nam
 function settingsBody(data, links) {
   const schema = data.contracts.find((c) => c.entries);
   if (!schema) return "<h1>Settings schema</h1><p>No settings schema was collected.</p>";
+  const schemas = settingsSchemaValues(data);
   return `<p class="eyebrow">AUTO-DETECTED VIA A PACKAGE-SCOPED ENV — LIVE SCHEMAS</p>
 <h1>Settings schema</h1>
 <p class="lede">${escapeHtml(schema.name)}. Each key is discovered from the loaded environment; expand its schema only when you need its complete default shape.</p>
 ${schema.entries.map((entry) => `<section class="symbol" id="${escapeHtml(entry.key)}">
   <h3><code>${escapeHtml(entry.key)}</code></h3>
   ${linkApiReferences(markdownHtml(entry.description), links, "")}
-  <details><summary>Schema</summary><pre><code>${escapeHtml(JSON.stringify(entry.schema, null, 2))}</code></pre></details>
+  <details><summary>Schema</summary><pre><code>${escapeHtml(JSON.stringify(schemas[entry.key], null, 2))}</code></pre></details>
 </section>`).join("\n")}`;
 }
 
@@ -349,7 +356,9 @@ export function apiPages(data) {
     `API reference modules ${data.modules.map((m) => m.name).join(" ")} architecture contracts tools settings`);
   add("/api/architecture/", "Architecture", "Omoya module architecture, dependencies, executables, and IO modes.",
     architectureBody(data.architecture),
-    `architecture ${data.architecture.layers.map((l) => `${l.name} ${l.file} ${l.publicDependencies.join(" ")}`).join(" ")} executables ${data.architecture.executables.map((e) => e.name).join(" ")} io modes ${data.architecture.connectors.map((c) => c.name).join(" ")}`);
+    `architecture ${data.architecture.layers.map((l) => `${l.name} ${l.file} ${l.publicDependencies.join(" ")}`).join(" ")} executables ${data.architecture.executables.map((e) => e.name).join(" ")} io modes ${data.architecture.connectors.map((c) => c.name).join(" ")}`,
+    [...data.architecture.layers.map((l) => ({ hash: slugOf(l.name), label: l.name })),
+      ...["Executables", "Built-in IO modes", "Environment auto-detection", "Harness environment variables"].map((label) => ({ hash: slugOf(label).replaceAll(" ", "-"), label }))]);
   for (const mod of data.modules) {
     const text = [mod.doc, ...mod.exports.flatMap((e) => [e.name, e.signature, e.doc?.description, ...(e.members ?? []).map((m) => `${m.name} ${m.doc?.description ?? ""}`)])].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 6000);
     add(`/api/${slugOf(mod.name)}/`, `${mod.name} module`, `Omoya ${mod.name} module (${mod.file}) — generated API reference.`,
@@ -357,11 +366,14 @@ export function apiPages(data) {
   }
   const contracts = data.contracts.filter((c) => c.sources);
   add("/api/contracts/", "Contracts", "Omoya schemas and contracts collected from source.", contractsBody(data, links),
-    contracts.map((c) => c.name).join(" "));
+    contracts.map((c) => c.name).join(" "), contracts.map((c) => ({ hash: slugOf(c.name.split(" — ")[0]), label: c.name })));
   const catalog = data.contracts.find((c) => c.tools);
   add("/api/tools/", "Tool catalog", "Omoya's auto-detected live tool schemas.", toolsBody(data, links),
-    `tool catalog ${(catalog?.tools ?? []).map((t) => `${t.name} ${t.description}`).join(" ").slice(0, 4000)}`);
+    `tool catalog ${(catalog?.tools ?? []).map((t) => `${t.name} ${t.description}`).join(" ").slice(0, 4000)}`,
+    (catalog?.tools ?? []).map((t) => ({ hash: t.name, label: t.name })));
+  const settings = data.contracts.find((c) => c.entries);
   add("/api/settings/", "Settings schema", "Omoya's auto-detected settings schema.", settingsBody(data, links),
-    `settings schema ${(data.contracts.find((c) => c.entries)?.entries ?? []).map((e) => `${e.key} ${e.description}`).join(" ")}`);
+    `settings schema ${(settings?.entries ?? []).map((e) => `${e.key} ${e.description}`).join(" ")}`,
+    (settings?.entries ?? []).map((e) => ({ hash: e.key, label: e.key })));
   return pages;
 }

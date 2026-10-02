@@ -75,9 +75,9 @@ describe("context settings resolve down a tree: global, then endpoint, then mode
   test("per key, the endpoint overrides the global and the model overrides both", () => {
     const settings = { context: { cap: 0.9, turn: 0.4, autocompact: 0.6 } };
     const endpoint = { context: { autocompact: 0.5, turn: 0.3 }, models: { big: { context: { autocompact: 0.8 } } } };
-    expect(agentPolicy(settings, endpoint, "small").context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.5 });
-    expect(agentPolicy(settings, endpoint, "big").context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.8 });
-    expect(agentPolicy(settings, { models: { big: { context: { autocompact: false } } } }, "big").context.autocompact).toBe(false);
+    expect(agentPolicy(settings, endpoint, endpoint.models.small).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.5 });
+    expect(agentPolicy(settings, endpoint, endpoint.models.big).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.8 });
+    expect(agentPolicy(settings, {}, { context: { autocompact: false } }).context.autocompact).toBe(false);
   });
 
   test("an Agent applies its pair's overrides and re-resolves when it selects another model", async () => {
@@ -89,7 +89,7 @@ describe("context settings resolve down a tree: global, then endpoint, then mode
     } });
     const agent = new Agent({ env, model: "p/m" });
     expect(agent.policy.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.65 });
-    agent.modelSet("p/big");
+    (agent.model = "p/big");
     expect(agent.policy.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.9 });
     agent.close();
   });

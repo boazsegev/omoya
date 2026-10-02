@@ -18,7 +18,7 @@ function harness(extra = {}) {
   const env = { models: () => new Map() };
   return { agents, calls, options: {
     createEnv: async () => env,
-    selectModel: async (_, args, flags) => { calls.push({ args, flags }); return { endpoint: "test", model: args.model ?? "default" }; },
+    selectModel: async (_, args, flags) => { calls.push({ args, flags }); return `test/${args.model ?? "default"}`; },
     effectiveTimeout: ({ timeout }) => timeout ?? 1234,
     createAgent: (settings) => {
       const listeners = [];
@@ -46,7 +46,7 @@ test("fresh agents/sessions, omitted tools vs empty tools, Agent-owned timeout a
 });
 test("missing model/login and question requests finish blocked", async () => {
   for (const mode of ["model", "login", "question", "auth", "bridge"]) {
-    const h = harness(mode === "model" ? { selectModel: async () => ({}) } : mode === "login" ? { createEnv: async () => ({ models: () => new Map([["test/default", { endpoint: "test", model: "default", loginRequired: true }]]) }) } : {});
+    const h = harness(mode === "model" ? { selectModel: async () => undefined } : mode === "login" ? { createEnv: async () => ({ models: () => new Map([["test/default", { endpoint: "test", model: "default", loginRequired: true }]]) }) } : {});
     const create = h.options.createAgent;
     h.options.createAgent = (settings) => { const agent = create(settings); agent.run = async () => {
       if (mode === "question") agent.emit({ name: mode });
@@ -69,7 +69,7 @@ test("real Agent owns provider retries, transcript and inherited tool context", 
   let writes = 0, detached;
   env.toolAdd("probe", (_, context) => { detached = context.detached; return "ok"; }, { safe: true, inputSchema: { type: "object" } });
   const result = await runJobAgent({ prompt: "persisted prompt", tools: [] }, {
-    projectRoot: p, createEnv: async () => env, selectModel: async () => ({ endpoint: "test", model: "fake" }), effectiveTimeout: () => 1000,
+    projectRoot: p, createEnv: async () => env, selectModel: async () => "test/fake", effectiveTimeout: () => 1000,
     createAgent: (settings) => new Agent({ ...settings, env, createIO: () => ({
       async write() { writes++; return writes === 1 ? { type: "error", kind: "network" } : { type: "done", message: Context.messageAssistant([Context.contentText("answer")]) }; }, close() {},
     }) }),
@@ -102,7 +102,7 @@ test("default dispatcher runs agents in-process serially against one shared env 
   const result = await dispatchJobs(p, { execution: {
     createEnv: async () => { envCreations++; return sharedEnv; },
     close: () => {},
-    selectModel: async (_, args) => ({ endpoint: "test", model: args.model ?? "default" }),
+    selectModel: async (_, args) => `test/${args.model ?? "default"}`,
     effectiveTimeout: ({ timeout }) => timeout, // the fake env has no real endpoint to resolve
   } });
   expect(result.outcomes.map((item) => item.outcome)).toEqual(["completed", "completed"]);

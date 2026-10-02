@@ -10,7 +10,7 @@ const Anthropic = await providerClass(AnthropicPlugin, "anthropic");
 const Claude = await providerClass(ClaudePlugin, "claude");
 const URL = "https://api.anthropic.com/v1";
 const identity = "You are Claude Code, Anthropic's official CLI for Claude.";
-const io = (auth, tools = []) => ({ modelCurrent: "claude-sonnet-4-6", settings: { auth }, tools: () => tools });
+const io = (auth, tools = []) => ({ modelCurrent: "test/claude-sonnet-4-6", settings: { auth }, tools: () => tools });
 const user = [{ type: 2, content: [{ type: "text", text: "hello" }] }];
 
 describe("Claude subscription provider", () => {
@@ -129,7 +129,7 @@ describe("Claude subscription provider", () => {
       return new Response(JSON.stringify({ content: [{ type: "text", text: "- result" }] }), { status: 200 });
     };
     try {
-      const aiio = { url: URL, modelCurrent: "claude-sonnet-4-6", settings: { auth: { type: "oauth", token: "sk-ant-oat-test" } },
+      const aiio = { url: URL, modelCurrent: "test/claude-sonnet-4-6", settings: { auth: { type: "oauth", token: "sk-ant-oat-test" } },
         fetch: (url, init) => globalThis.fetch(url, init) };
       const { tools } = Claude.provider.capabilities;
       expect(await tools["web-search"].function({ aiio, args: { query: "bun" } })).toBe("- result");

@@ -61,7 +61,7 @@ function context2msg(context, aiio) {
   if (token) headers.authorization = `Bearer ${token}`;
 
   const body = {
-    model: aiio?.modelCurrent,
+    model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1),
     messages: context.map((msg, i) => toOllamaMessage(msg, context, i)),
     stream: true,
   };
@@ -240,7 +240,7 @@ function msg2events(msg, state = {}, aiio) {
     closeText();
     // the exact context consumption the server measured for this request
     if (Number.isFinite(msg.prompt_eval_count)) {
-      aiio?.contextUsageSet?.({ used: msg.prompt_eval_count });
+      (aiio && (aiio.contextUsage = { used: msg.prompt_eval_count }));
     }
     const usage =
       Number.isFinite(msg.prompt_eval_count) && Number.isFinite(msg.eval_count)
@@ -325,7 +325,7 @@ export default class OllamaProvider {
       if (!response.ok) return {};
       // dynamic: the server is environment-defined (running today,
       // maybe gone tomorrow) — never persisted
-      return { ollama: { provider: "ollama", url: DEFAULT_URL, local: true, dynamic: true } };
+      return { ollama: { provider: "ollama", url: DEFAULT_URL, dynamic: true } };
     } catch {
       return {};
     }

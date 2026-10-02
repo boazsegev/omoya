@@ -133,7 +133,7 @@ describe("the scanning layers (package → settings folder → namespaced projec
     return d;
   };
 
-  test("theme folders load only when Env._loadThemes is enabled", () => {
+  test("theme folders load only with the instance themes option", () => {
     const pkg = mk("pkg");
     const user = mk("user");
     mkdirSync(join(pkg, "themes"), { recursive: true });
@@ -141,19 +141,11 @@ describe("the scanning layers (package → settings folder → namespaced projec
     writeFileSync(join(pkg, "themes", "package.json"), JSON.stringify({ tui: { themes: { package: { color: "blue" } } } }));
     writeFileSync(join(user, "themes", "user.json"), JSON.stringify({ tui: { themes: { user: { color: "green" } } } }));
 
-    const original = Env._loadThemes;
-    try {
-      Env._loadThemes = false;
-      expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toEqual({}); // the default
-
-      Env._loadThemes = true;
-      expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toMatchObject({
-        package: { color: "blue" },
-        user: { color: "green" },
-      });
-    } finally {
-      Env._loadThemes = original;
-    }
+    expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toEqual({});
+    expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg, themes: true }).settings.tui.themes).toMatchObject({
+      package: { color: "blue" },
+      user: { color: "green" },
+    });
   });
 
   test("the settings folder scans ALL its JSON files, after the package", () => {
@@ -389,7 +381,7 @@ describe("the settings view: defaults, derived values, and delta persistence", (
     const env = new Env({ dir: pkg, settingsDir: user, cwd: project });
     expect(env.settings.tui.theme).toBe("mine");
     expect(env.settings.tui.cursor.shape).toBe("line"); // a default fills what no layer sets
-    expect(env.settings.modelAccess).toBe("all");
+    expect(env.settings.modelAccess).toBeUndefined();
     expect(env.settings.sessions).toBe(join(user, NAMES.sessionsDir));
     expect(JSON.parse(JSON.stringify(env.settings.tui))).toMatchObject({ theme: "mine", alt: false });
   });

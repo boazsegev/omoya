@@ -1,724 +1,320 @@
-// test/agent-read.test.js — proof for the shipped read tool:
-// read-only, cwd-rooted, path-traversal protection (no ".." or
-// absolute-path escape), published by the independent tools/read.js
-// wrapper.
-import { chmodSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { describe, test, expect, afterEach } from "bun:test";
+import { mkdirSync, writeFileSync, rmSync, symlinkSync, chmodSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { read, readDescription, readSettingsSchema } from "../tools/read/read.js";
+import { executeReadQuery } from "../tools/read/engine.js";
+import { serializeReadResult } from "../tools/read/serialize.js";
+import { normalizeReadQuery, readQuerySchema } from "../tools/read/query.js";
+import { write, toolDescription } from "../tools/write.js";
 import { Env } from "../lib/env.js";
-import { read, readDescription } from "../tools/read/read.js";
-import { resolveCwdPath } from "../tools/guard/resolve.js";
-import { toolSchemas, toolsLoad } from "./env-internals.js";
-
+import { toolsLoad } from "./env-internals.js";
+import { Agent } from "../lib/agent.js";
+import { scriptedIO, USER, TEXT, TOOLCALL } from "./fakes.js";
 const ROOT = `./ai-tmp/read-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
+function setup(files = {}) {
+  mkdirSync(ROOT, { recursive: true });
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(ROOT, path, ".."), { recursive: true });
+    writeFileSync(join(ROOT, path), content);
+  }
+  return { env: { cwd: ROOT, settings: {} } };
+}
+function texts(result) { return typeof result === "string" ? result : result.filter((block) => block.type === "text").map((block) => block.text).join("\n"); }
+async function plain(query, context) { return texts(await read({ ...query, annotate: false }, context)); }
 
-describe("read tool", () => {
-  test("readDescription() publishes an MCP-like schema for read", async () => {
-    const d = readDescription();
-    expect(d).toMatchObject({ inputSchema: { type: "object" } });
-    expect(d.inputSchema.required).toEqual(["path"]);
+describe("read query normalization and shared JavaScript schemas", () => {
+  test("normalizes wrong-type model fillers without deleting meaningful values", () => {
+    const dense = { path: "", recursive: null, ignore: [], info: -1, binary: 0, base64: null, annotate: true,
+      glob: [], exclude: false, lines: { from: 0, to: null, last: false }, characters: [], bytes: true,
+      search: { text: "", regex: false, ignoreCase: false, invert: false, before: 0, after: 0 }, limit: -1, offset: null };
+    expect(normalizeReadQuery(dense)).toEqual(normalizeReadQuery({ path: "." }));
+    const q = normalizeReadQuery({ path: "a", lines: { from: -8, to: -1 }, limit: 0, offset: 0, ignore: true, annotate: false });
+    expect(q.lines).toEqual({ from: -8, to: -1 });
+    expect(q.limit).toBe(0); expect(q.ignore).toBe(true); expect(q.annotate).toBe(false);
+    expect(normalizeReadQuery({ path: "a", characters: { to: 0 } }).characters.to).toBe(0);
   });
-
-  test("reads a UTF-8 file inside the working folder", async () => {
-    mkdirSync(ROOT, { recursive: true });
-    writeFileSync(`${ROOT}/note.txt`, "hello π");
-    expect(await read({ path: "./ai-tmp/../ai-tmp/read-" + process.pid + "/note.txt" }))
-      .toBe("[text/plain]\nhello π"); // dot-segments that stay inside cwd are fine
-  });
-
-  test("rejects '..' escapes outside the working folder — global policy, bad even if successful", async () => {
-    await expect(read({ path: "../../../etc/hostname" })).rejects.toThrow(/escapes the working folder/);
-    await expect(read({ path: ".." })).rejects.toThrow(/escapes the working folder/);
-    await expect(read({ path: ".." })).rejects.toThrow(/global security policy violation/);
-    await expect(read({ path: ".." })).rejects.toThrow(/even if it would succeed/);
-  });
-
-  test("rejects absolute paths — global policy, bad even if successful", async () => {
-    await expect(read({ path: "/etc/hostname" })).rejects.toThrow(/path traversal refused/);
-    await expect(read({ path: "/etc/hostname" })).rejects.toThrow(/global security policy violation/);
-    await expect(read({ path: "C:\\Windows\\win.ini" })).rejects.toThrow(/path traversal refused/);
-  });
-
-  test("refuses symbolic-link paths and folder entries", async () => {
-    mkdirSync(ROOT, { recursive: true });
-    writeFileSync(`${ROOT}/real.txt`, "safe");
-    symlinkSync("real.txt", `${ROOT}/link.txt`);
-    await expect(read({ path: `./ai-tmp/read-${process.pid}/link.txt` })).rejects.toThrow(/symbolic links are refused/);
-    await expect(read({ path: `./ai-tmp/read-${process.pid}` })).rejects.toThrow(/^Choose a regular file or folder/);
-  });
-
-  test("reading a FOLDER lists its entries with a clear header", async () => {
-    mkdirSync(`${ROOT}/sub`, { recursive: true });
-    writeFileSync(`${ROOT}/b.txt`, "b");
-    writeFileSync(`${ROOT}/a.txt`, "a");
-    const out = await read({ path: "./ai-tmp/../ai-tmp/read-" + process.pid });
-    expect(out.startsWith("ls ")).toBe(true);
-    expect(out).toContain("sub/"); // directories suffixed
-    expect(out).toContain("a.txt");
-    expect(out.indexOf("a.txt")).toBeLessThan(out.indexOf("b.txt")); // sorted
-  });
-
-  test("a FOLDER listing shows each FILE's approximate size in bytes; directories carry none", async () => {
-    mkdirSync(`${ROOT}/sub`, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "hello"); // 5 bytes
-    const out = await read({ path: "./ai-tmp/../ai-tmp/read-" + process.pid });
-    expect(out).toContain("a.txt (5 bytes)");
-    expect(out.split("\n")).toContain("sub/"); // no "(N bytes)" tacked onto a directory
-    expect(out).not.toMatch(/sub\/ \(/);
-  });
-
-  test("missing files and bad args are ordinary errors (tool-result errors at the Agent)", async () => {
-    await expect(read({ path: "./no-such-file.txt" })).rejects.toThrow(/ENOENT/);
-    await expect(read({})).rejects.toThrow(TypeError);
-    await expect(read()).rejects.toThrow(TypeError);
-  });
-
-  test("an EMPTY path lists the current folder (a falsey fill, not a missing arg)", async () => {
-    mkdirSync(ROOT, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "a");
-    const out = await read({ path: "" });
-    expect(out.startsWith("ls .:")).toBe(true);
-    expect(out).toContain("test/");
-  });
-
-  test("resolveCwdPath allows the root itself but nothing outside its boundary", async () => {
-    expect(resolveCwdPath(".", { cwd: ROOT })).toBe(resolve(ROOT));
-    expect(() => resolveCwdPath("./../x", { cwd: ROOT })).toThrow(/escapes/);
-  });
-
-  test("uses the agent folder as cwd and permits parent reads within env.cwd", async () => {
-    const project = `${ROOT}/project`;
-    const folder = `${project}/agent`;
-    mkdirSync(folder, { recursive: true });
-    writeFileSync(`${project}/project.txt`, "project");
-    writeFileSync(`${folder}/agent.txt`, "agent");
-    const context = { env: { cwd: project }, agent: { folder } };
-    expect(await read({ path: "." }, context)).toContain("agent.txt");
-    expect(await read({ path: "../project.txt" }, context)).toBe("[text/plain]\nproject");
-    await expect(read({ path: "missing.txt" }, context)).rejects.toThrow(
-      "Hint: you're in `./agent`, use `../` to read files from the root project.",
-    );
-    await expect(read({ path: "../../outside.txt" }, context)).rejects.toThrow(/project boundary/);
-  });
-
-  test("a CURRENT-FOLDER listing from a sub-folder carries the root-project hint", async () => {
-    const project = `${ROOT}/project`;
-    const folder = `${project}/agent`;
-    mkdirSync(folder, { recursive: true });
-    writeFileSync(`${folder}/agent.txt`, "agent");
-    const context = { env: { cwd: project }, agent: { folder } };
-    const hint = "Hint: you're in `./agent`, use `../` to read files from the root project.";
-    for (const path of ["", ".", "./"]) {
-      const out = await read({ path }, context);
-      expect(out.startsWith("ls .:")).toBe(true);
-      expect(out).toContain("agent.txt");
-      expect(out).toContain(hint);
+  test("rejects unknown fields, bad integers, malformed regex and contradictory modes before I/O", async () => {
+    for (const args of [{ path: "missing", startLine: 1 }, { path: "missing", limit: 1.2 }, { path: "missing", lines: { last: 2, from: 1 } },
+      { path: "missing", search: { text: "x", regex: "[" } }, { path: "missing", bytes: { from: 2 } }, { path: "missing", binary: true, lines: { from: 1 } }]) {
+      await expect(read(args)).rejects.toThrow();
     }
-    // a listing of a DIFFERENT folder carries no hint
-    expect(await read({ path: ".." }, context)).not.toContain("Hint:");
-    // and neither does a root-folder agent (nothing more to reach)
-    const root = { env: { cwd: project }, agent: { folder: project } };
-    expect(await read({ path: "." }, root)).not.toContain("Hint:");
+    expect(() => normalizeReadQuery({ path: "a", lines: { from: Number.MAX_SAFE_INTEGER + 1 } })).toThrow();
+    expect(() => normalizeReadQuery({ path: "a", offset: -5 })).toThrow();
+    expect(() => normalizeReadQuery({})).toThrow(TypeError);
   });
-
-  test("discovers as read through the package default root (tools/read.js wrapper)", async () => {
-    const env = new Env({ settings: {} });
-    const names = await toolsLoad(env); // default includes package ./tools
-    expect(names).toContain("read");
-    const [schema] = toolSchemas(env, ["read"]);
-    expect(schema.name).toBe("read");
-    const content = await env.toolCall("read", { path: "./README.md" });
-    expect(content).toContain("A transparent agent harness");
-    await expect(env.toolCall("read", { path: "../outside" }))
-      .rejects.toThrow(/escapes the working folder/);
-    // a folder read lists entries through the same surface
-    const listing = await env.toolCall("read", { path: "./tools" });
-    expect(listing).toContain("ls ./tools:");
-    expect(listing).toContain("read.js");
+  test("publishes the same described schema for read and write.read", () => {
+    expect(readDescription().safe).toBe(true);
+    expect(readDescription().inputSchema).toEqual(readQuerySchema());
+    expect(toolDescription().write.inputSchema.properties.read.anyOf[0]).toEqual(readQuerySchema());
+    expect(toolDescription().write.safe).toBeUndefined();
+    expect(readQuerySchema().additionalProperties).toBe(false);
+    expect(readSettingsSchema().read.default.scanBytes).toBeGreaterThan(0);
   });
 });
 
-describe("read folders: search and recursive", () => {
-  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-  const setup = () => {
-    mkdirSync(`${ROOT}/sub/deep`, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "apple top\nbanana\nAPPLE caps");
-    writeFileSync(`${ROOT}/b.txt`, "nothing here");
-    writeFileSync(`${ROOT}/sub/c.txt`, "apple sub\ncherry");
-    writeFileSync(`${ROOT}/sub/deep/d.txt`, "apple deep");
-  };
-
-  test("a folder search greps every file in the folder (top level only by default)", async () => {
-    setup();
-    const out = await read({ path: rel("."), pattern: "apple" });
-    expect(out).toBe(
-      `grep ${rel(".")} /apple/ (1):\n` + "a.txt:1: apple top");
+describe("read ranges and text correctness", () => {
+  test("reads UTF-8 and preserves selected line endings without MIME when unannotated", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\nthree\n", "unicode.txt": "hi π🙂" });
+    expect(await plain({ path: "a.txt" }, ctx)).toBe("one\ntwo\nthree\n");
+    expect(await plain({ path: "a.txt", lines: { from: 2, to: 2 } }, ctx)).toBe("two\n");
+    expect(await plain({ path: "unicode.txt", characters: { from: 3, to: 5 } }, ctx)).toBe("π🙂");
+    expect(await plain({ path: "unicode.txt", characters: { to: 0 } }, ctx)).toBe("");
+    expect(await plain({ path: "unicode.txt", characters: { from: 1000 } }, ctx)).toBe("");
+    expect(await plain({ path: "a.txt", lines: { from: 1000 } }, ctx)).toBe("");
+    expect(texts(await read({ path: "a.txt" }, ctx))).toStartWith("[text/plain]\n");
   });
-
-  test("recursive: true descends into sub-folders, prefixing matches with file paths", async () => {
-    setup();
-    const out = await read({ path: rel("."), pattern: "apple", recursive: true });
-    expect(out).toBe(
-      `grep ${rel(".")} /apple/ (3):\n` +
-        "a.txt:1: apple top\n" +
-        "sub/c.txt:1: apple sub\n" +
-        "sub/deep/d.txt:1: apple deep");
+  test("resolves meaningful negative line/character/byte indexes from end", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\nthree\nfour", "bytes.bin": Buffer.from([1, 2, 3, 4, 5]) });
+    expect(await plain({ path: "a.txt", lines: { from: -2, to: -1 } }, ctx)).toBe("three\nfour");
+    expect(await plain({ path: "a.txt", lines: { last: 2 } }, ctx)).toBe("three\nfour");
+    expect(await plain({ path: "a.txt", lines: { last: 0 } }, ctx)).toBe("");
+    expect(await plain({ path: "a.txt", characters: { from: -4 } }, ctx)).toBe("four");
+    expect(await plain({ path: "a.txt", characters: { from: -4, to: -1 } }, ctx)).toBe("fou");
+    const result = await read({ path: "bytes.bin", binary: true, bytes: { from: -2 }, annotate: false }, ctx);
+    expect(Buffer.from(result[0].content, "base64")).toEqual(Buffer.from([4, 5]));
+    await expect(read({ path: "a.txt", characters: { from: -1, to: -4 } }, ctx)).rejects.toThrow(/range.from/);
   });
-
-  test("folder grep honors ignoreCase, maxMatches, and clean no-match reports", async () => {
-    setup();
-    const ci = await read({ path: rel("."), pattern: "apple", ignoreCase: true });
-    expect(ci).toContain("(2):");
-    expect(ci).toContain("3: APPLE caps");
-    const capped = await read({ path: rel("."), pattern: "apple", recursive: true, maxMatches: 2 });
-    expect(capped).toContain("(3, showing first 2):");
-    expect(capped.split("\n").slice(1)).toHaveLength(2);
-    expect(await read({ path: rel("."), pattern: "zebra", recursive: true }))
-      .toBe(`grep: no matches for /zebra/ in ${rel(".")}`);
-    await expect(read({ path: rel("."), pattern: "([bad" })).rejects.toThrow("Invalid pattern. Use a valid regular expression.");
+  test("decodes UTF-16 LE/BE and valid UTF-8 crossing the sniff boundary", async () => {
+    const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("hi π\nnext", "utf16le")]);
+    const be = Buffer.from(le); for (let i = 0; i < be.length; i += 2) [be[i], be[i + 1]] = [be[i + 1], be[i]];
+    const ctx = setup({ "le.txt": le, "be.txt": be, "wide.txt": "a".repeat(65535) + "πTARGET" });
+    expect(await plain({ path: "le.txt" }, ctx)).toBe("hi π\nnext");
+    expect(await plain({ path: "be.txt", search: { text: "π" } }, ctx)).toBe("hi π");
+    expect(texts(await read({ path: "wide.txt", search: { text: "TARGET" } }, ctx))).toContain("TARGET");
   });
-
-  test("glob filters folder listings and candidate files before grep", async () => {
-    setup();
-    expect(await read({ path: rel("."), glob: "*.txt" })).toBe(
-      `find ${rel(".")} (glob: *.txt):\na.txt (27 bytes)\nb.txt (12 bytes)`);
-    expect(await read({ path: rel("."), pattern: "apple", glob: "*.txt", recursive: true }))
-      .toBe(`grep ${rel(".")} /apple/ (3):\na.txt:1: apple top\nsub/c.txt:1: apple sub\nsub/deep/d.txt:1: apple deep`);
-    expect(await read({ path: rel("."), pattern: "apple", glob: "sub/**/*.txt", recursive: true }))
-      .toBe(`grep ${rel(".")} /apple/ (2):\nsub/c.txt:1: apple sub\nsub/deep/d.txt:1: apple deep`);
+  test("keeps original source line numbers after combined character/line selection", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\nthree\nfour" });
+    const output = texts(await read({ path: "a.txt", lines: { from: 2 }, characters: { from: 4 }, search: { text: "three" } }, ctx));
+    expect(output).toContain("3: three");
   });
-
-  test("a recursive folder listing nests sub-folder entries, each file sized in bytes", async () => {
-    setup();
-    const out = await read({ path: rel("."), recursive: true });
-    expect(out).toBe(
-      `ls ${rel(".")} (recursive):\n` +
-        "a.txt (27 bytes)\nb.txt (12 bytes)\nsub/\nsub/c.txt (16 bytes)\n" +
-        "sub/deep/\nsub/deep/d.txt (10 bytes)");
-  });
-
-  test("file-only options on a folder are ordinary errors", async () => {
-    setup();
-    await expect(read({ path: rel("."), binary: true })).rejects.toThrow("binary applies only to files. Choose a file path or remove binary.");
-    await expect(read({ path: rel("."), base64: true })).rejects.toThrow("base64 applies only to files. Choose a file path or remove base64.");
-    await expect(read({ path: rel("."), startChar: 2 })).rejects.toThrow("startChar applies only to files. Choose a file path or remove startChar.");
-  });
-
-  test("endChar caps a folder listing's rendered output", async () => {
-    setup();
-    const full = await read({ path: rel(".") });
-    expect(await read({ path: rel("."), endChar: 20 })).toBe([...full].slice(0, 20).join(""));
-  });
-
-  test("a line range on a FOLDER is an entry cap (an initial maxMatches — never an error)", async () => {
-    setup();
-    // a model's `startLine:1, endLine:2` means "at most 2 entries", not a conflict
-    const out = await read({ path: rel("."), startLine: 1, endLine: 2 });
-    expect(out).toBe(`ls ${rel(".")}:\na.txt (27 bytes)\nb.txt (12 bytes)\n… (1 more — capped at 2)`);
-    // an explicit non-zero maxMatches overrides the line range's cap
-    const wider = await read({ path: rel("."), startLine: 1, endLine: 2, maxMatches: 3 });
-    expect(wider).toBe(`ls ${rel(".")}:\na.txt (27 bytes)\nb.txt (12 bytes)\nsub/`);
-    // the same cap applies to a folder SEARCH (maxMatches semantics)
-    const search = await read({ path: rel("."), pattern: "apple", ignoreCase: true, startLine: 1, endLine: 1 });
-    expect(search).toContain("(2, showing first 1):");
-    const overridden = await read({ path: rel("."), pattern: "apple", ignoreCase: true, startLine: 1, endLine: 1, maxMatches: 2 });
-    expect(overridden).toContain("(2):");
+  test("info counts actual source lines and whole text only within budgets", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\n", "empty.txt": "" });
+    const info = texts(await read({ path: "a.txt", lines: { to: 1 }, info: true }, ctx));
+    expect(info).toContain("lines: 2"); expect(info).toContain("characters: 8");
+    expect(texts(await read({ path: "empty.txt", info: true }, ctx))).toContain("lines: 0");
   });
 });
 
-describe("read info:true — file/query summary instead of the payload", () => {
-  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-  const setup = () => {
-    mkdirSync(`${ROOT}/sub`, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "apple top\nbanana\nAPPLE caps");
-    writeFileSync(`${ROOT}/sub/c.txt`, "apple sub");
-  };
-
-  test("a file info reports metadata (incl. characters/lines) and the would-be read size", async () => {
-    setup();
-    const out = await read({ path: rel("a.txt"), info: true });
-    expect(out).toContain(`info for ${rel("a.txt")}:`);
-    expect(out).toContain("type: file");
-    expect(out).toContain("size: 27 bytes");
-    expect(out).toContain("characters: 27");
-    expect(out).toContain("lines: 3"); // "apple top\nbanana\nAPPLE caps" — 3 lines
-    expect(out).toMatch(/created: \d{4}-\d{2}-\d{2}T/);
-    expect(out).toMatch(/modified: \d{4}-\d{2}-\d{2}T/);
-    expect(out).toContain("the requested read would return 40 bytes (whole file)");
+describe("read literal/regex search and discovery", () => {
+  test("ORs literal and regex, prints a selected line once and supports inversion/context", async () => {
+    const ctx = setup({ "a.txt": "start\na.b TODO TODO\nFIXME\nend" });
+    expect(await plain({ path: "a.txt", search: { text: "a.b", regex: "TODO|FIXME" } }, ctx)).toBe("a.b TODO TODO\nFIXME");
+    expect(await plain({ path: "a.txt", search: { text: "TODO", regex: "FIXME", invert: true } }, ctx)).toBe("start\nend");
+    const context = texts(await read({ path: "a.txt", search: { text: "TODO", before: 1, after: 1 } }, ctx));
+    expect(context).toContain("1- start"); expect(context).toContain("2: a.b TODO TODO"); expect(context).toContain("3- FIXME");
   });
-
-  test("info reflects the requested narrowing (line range, search, binary)", async () => {
-    setup();
-    expect(await read({ path: rel("a.txt"), info: true, startLine: 2, endLine: 3 }))
-      .toMatch(/read would return \d+ bytes \(lines 2–3\)/); // header + 2 lines
-    expect(await read({ path: rel("a.txt"), info: true, pattern: "apple" }))
-      .toMatch(/grep would return 1 matches \(\d+ bytes\)/);
-    const bin = await read({ path: rel("a.txt"), info: true, binary: true, startChar: 0, endChar: 5 });
-    expect(bin).toContain("read would return 5 bytes (byte range 0–4 of 27");
-    expect(bin).not.toContain("characters:"); // binary has no meaningful character/line count
-    expect(await read({ path: rel("a.txt"), info: true, pattern: "apple", ignoreCase: true }))
-      .toMatch(/grep would return 2 matches/);
+  test("multiline regex counts selected lines and always reports an omitted selection", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\nthree\nfour" });
+    const out = texts(await read({ path: "a.txt", search: { regex: "two\\nthree" }, limit: 1 }, ctx));
+    expect(out).toContain("2: two"); expect(out).not.toContain("3: three"); expect(out).toContain("selection limit");
+    expect(texts(await read({ path: "a.txt", search: { regex: "two\\nthree" }, info: true }, ctx))).toContain("2 selected lines");
   });
-
-  test("a narrowed text info STILL reports the WHOLE file's character/line counts", async () => {
-    setup();
-    // narrowed to lines 2-3 ("banana\nAPPLE caps" — 2 lines, 17 chars),
-    // but characters/lines describe the FILE, not the slice
-    const out = await read({ path: rel("a.txt"), info: true, startLine: 2, endLine: 3 });
-    expect(out).toContain("characters: 27");
-    expect(out).toContain("lines: 3");
+  test("case-insensitive matching, zero-length patterns and empty text terminate", async () => {
+    const ctx = setup({ "a.txt": "APPLE\nbanana", "empty.txt": "" });
+    expect(await plain({ path: "a.txt", search: { text: "apple", ignoreCase: true } }, ctx)).toBe("APPLE");
+    expect(await plain({ path: "a.txt", search: { regex: "^" } }, ctx)).toBe("APPLE\nbanana");
+    expect(await plain({ path: "empty.txt", search: { regex: ".*" } }, ctx)).toBe("");
   });
-
-  test("a folder info reports entry counts and grep tallies", async () => {
-    setup();
-    expect(await read({ path: rel("."), info: true }))
-      .toContain("the requested ls/find would return 2 entries");
-    expect(await read({ path: rel("."), info: true, recursive: true }))
-      .toContain("ls/find would return 3 entries (recursive)");
-    expect(await read({ path: rel("."), info: true, pattern: "apple", recursive: true }))
-      .toContain("type: folder");
-    expect(await read({ path: rel("."), info: true, pattern: "apple", recursive: true }))
-      .toContain("grep would return 2 matches in 2 file(s)");
+  test("glob includes .md files, excludes subtrees, deterministic entries and pagination", async () => {
+    const ctx = setup({ "a.md": "TODO", "b.js": "TODO", "sub/c.md": "TODO", "generated/d.md": "TODO" });
+    expect(await plain({ path: ".", recursive: true, glob: "*.md", exclude: "generated/**" }, ctx)).toBe("a.md\nsub/c.md");
+    expect(texts(await read({ path: ".", recursive: true, glob: "sub/**/*.md", search: { text: "TODO" } }, ctx))).toContain("sub/c.md:1:");
+    expect(texts(await read({ path: ".", recursive: true, search: { text: "TODO" }, info: true }, ctx))).toContain("sub/c.md: 1 selected lines");
+    const page = await plain({ path: ".", limit: 1, offset: 1 }, ctx);
+    expect(page).toContain("b.js"); expect(page).toContain("selection limit");
+    await expect(read({ path: ".", lines: { to: 2 } }, ctx)).rejects.toThrow(/ranges/);
   });
-
-  test("base64 does not combine with info", async () => {
-    setup();
-    await expect(read({ path: rel("a.txt"), info: true, base64: true })).rejects.toThrow(/base64/);
+  test("ignore defaults off, opts into both files, inherits rules, explicit files always search", async () => {
+    const ctx = setup({ ".gitignore": "*.md\n", ".ignore": "!keep.md\n", "drop.md": "TODO", "keep.md": "TODO", "sub/drop.md": "TODO", ".DS_Store": "TODO" });
+    expect(await plain({ path: ".", recursive: true, glob: "*.md" }, ctx)).toBe("drop.md\nkeep.md\nsub/drop.md");
+    expect(await plain({ path: ".", recursive: true, glob: "*.md", ignore: true }, ctx)).toContain("keep.md");
+    expect(await plain({ path: ".", recursive: true, glob: "*.md", ignore: true }, ctx)).not.toContain("drop.md");
+    expect(await plain({ path: "sub", glob: "*.md", ignore: true }, ctx)).not.toContain("sub/drop.md");
+    expect(await plain({ path: "drop.md", ignore: true, search: { text: "TODO" } }, ctx)).toBe("TODO");
+    expect(await plain({ path: ".DS_Store", ignore: true, search: { text: "TODO" } }, ctx)).toBe("TODO");
+  });
+  test("binary files list, text search skips them, binary folder search works", async () => {
+    const ctx = setup({ "a.txt": "PNG", "pic.bin": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]) });
+    expect(await plain({ path: "." }, ctx)).toContain("pic.bin");
+    expect(texts(await read({ path: ".", search: { text: "PNG" } }, ctx))).toContain("1 binary skipped");
+    await expect(read({ path: "pic.bin", search: { text: "PNG" } }, ctx)).rejects.toThrow(/only to text/);
+    expect(texts(await read({ path: ".", binary: true, search: { text: "PNG" } }, ctx))).toContain("pic.bin:1:");
   });
 });
 
-describe("read ranges and grep-like search", () => {
-  const setup = (name, content) => {
-    mkdirSync(ROOT, { recursive: true });
-    const rel = `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-    writeFileSync(`${ROOT}/${name}`, content);
-    return rel;
-  };
-  const numbered = (n) => Array.from({ length: n }, (_, i) => `line-${String(i + 1).padStart(2, "0")}`).join("\n");
-
-  test("a 1-based inclusive line range narrows the read, with a total-lines header", async () => {
-    const rel = setup("lines.txt", numbered(30));
-    const out = await read({ path: rel, startLine: 5, endLine: 25 });
-    expect(out.startsWith("[text/plain]\n[lines 5–25 of 30 total]\n")).toBe(true);
-    const body = out.split("\n").slice(2);
-    expect(body[0]).toBe("line-05");
-    expect(body.at(-1)).toBe("line-25");
-    expect(body).toHaveLength(21);
+describe("read guarded auxiliary access and bounded execution", () => {
+  test("rejects escapes/direct links, skips discovered links, never follows ignore symlinks", async () => {
+    const ctx = setup({ "a.txt": "TODO", "rules.txt": "a.txt" });
+    symlinkSync("a.txt", join(ROOT, "link.txt"));
+    expect(texts(await read({ path: "." }, ctx))).toContain("1 symlink skipped");
+    await expect(read({ path: "link.txt" }, ctx)).rejects.toThrow(/symbolic/);
+    symlinkSync("rules.txt", join(ROOT, ".ignore"));
+    // Explicit file does not open ignore files at all, even with ignore:true.
+    expect(await plain({ path: "a.txt", ignore: true, search: { text: "TODO" } }, ctx)).toBe("TODO");
+    await expect(read({ path: ".", ignore: true }, ctx)).rejects.toThrow(/symbolic/);
+    await expect(read({ path: ".." }, ctx)).rejects.toThrow(/boundary/);
+    await expect(read({ path: "/etc/passwd" }, ctx)).rejects.toThrow(/absolute/);
   });
-
-  test("open-ended line ranges default to the file start/end", async () => {
-    const rel = setup("lines.txt", numbered(10));
-    expect((await read({ path: rel, startLine: 8 })).split("\n").slice(2)).toEqual(["line-08", "line-09", "line-10"]);
-    expect((await read({ path: rel, endLine: 2 })).split("\n").slice(2)).toEqual(["line-01", "line-02"]);
+  test("guards .gitignore and ancestor auxiliary paths too", async () => {
+    const ctx = setup({ "sub/a.txt": "TODO", "rules.txt": "a.txt" });
+    symlinkSync("rules.txt", join(ROOT, ".gitignore"));
+    await expect(read({ path: "sub", ignore: true }, ctx)).rejects.toThrow(/symbolic/);
   });
-
-  test("direct reads label detected MIME types without labeling grep or folder output", async () => {
-    const markdown = setup("note.md", "# Note\n**bold**");
-    expect(await read({ path: markdown })).toBe("[text/markdown]\n# Note\n**bold**");
-    expect((await read({ path: markdown, startLine: 2 })).startsWith("[text/markdown]\n[lines 2–2 of 2 total]\n")).toBe(true);
-    expect((await read({ path: markdown, pattern: "bold" })).startsWith(`grep ${markdown}`)).toBe(true);
+  test("agent subfolder reads project siblings and gets relative root hints", async () => {
+    setup({ "project/a.txt": "a", "project/agent/b.txt": "b" });
+    const ctx = { env: { cwd: `${ROOT}/project` }, agent: { folder: `${ROOT}/project/agent` } };
+    expect(await plain({ path: "../a.txt" }, ctx)).toBe("a");
+    expect(texts(await read({ path: "." }, ctx))).toContain("use `../`");
+    await expect(read({ path: "missing" }, ctx)).rejects.toThrow(/Hint:/);
+    await expect(read({ path: "../../outside" }, ctx)).rejects.toThrow(/boundary/);
   });
-
-  test("a character range slices UTF-8 characters (code points), endChar exclusive", async () => {
-    const rel = setup("chars.txt", "hello π world"); // π is ONE character
-    const out = await read({ path: rel, startChar: 0, endChar: 7 });
-    expect(out).toBe("[text/plain]\n[characters 0–6 of 13 total]\nhello π");
+  test("positioned byte reads and positive head/tail queries don't load huge files", async () => {
+    const ctx = setup({ "big.txt": "first\n" + "middle\n".repeat(200000) + "last", "big.bin": Buffer.alloc(2000000, 1) });
+    const bytes = await executeReadQuery({ path: "big.bin", binary: true, bytes: { from: -4 } }, ctx);
+    expect(bytes.scannedBytes).toBe(4);
+    const head = await executeReadQuery({ path: "big.txt", lines: { to: 1 }, annotate: false }, ctx);
+    expect(head.payload).toBe("first\n"); expect(head.scannedBytes).toBeLessThan(100000);
+    const tail = await executeReadQuery({ path: "big.txt", lines: { from: -1 }, annotate: false }, ctx);
+    expect(tail.payload).toBe("last"); expect(tail.scannedBytes).toBeLessThan(150000);
   });
-
-  test("binary + base64 returns the byte range as base64 TEXT with a byte header", async () => {
-    mkdirSync(ROOT, { recursive: true });
-    const rel = `./ai-tmp/../ai-tmp/read-${process.pid}/bin.dat`;
-    writeFileSync(`${ROOT}/bin.dat`, Buffer.from([0, 1, 2, 3, 250, 251, 252, 253]));
-    const out = await read({ path: rel, binary: true, base64: true, startChar: 2, endChar: 6 });
-    expect(out).toBe(`[bytes 2–5 of 8 total, base64]\n${Buffer.from([2, 3, 250, 251]).toString("base64")}`);
+  test("filters before content scans and reports finite scan/output limits", async () => {
+    const ctx = setup({ "a.txt": "a".repeat(10000), "b.md": "TODO", "big.md": "TODO".repeat(2000) });
+    ctx.env.settings.read = { grepFileSizeLimit: 100, outputBytes: 200, scanBytes: 1000 };
+    const search = await executeReadQuery({ path: ".", glob: "*.md", search: { text: "TODO" } }, ctx);
+    expect(search.scannedBytes).toBe(4); expect(search.skips.oversized).toBe(1);
+    const incomplete = await executeReadQuery({ path: "a.txt" }, ctx);
+    expect(incomplete.selectionComplete).toBe(false); expect(incomplete.status.join()).toContain("budget");
+    ctx.env.settings.read = { outputBytes: 200 };
+    expect(texts(await read({ path: "a.txt" }, ctx))).toContain("serialized output budget");
   });
-
-  test("binary alone returns mime-sniffed BINARY content blocks (not base64 text)", async () => {
-    mkdirSync(ROOT, { recursive: true });
-    const rel = `./ai-tmp/../ai-tmp/read-${process.pid}/pic.png`;
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
-    writeFileSync(`${ROOT}/pic.png`, png);
-    const out = await read({ path: rel, binary: true });
-    expect(Array.isArray(out)).toBe(true);
-    expect(out[0]).toEqual({ type: "text", text: `[bytes 0–10 of 11 total, image/png]` });
-    expect(out[1]).toEqual({ type: "binary", mime: "image/png", content: png.toString("base64") });
-    const sliced = await read({ path: rel, binary: true, startChar: 8 });
-    expect(sliced[1].mime).toBe("image/png"); // the EXTENSION map answers first
-    // an unknown extension with no magic bytes sniffs to octet-stream
-    writeFileSync(`${ROOT}/blob.xyz`, Buffer.from([1, 2, 3]));
-    const unknown = await read({ path: `./ai-tmp/../ai-tmp/read-${process.pid}/blob.xyz`, binary: true });
-    expect(unknown[1].mime).toBe("application/octet-stream");
+  test("regex isolation terminates pathological work and respects cancellation", async () => {
+    const ctx = setup({ "a.txt": "a".repeat(10000) + "!" });
+    ctx.env.settings.read = { regexMs: 50 };
+    const start = Date.now();
+    const out = texts(await read({ path: "a.txt", search: { regex: "(a+)+$" } }, ctx));
+    expect(out).toContain("Search time budget exhausted"); expect(Date.now() - start).toBeLessThan(1500);
+    const controller = new AbortController();
+    const pending = read({ path: "a.txt", search: { regex: "(a+)+$" } }, { ...ctx, signal: controller.signal });
+    setTimeout(() => controller.abort(new Error("cancelled")), 10);
+    await expect(pending).rejects.toThrow(/cancelled/);
   });
-
-  test("base64 alone encodes the TEXT result (ranges and searches included)", async () => {
-    const rel = setup("lines.txt", numbered(5));
-    const out = await read({ path: rel, base64: true, startLine: 2, endLine: 3 });
-    const plain = await read({ path: rel, startLine: 2, endLine: 3 });
-    expect(out.startsWith("[base64]\n")).toBe(true);
-    expect(Buffer.from(out.slice(8), "base64").toString("utf8")).toBe(plain);
-  });
-
-  test("glob permits a matching file path and rejects only a nonmatching one", async () => {
-    const markdown = setup("note.md", "# Note\nTODO");
-    expect(await read({ path: markdown, glob: "**/*.md", pattern: "TODO" }))
-      .toBe(`grep ${markdown} /TODO/ (1):\n2: TODO`);
-    await expect(read({ path: markdown, glob: "*.ts" })).rejects
-      .toThrow('The file does not match glob "*.ts".');
-  });
-
-  test("conflicting options are ordinary errors", async () => {
-    const rel = setup("lines.txt", numbered(5));
-    await expect(read({ path: rel, binary: true, startLine: 1 })).rejects.toThrow("Binary reads use startChar/endChar, not startLine/endLine.");
-    await expect(read({ path: rel, startLine: -1 })).rejects.toThrow(/startLine/);
-  });
-
-  test("a line range AND a character range combine (a character cap never excludes a line range)", async () => {
-    const rel = setup("lines.txt", numbered(30));
-    // "up to 5 lines, but no more than 10 characters": the line range
-    // selects first, the character range caps the selection
-    const out = await read({ path: rel, startLine: 1, endLine: 5, endChar: 10 });
-    expect(out).toBe("[text/plain]\n[lines 1–5 of 30 total]\n[characters 0–9 of 39 in the line range]\nline-01\nli");
-    // a search inside both keeps the line range's original numbers
-    const found = await read({ path: rel, startLine: 2, endLine: 4, endChar: 20, pattern: "line" });
-    expect(found).toContain("2: line-02");
-    expect(found).toContain("3: line-03");
-  });
-
-  test("FALSEY-FILLED optionals count as absent (models that fill every field)", async () => {
-    const rel = setup("lines.txt", numbered(3));
-    // some models always fill every schema field with 0/null/false/""
-    // for "no value" — a filled startLine: 0 or pattern: "" must not
-    // throw or change the query (optionality is absence from
-    // `required`; a falsey fill is how a model says "absent")
-    const filled = await read({
-      path: rel, startLine: 0, endLine: null, startChar: 0, endChar: 0,
-      pattern: "", maxMatches: 0, binary: false, base64: false,
-      ignoreCase: false, recursive: false, info: false,
-    });
-    expect(filled).toBe(await read({ path: rel }));
-  });
-
-  test("grep returns matching lines with 1-based line numbers (grep -n style)", async () => {
-    const rel = setup("log.txt", "info: start\nerror: first\ninfo: middle\nERROR: second\ninfo: end");
-    const out = await read({ path: rel, pattern: "error" });
-    expect(out).toBe("grep " + rel + " /error/ (1):\n2: error: first");
-    const ci = await read({ path: rel, pattern: "error", ignoreCase: true });
-    expect(ci).toContain("(2):");
-    expect(ci).toContain("2: error: first");
-    expect(ci).toContain("4: ERROR: second");
-  });
-
-  test("grep honors maxMatches and reports the cap", async () => {
-    const rel = setup("many.txt", numbered(30));
-    const out = await read({ path: rel, pattern: "line", maxMatches: 3 });
-    expect(out).toContain("(30, showing first 3):");
-    expect(out.split("\n").slice(1)).toHaveLength(3);
-  });
-
-  test("grep within a line range keeps the ORIGINAL line numbers", async () => {
-    const rel = setup("log.txt", "info: a\nerror: b\ninfo: c\nerror: d\ninfo: e");
-    const out = await read({ path: rel, startLine: 3, endLine: 5, pattern: "error" });
-    expect(out).toContain("4: error: d"); // not "2: ..."
-  });
-
-  test("no matches and invalid patterns report cleanly", async () => {
-    const rel = setup("log.txt", "nothing here");
-    expect(await read({ path: rel, pattern: "zebra" })).toBe(`grep: no matches for /zebra/ in ${rel}`);
-    await expect(read({ path: rel, pattern: "([bad" })).rejects.toThrow("Invalid pattern. Use a valid regular expression.");
-  });
-});
-describe("read grep: binary content is never searched", () => {
-  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0xff, 0x02]);
-  const setup = () => {
-    mkdirSync(`${ROOT}/sub`, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "apple top\nbanana");
-  };
-
-  test("a direct grep of a binary file is refused up front (content sniff, not name)", async () => {
-    setup();
-    writeFileSync(`${ROOT}/data.txt`, PNG); // a TEXT extension cannot launder binary bytes
-    await expect(read({ path: rel("data.txt"), pattern: "x" }))
-      .rejects.toThrow("grep applies only to text files; this file looks binary (use binary: true to search its bytes).");
-  });
-
-  test("binary: true opts a direct grep into searching RAW BYTES", async () => {
-    setup();
-    writeFileSync(`${ROOT}/data.bin`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a, 0xff, 0xfe]));
-    // latin1: one character per byte — the whole 7-byte file is one line
-    expect(await read({ path: rel("data.bin"), pattern: "PNG", binary: true }))
-      .toBe(`grep ${rel("data.bin")} /PNG/ (1):\n1: \x89PNG`);
-  });
-
-  test("UTF-8 and UTF-16 text with bytes above 127 is NOT binary", async () => {
-    setup();
-    writeFileSync(`${ROOT}/utf8.txt`, "café π — naïve");
-    expect(await read({ path: rel("utf8.txt"), pattern: "café" }))
-      .toBe(`grep ${rel("utf8.txt")} /café/ (1):\n1: café π — naïve`);
-    // UTF-16LE with BOM (bytes above 127, invalid UTF-8, valid UTF-16)
-    writeFileSync(`${ROOT}/u16.txt`, Buffer.from([0xff, 0xfe, 0x68, 0x00, 0x69, 0x00, 0xe9, 0x05]));
-    expect(await read({ path: rel("."), pattern: "a" })).toContain("a.txt"); // searched, not skipped
-    expect(await read({ path: rel("."), pattern: "i\x00", ignoreCase: true })).toContain("u16.txt:1:");
-    // UTF-16BE without BOM (NUL alternation detects the order)
-    writeFileSync(`${ROOT}/u16be.txt`, Buffer.from([0x00, 0x68, 0x00, 0x65, 0x00, 0x6c, 0x00, 0x6f, 0x05, 0xe9]));
-    expect(await read({ path: rel("."), pattern: "l\x00", ignoreCase: true })).toContain("u16be.txt:1:");
-  });
-
-  test("a folder grep skips binary files and REPORTS the skip count", async () => {
-    setup();
-    writeFileSync(`${ROOT}/pic.png`, PNG);
-    writeFileSync(`${ROOT}/sub/more.bin`, PNG);
-    const out = await read({ path: rel("."), pattern: "apple", recursive: true });
-    expect(out).toContain("(1, 2 binary skipped):");
-    expect(out).toContain("a.txt:1: apple top");
-    const none = await read({ path: rel("."), pattern: "zebra", recursive: true });
-    expect(none).toBe(`grep: no matches for /zebra/ in ${rel(".")} (2 binary skipped)`);
-    expect(await read({ path: rel("."), pattern: "apple", recursive: true, info: true }))
-      .toContain("grep would return 1 matches in 1 file(s), 2 binary skipped");
-  });
-
-  test("a binary file still LISTS (skipping is search-only)", async () => {
-    setup();
-    writeFileSync(`${ROOT}/pic.png`, PNG);
-    expect(await read({ path: rel("."), recursive: true })).toContain("pic.png (12 bytes)");
+  test("directory entry budgets interrupt with explicit incompleteness", async () => {
+    const ctx = setup({ "a": "a", "b": "b", "c": "c" });
+    ctx.env.settings.read = { entries: 2 };
+    const out = texts(await read({ path: ".", info: true }, ctx));
+    expect(out).toContain("incomplete"); expect(out).toContain("entries budget");
   });
 });
 
-describe("read: system files and .ignore mark project-irrelevant content", () => {
-  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-  const setup = () => {
-    mkdirSync(`${ROOT}/sub/deep`, { recursive: true });
-    writeFileSync(`${ROOT}/a.txt`, "apple top");
-    writeFileSync(`${ROOT}/sub/c.txt`, "apple sub");
-    writeFileSync(`${ROOT}/sub/deep/d.txt`, "apple deep");
-  };
-
-  test("known system files vanish from listings and searches but still READ by name", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.DS_Store`, "junk apple");
-    writeFileSync(`${ROOT}/sub/Thumbs.db`, "junk apple");
-    expect(await read({ path: rel("."), recursive: true })).not.toContain("DS_Store");
-    expect(await read({ path: rel("."), recursive: true })).not.toContain("Thumbs");
-    expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("DS_Store");
-    // relevance, not an access wall: a direct read answers
-    expect(await read({ path: rel(".DS_Store") })).toBe("[application/octet-stream]\njunk apple");
-    expect(await read({ path: rel("sub/Thumbs.db"), info: true })).toContain("type: file");
-  });
-
-  test(".git folders never list or match — but a named file still reads", async () => {
-    setup();
-    mkdirSync(`${ROOT}/.git/objects`, { recursive: true });
-    writeFileSync(`${ROOT}/.git/config`, "apple git internals");
-    mkdirSync(`${ROOT}/sub/.git`, { recursive: true });
-    writeFileSync(`${ROOT}/sub/.git/config`, "apple nested git");
-    expect(await read({ path: rel("."), recursive: true })).not.toContain(".git");
-    expect(await read({ path: rel("."), pattern: "apple", recursive: true })).not.toContain("git");
-    // a search of a .git path itself finds nothing (system content is never searched)
-    expect(await read({ path: rel(".git"), pattern: "apple" }))
-      .toBe(`grep: no matches for /apple/ in ${rel(".git")} (2 ignored skipped)`);
-    expect(await read({ path: rel(".git/config"), pattern: "apple" }))
-      .toBe(`grep: no matches for /apple/ in ${rel(".git/config")}`);
-    // but the content is never REFUSED
-    expect(await read({ path: rel(".git/config") })).toBe("[application/octet-stream]\napple git internals");
-    expect(await read({ path: rel("sub/.git/config") })).toBe("[application/octet-stream]\napple nested git");
-  });
-
-  test("a .ignore file hides matching files and folders from listings and searches", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.ignore`, "# comment\nsecret.txt\n/deep-root.txt\n");
-    writeFileSync(`${ROOT}/secret.txt`, "apple secret");
-    writeFileSync(`${ROOT}/sub/secret.txt`, "apple nested secret"); // a bare name matches anywhere below
-    writeFileSync(`${ROOT}/deep-root.txt`, "apple anchored");
-    writeFileSync(`${ROOT}/sub/deep-root.txt`, "apple not anchored"); // /anchor is root-only
-    const listing = await read({ path: rel("."), recursive: true });
-    expect(listing).not.toContain("secret.txt");
-    expect(listing).not.toContain("\ndeep-root.txt");
-    expect(listing).toContain("sub/deep-root.txt (18 bytes)"); // only the anchored one is hidden
-    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
-    expect(found).not.toContain("secret.txt");
-    expect(found).toContain("sub/deep-root.txt:1: apple not anchored");
-  });
-
-  test("a direct read of an ignored file ANSWERS; a direct search finds nothing with a hint", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.ignore`, "secret.txt\n");
-    writeFileSync(`${ROOT}/secret.txt`, "apple secret");
-    // by name, info and data always answer
-    expect(await read({ path: rel("secret.txt") })).toBe("[text/plain]\napple secret");
-    const i = await read({ path: rel("secret.txt"), info: true });
-    expect(i).toContain("type: file");
-    expect(i).toContain("size: 12 bytes");
-    // a search never REFUSES: it finds nothing and hints at irrelevance
-    expect(await read({ path: rel("secret.txt"), pattern: "apple" }))
-      .toBe(`grep: no matches for /apple/ in ${rel("secret.txt")} (the file may be ignored — .ignore marks project-irrelevant files)`);
-  });
-
-  test("a search of an ignored FOLDER finds nothing and reports the skipped entries", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.ignore`, "sub/deep/\n");
-    const out = await read({ path: rel("sub/deep"), pattern: "apple" });
-    expect(out).toBe(`grep: no matches for /apple/ in ${rel("sub/deep")} (1 ignored skipped)`);
-    // a recursive search from ABOVE simply never enters the ignored folder
-    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
-    expect(found).toBe(`grep ${rel(".")} /apple/ (2):\na.txt:1: apple top\nsub/c.txt:1: apple sub`);
-    // a LISTING of the ignored folder itself still answers (relevance, not refusal)
-    expect(await read({ path: rel("sub/deep") })).toContain("d.txt (10 bytes)");
-  });
-
-  test("a directory pattern hides the whole subtree; a nested .ignore refines", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.ignore`, "sub/deep/\n");
-    writeFileSync(`${ROOT}/sub/.ignore`, "c.txt\n!keep.txt\n");
-    writeFileSync(`${ROOT}/sub/keep.txt`, "apple kept");
-    const listing = await read({ path: rel("."), recursive: true });
-    expect(listing).not.toContain("deep"); // the hidden folder never appears
-    expect(listing).not.toContain("c.txt"); // nested rule
-    expect(listing).toContain("keep.txt"); // re-included (the negation never excluded it)
-    const found = await read({ path: rel("."), pattern: "apple", recursive: true });
-    expect(found).toBe(`grep ${rel(".")} /apple/ (2):\na.txt:1: apple top\nsub/keep.txt:1: apple kept`);
-    // nested .ignore rules load on descent — and on a DIRECT search too
-    expect(await read({ path: rel("sub/c.txt"), pattern: "apple" })).toContain("may be ignored");
-  });
-
-  test(".gitignore is NOT consulted (only .ignore is)", async () => {
-    setup();
-    writeFileSync(`${ROOT}/.gitignore`, "a.txt\n");
-    expect(await read({ path: rel(".") })).toContain("a.txt (9 bytes)");
-    expect(await read({ path: rel("."), pattern: "apple" })).toContain("a.txt:1: apple top");
-  });
-});
-
-describe("read grep: the global-regexp core", () => {
-  const setup = (name, content) => {
-    mkdirSync(ROOT, { recursive: true });
-    const rel = `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-    writeFileSync(`${ROOT}/${name}`, content);
-    return rel;
-  };
-
-  test("a match spanning multiple lines prints EVERY line it touches", async () => {
-    const rel = setup("multi.txt", "one\ntwo\nthree\nfour");
-    const out = await read({ path: rel, pattern: "two\\nthree" });
-    expect(out).toBe(`grep ${rel} /two\\nthree/ (1):\n2: two\n3: three`);
-  });
-
-  test("multi-line patterns center each long line on its own matched segment", async () => {
-    const rel = setup("spanning-long.txt", `${"a".repeat(3000)}FIRST\nSECOND${"b".repeat(3000)}`);
-    const lines = (await read({ path: rel, pattern: "FIRST\\nSECOND" })).split("\n").slice(1);
-    expect(lines[0]).toBe(`1: ...${"a".repeat(2043)}FIRST`);
-    expect(lines[1]).toBe(`2: SECOND${"b".repeat(2042)}...`);
-  });
-
-  test("long lines center a 2K excerpt on the actual match with edge ellipses", async () => {
-    const left = "a".repeat(3000);
-    const right = "b".repeat(3000);
-    const rel = setup("center.txt", `${left}TARGET${right}`);
-    const out = await read({ path: rel, pattern: "TARGET" });
-    const shown = out.split("\n")[1].replace(/^1: /, "");
-    expect(shown).toBe(`...${left.slice(-1021)}TARGET${right.slice(0, 1021)}...`);
-    expect(shown.length).toBe(2054);
-  });
-
-  test("long lines at the beginning and end only mark omitted sides", async () => {
-    const rel = setup("edges.txt", `TARGET${"x".repeat(3000)}\n${"y".repeat(3000)}TARGET`);
-    const lines = (await read({ path: rel, pattern: "TARGET" })).split("\n").slice(1);
-    expect(lines[0]).toBe(`1: TARGET${"x".repeat(2042)}...`);
-    expect(lines[1]).toBe(`2: ...${"y".repeat(2042)}TARGET`);
-  });
-
-  test("one matching JSONL line cannot inject megabytes of session history into the model", async () => {
-    const rel = setup("huge.jsonl", "start " + "x".repeat(2_000_000) + " target " + "y".repeat(2_000_000));
-    const out = await read({ path: rel, pattern: "target" });
-    expect(out.length).toBeLessThan(10_000);
-    expect(out).toContain("target");
-    expect(out).toContain("...");
-  });
-
-  test("folder grep uses the same match-centered excerpt", async () => {
-    setup("folder-center.txt", `${"a".repeat(3000)}TARGET${"b".repeat(3000)}`);
-    const out = await read({ path: `./ai-tmp/read-${process.pid}`, pattern: "TARGET" });
-    expect(out).toContain(`folder-center.txt:1: ...${"a".repeat(1021)}TARGET${"b".repeat(1021)}...`);
-  });
-
-  test("recursive folder grep bounds total output even with many long matching lines", async () => {
-    setup("many.txt", Array.from({ length: 100 }, () => "target " + "x".repeat(3000)).join("\n"));
-    const out = await read({ path: `./ai-tmp/read-${process.pid}`, pattern: "target", recursive: true });
-    expect(out.length).toBeLessThan(70_000);
-    expect(out).toContain("output capped");
-  });
-
-  test("overlapping ranges never print a line twice", async () => {
-    const rel = setup("over.txt", "aaa\nbbb\nccc");
-    const out = await read({ path: rel, pattern: "[a-z]", maxMatches: 10 });
-    expect(out.split("\n").slice(1)).toEqual(["1: aaa", "2: bbb", "3: ccc"]);
-  });
-
-  test("glob `*` never crosses a `/` (gitignore semantics) — only `**` does", async () => {
-    mkdirSync(`${ROOT}/sub`, { recursive: true });
-    writeFileSync(`${ROOT}/top.txt`, "apple top");
-    writeFileSync(`${ROOT}/sub/nested.txt`, "apple nested");
-    const folder = `./ai-tmp/read-${process.pid}`;
-    const star = await read({ path: folder, glob: "*.txt", recursive: true });
-    expect(star).toContain("top.txt");
-    expect(star).toContain("nested.txt"); // a slashless pattern matches basenames anywhere
-    const rooted = await read({ path: folder, glob: "/top.txt", recursive: true });
-    expect(rooted).not.toContain("nested");
-    const deep = await read({ path: folder, glob: "**/*.txt", recursive: true });
-    expect(deep).toContain("sub/nested.txt");
-  });
-});
-
-describe("read grep: the folder-search file size ceiling", () => {
-  const rel = (name) => `./ai-tmp/../ai-tmp/read-${process.pid}/${name}`;
-  const setup = () => {
-    mkdirSync(ROOT, { recursive: true });
-    writeFileSync(`${ROOT}/small.txt`, "apple small");
-    writeFileSync(`${ROOT}/big.txt`, "apple " + "x".repeat(2048));
-  };
-  const ctx = (limit) => ({ env: { cwd: process.cwd(), settings: { read: { grepFileSizeLimit: limit } } } });
-
-  test("files over the ceiling are skipped and REPORTED; the rest still match", async () => {
-    setup();
-    const out = await read({ path: rel("."), pattern: "apple" }, ctx(1024));
-    expect(out).toBe(`grep ${rel(".")} /apple/ (1, 1 oversized skipped):\nsmall.txt:1: apple small`);
-    expect(await read({ path: rel("."), pattern: "apple", info: true }, ctx(1024)))
-      .toContain("grep would return 1 matches in 1 file(s), 1 oversized skipped");
-    // skip notes compose with the binary count
-    writeFileSync(`${ROOT}/pic.png`, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]));
-    const mixed = await read({ path: rel("."), pattern: "apple" }, ctx(1024));
-    expect(mixed).toContain("(1, 1 binary skipped, 1 oversized skipped):");
-  });
-
-  test("a DIRECT file grep is never capped", async () => {
-    setup();
-    const out = await read({ path: rel("big.txt"), pattern: "apple" }, ctx(4));
-    expect(out).toContain("(1):");
-    expect(out).toContain("1: apple ");
-  });
-
-  test("an unset setting defaults to 5 MB; 0 disables the ceiling", async () => {
-    setup();
-    const plain = await read({ path: rel("."), pattern: "apple" }); // 5 MB default: nothing skipped
-    expect(plain).toContain("(2):");
-    expect(plain).not.toContain("oversized");
-    const off = await read({ path: rel("."), pattern: "apple" }, ctx(0));
-    expect(off).toContain("(2):");
-    expect(off).not.toContain("oversized");
-  });
-});
-
-describe("read folders: listings never pay for content sniffs", () => {
-  test("a plain listing of unopenable files still answers (stat-only)", async () => {
-    const dir = `${ROOT}/locked`;
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(`${dir}/a.txt`, "apple");
-    chmodSync(`${dir}/a.txt`, 0o000);
+describe("write.read shared payload and atomic failure guarantees", () => {
+  test("Agent runs read as safe and write.read as a mutating sequential barrier", async () => {
+    setup({ "a.txt": "hello" });
+    const env = new Env({ cwd: ROOT, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+    await toolsLoad(env);
+    const io = scriptedIO([
+      [...TOOLCALL(0, "save", "write", { path: "out.txt", read: { path: "a.txt", annotate: true } }),
+        ...TOOLCALL(1, "readback", "read", { path: "out.txt", annotate: false }), { type: "done" }],
+      [...TEXT(0, "done"), { type: "done" }],
+    ]);
+    const agent = new Agent({ env, model: "p/m", context: [USER("save and read")], createIO: () => io });
     try {
-      const out = await read({ path: `./ai-tmp/read-${process.pid}/locked` });
-      expect(out).toContain("a.txt");
-    } finally {
-      chmodSync(`${dir}/a.txt`, 0o644); // let afterEach clean up
+      expect((await agent.run()).type).toBe("done");
+      const result = agent.context.messages().find((message) => message.callId === "readback");
+      expect(result.content[0].text).toBe("hello");
+      expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("hello");
+    } finally { agent.close(); await env.close(); }
+  });
+  test("saves plain text, listings and reports without agent payload round-trip", async () => {
+    const ctx = setup({ "a.txt": "one\nTODO\nthree" });
+    const query = { path: "a.txt", lines: { from: 2, to: 2 }, annotate: false };
+    await write({ path: "out.txt", read: query }, ctx);
+    expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("TODO\n");
+    const report = { path: "a.txt", search: { text: "TODO" } };
+    const expected = serializeReadResult(await executeReadQuery(report, ctx, { artifact: true }));
+    await write({ path: "report.txt", read: report }, ctx);
+    expect(readFileSync(join(ROOT, "report.txt"))).toEqual(expected);
+    await write({ path: "list.txt", read: { path: ".", glob: "*.txt", annotate: false } }, ctx);
+    expect(readFileSync(join(ROOT, "list.txt"), "utf8")).toContain("a.txt");
+  });
+  test("forces annotations off for non-search file/range/listing/base64 saves", async () => {
+    const ctx = setup({ "source.txt": "one\ntwo\nthree" });
+    for (const annotate of [undefined, true, false]) {
+      const query = { path: "source.txt", annotate, lines: { from: 2, to: 2 } };
+      await write({ path: "out.txt", read: query }, ctx);
+      expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("two\n");
+      expect(query.annotate).toBe(annotate); // Caller query is not mutated.
     }
+    await write({ path: "list.txt", read: { path: ".", glob: "source.txt", annotate: true } }, ctx);
+    expect(readFileSync(join(ROOT, "list.txt"), "utf8")).toBe("source.txt");
+    await write({ path: "base64.txt", read: { path: "source.txt", base64: true, annotate: true } }, ctx);
+    expect(Buffer.from(readFileSync(join(ROOT, "base64.txt"), "utf8"), "base64").toString("utf8")).toBe("one\ntwo\nthree");
+    expect(texts(await read({ path: "source.txt" }, ctx))).toStartWith("[text/plain]\n");
+  });
+  test("normalizes empty/filler searches before deciding annotation policy", async () => {
+    const ctx = setup({ "source.txt": "source" });
+    for (const search of [undefined, null, false, true, [], {}, { text: "", regex: null }, { ignoreCase: true, before: 2 }]) {
+      await write({ path: "out.txt", read: { path: "source.txt", search, annotate: true } }, ctx);
+      expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("source");
+    }
+    await expect(write({ path: "out.txt", read: { path: "source.txt", annotate: "invalid" } }, ctx)).rejects.toThrow(/boolean/);
+  });
+  test("effective searches retain default/true annotations and honor explicit false", async () => {
+    const ctx = setup({ "source.txt": "one\nTODO\nthree" });
+    for (const search of [{ text: "TODO" }, { regex: "TODO" }]) {
+      for (const annotate of [undefined, true, false]) {
+        const query = { path: "source.txt", search, annotate };
+        const expected = serializeReadResult(await executeReadQuery(query, ctx, { artifact: true }));
+        await write({ path: "out.txt", read: query }, ctx);
+        expect(readFileSync(join(ROOT, "out.txt"))).toEqual(expected);
+        if (annotate !== false) expect(expected.toString("utf8")).toContain("2: TODO");
+        else expect(expected.toString("utf8")).toBe("TODO");
+      }
+    }
+    await write({ path: "info.txt", read: { path: "source.txt", info: true } }, ctx);
+    expect(readFileSync(join(ROOT, "info.txt"), "utf8")).toContain("lines: 3");
+  });
+  test("preserves bytes and base64 without binary decoration or status", async () => {
+    const ctx = setup({ "a.bin": Buffer.from([0, 255, 3, 4]) });
+    await write({ path: "b.bin", read: { path: "a.bin", binary: true, bytes: { from: -2 } } }, ctx);
+    expect(readFileSync(join(ROOT, "b.bin"))).toEqual(Buffer.from([3, 4]));
+    await write({ path: "b64.txt", read: { path: "a.bin", binary: true, base64: true } }, ctx);
+    expect(readFileSync(join(ROOT, "b64.txt"), "utf8")).toBe("AP8DBA==");
+  });
+  test("rejects both/neither, safe mode, source identity and incomplete saves", async () => {
+    const ctx = setup({ "a.txt": "a".repeat(1000), "dest.txt": "unchanged" });
+    await expect(write({ path: "x", content: "", read: { path: "a.txt" } }, ctx)).rejects.toThrow(/exactly one/);
+    await expect(write({ path: "x" }, ctx)).rejects.toThrow(/exactly one/);
+    await expect(write({ path: "x", content: "a" }, { ...ctx, safe: true })).rejects.toThrow(/safe mode/);
+    await expect(write({ path: "a.txt", read: { path: "a.txt" } }, ctx)).rejects.toThrow(/must differ/);
+    ctx.env.settings.read = { artifactBytes: 100 };
+    await expect(write({ path: "dest.txt", read: { path: "a.txt" } }, ctx)).rejects.toThrow(/incomplete/);
+    expect(readFileSync(join(ROOT, "dest.txt"), "utf8")).toBe("unchanged");
+    const controller = new AbortController(); controller.abort(new Error("cancelled"));
+    await expect(write({ path: "dest.txt", content: "new" }, { ...ctx, signal: controller.signal })).rejects.toThrow(/cancelled/);
+    expect(readFileSync(join(ROOT, "dest.txt"), "utf8")).toBe("unchanged");
+  });
+  test("explicit limit is intentional, larger artifact budget differs from preview, empty content valid", async () => {
+    const ctx = setup({ "a.txt": "one\ntwo\nthree", "large.txt": "x".repeat(1000) });
+    ctx.env.settings.read = { outputBytes: 100, artifactBytes: 2000 };
+    await write({ path: "out.txt", read: { path: "a.txt", search: { regex: ".+" }, limit: 1, annotate: false } }, ctx);
+    expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("one");
+    await write({ path: "large-out.txt", read: { path: "large.txt", annotate: false } }, ctx);
+    expect(readFileSync(join(ROOT, "large-out.txt")).length).toBe(1000);
+    await write({ path: "empty.txt", content: "", read: null }, ctx);
+    expect(readFileSync(join(ROOT, "empty.txt")).length).toBe(0);
+  });
+  test("publishes read safe/write unsafe through Env and calls the shared query", async () => {
+    const env = new Env({ cwd: ROOT, settings: {} });
+    setup({ "a.txt": "hello" });
+    try {
+      await toolsLoad(env);
+      const tools = await env.tools(true);
+      expect(tools.has("read")).toBe(true); expect(tools.has("write")).toBe(false);
+      const ctx = { env };
+      expect(await env.toolCall("read", { path: "a.txt", annotate: false }, ctx)).toBe("hello");
+      await env.toolCall("write", { path: "out.txt", read: { path: "a.txt" } }, ctx);
+      expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("hello");
+    } finally { await env.close(); }
   });
 });
-

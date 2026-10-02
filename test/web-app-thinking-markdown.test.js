@@ -4,8 +4,14 @@ import { join } from "node:path";
 import { renderMarkdown } from "../lib/app/web/public/markdown.js";
 
 const source = readFileSync(join(import.meta.dir, "..", "lib/app/web/public/app.js"), "utf8");
-const previewSource = source.slice(source.indexOf("function previewNode("), source.indexOf("\n/** A collapsible card", source.indexOf("function previewNode(")));
-const thinkingSource = source.slice(source.indexOf("function renderThinking("), source.indexOf("\nconst TOOL_STATE", source.indexOf("function renderThinking(")));
+function extractFunction(name, nextDeclaration) {
+  const start = source.indexOf(`function ${name}(`);
+  const end = source.indexOf(nextDeclaration, start);
+  if (start < 0 || end < 0) throw new Error(`Could not extract ${name}`);
+  return source.slice(start, end);
+}
+const previewSource = extractFunction("previewNode", "\n/**\n * A collapsible card");
+const thinkingSource = extractFunction("renderThinking", "\nconst TOOL_STATE");
 const turnSource = source.slice(source.indexOf("function onDelta("), source.indexOf("\n/* ------------------------------------------------------------- transcript */", source.indexOf("function onDelta(")));
 
 function node(tag, className, text = "") {

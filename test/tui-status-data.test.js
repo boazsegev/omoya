@@ -3,7 +3,21 @@
 // no Agent — these are pure functions over shaped input.
 import { expect, test } from "bun:test";
 import { turnReadoutParts, formatQuotaText } from "../lib/app/tui/status-data.js";
-import { sortedQuotaEntries } from "../lib/app/shared/format.js";
+import { modelParts, sortedQuotaEntries } from "../lib/app/shared/format.js";
+
+test("modelParts: splits the first slash only and leaves missing selection empty", () => {
+  expect(modelParts("endpoint/team/model")).toEqual({ endpoint: "endpoint", model: "team/model" });
+  expect(modelParts(undefined)).toEqual({});
+});
+
+test("statusData: model setting chips display native model id, without changing qualified Agent.model", async () => {
+  const { statusData } = await import("../lib/app/tui/status-data.js");
+  const agent = { model: "endpoint/team/model", context: { save: false } };
+  const [endpoint, model] = statusData({ agent }).chips;
+  expect(endpoint.label).toBe("endpoint");
+  expect(model.label).toBe("team/model");
+  expect(agent.model).toBe("endpoint/team/model");
+});
 
 function agentStub({ contextUsage = null, planUsage = null } = {}) {
   return { contextUsage, planUsage };

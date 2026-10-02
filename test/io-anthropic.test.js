@@ -22,12 +22,11 @@ afterEach(() => {
   }
 });
 
-const aiio = (over = {}) => ({
-  modelCurrent: "claude-opus-5",
+const aiio = (over = {}) => Object.defineProperties({
+  modelCurrent: "test/claude-opus-5",
   settings: { auth: { token: "sk-ant-test" } },
   tools: () => [],
-  ...over,
-});
+}, Object.getOwnPropertyDescriptors(over));
 
 const user = (text) => ({ type: 2, content: [{ type: "text", text }] });
 const system = (text) => ({ type: 1, content: [{ type: "text", text }] });
@@ -218,13 +217,13 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
   test("max_tokens follows a smaller known model cap; unknown models get the default", () => {
     // a known model's cap comes from the preset itself — never restated as a literal
     const presetEntry = Protocol.knownEndpoints.find((e) => e.url === "https://api.deepseek.com/anthropic").models["deepseek-chat"];
-    const small = new Protocol("https://api.deepseek.com/anthropic", aiio({ modelCurrent: "deepseek-chat" }));
+    const small = new Protocol("https://api.deepseek.com/anthropic", aiio({ modelCurrent: "test/deepseek-chat" }));
     expect(small.context2msg([user("x")])[1].max_tokens).toBe(presetEntry.maxTokens); // the preset's static cap
     const cached = new Protocol(URL, aiio({
-      modelCurrent: "claude-x", settings: { auth: { token: "t" }, models: { "claude-x": { maxTokens: 4096 } } },
+      modelCurrent: "test/claude-x", settings: { auth: { token: "t" }, models: { "claude-x": { maxTokens: 4096 } } },
     }));
     expect(cached.context2msg([user("x")])[1].max_tokens).toBe(4096); // the cached catalog wins
-    const unknown = new Protocol(URL, aiio({ modelCurrent: "mystery" }));
+    const unknown = new Protocol(URL, aiio({ modelCurrent: "test/mystery" }));
     expect(unknown.context2msg([user("x")])[1].max_tokens).toBe(64000);
   });
 
@@ -260,7 +259,7 @@ describe("anthropic provider: context2msg (Messages dialect)", () => {
 
   test("native thinking modes: none disables, an effort adapts at that effort, undefined omits", () => {
     const at = (think) => new Protocol(URL, aiio())
-      .context2msg([user("q")], aiio({ settings: { auth: { token: "t" }, think }, modelCurrent: "m" }))[1];
+      .context2msg([user("q")], aiio({ settings: { auth: { token: "t" }, think }, modelCurrent: "test/m" }))[1];
     expect(at(undefined).thinking).toBeUndefined();
     expect(at("none").thinking).toEqual({ type: "disabled" });
     expect(at("none").output_config).toBeUndefined();
@@ -311,7 +310,7 @@ describe("anthropic provider: msg2events (SSE event translation)", () => {
   test("a full stream: thinking with signature, text, tool_use json deltas, usage, done with the mirror", () => {
     const io = aiio();
     let contextUsed;
-    io.contextUsageSet = (u) => { contextUsed = u; };
+    Object.defineProperty(io, "contextUsage", { set: (u) => { contextUsed = u; } });
     const connection = new Protocol(URL, io);
     const state = {};
     const feed = (event) => connection.msg2events(event, state, io);
@@ -441,7 +440,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
     const settings = { auth: { token: "sk-ant-multi", workspaceId: "wrkspc_x" } };
     expect(await Protocol.testConnection(statics(settings))).toEqual({ models: 1 });
     expect(calls[0].init.headers["anthropic-workspace-id"]).toBe("wrkspc_x");
-    const configured = new Protocol(URL, aiio({ modelCurrent: "claude-opus-5", settings }));
+    const configured = new Protocol(URL, aiio({ modelCurrent: "test/claude-opus-5", settings }));
     expect(configured.context2msg([user("hi")])[0]["anthropic-workspace-id"]).toBe("wrkspc_x");
   });
 
@@ -563,7 +562,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: the anthropic-ratelimit-* families land in the plan-usage channel", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const conn = new Protocol(URL, io);
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-requests-limit": "50",
@@ -586,7 +585,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: subscription (OAuth) anthropic-ratelimit-unified-<window>-utilization lands as a {total:100, used, remaining, windowSeconds} quota per window", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const conn = new Protocol(URL, io);
     // The unified-*-reset headers are UNPUBLISHED: observed captures are
     // bare Unix epoch SECONDS (e.g. 1774933200), some deployments epoch
@@ -614,7 +613,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: an OAuth response's unified windows and a request's own ratelimit-* families combine into one report", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const conn = new Protocol(URL, io);
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-unified-5h-utilization": "0.5",
@@ -629,7 +628,7 @@ describe("anthropic provider: models(), testConnection(), reportPlanUsage()", ()
 
   test("reportPlanUsage: non-duration unified metadata such as overage is excluded from the two plan windows", () => {
     let reported;
-    const io = aiio({ planUsageSet: (u) => { reported = u; } });
+    const io = aiio({ set planUsage(u) { reported = u; } });
     const conn = new Protocol(URL, io);
     conn.reportPlanUsage(new Headers({
       "anthropic-ratelimit-unified-5h-utilization": "0.39",

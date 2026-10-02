@@ -31,34 +31,34 @@ async function comboEnv({ collect = false } = {}) {
 }
 
 describe("resolveModelCombo", () => {
-  test("explicit endpoint/model splits only at the first slash", async () => {
+  test("explicit endpoint/model retains slash-containing model IDs unchanged", async () => {
     const { env, liveCalls } = await comboEnv();
-    expect(await resolveModelCombo("fake2/x/y:z", env)).toEqual({ endpoint: "fake2", model: "x/y:z" });
+    expect(await resolveModelCombo("fake2/x/y:z", env)).toEqual("fake2/x/y:z");
     expect(liveCalls).toHaveLength(0);
   });
 
   test("a cached model selects the first public endpoint that lists it", async () => {
     const { env } = await comboEnv();
-    expect(await resolveModelCombo("shared", env)).toEqual({ endpoint: "fake", model: "shared" });
-    expect(await resolveModelCombo("ns/lyricist:latest", env)).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
+    expect(await resolveModelCombo("shared", env)).toEqual("fake/shared");
+    expect(await resolveModelCombo("ns/lyricist:latest", env)).toEqual("fake2/ns/lyricist:latest");
   });
 
   test("an endpoint alone takes its first collected model; an empty suffix means endpoint alone", async () => {
     const { env, liveCalls } = await comboEnv({ collect: true });
     expect(liveCalls).toHaveLength(2); // the background collection asked each endpoint once
-    expect(await resolveModelCombo("fake2", env)).toEqual({ endpoint: "fake2", model: "live-1" });
-    expect(await resolveModelCombo("fake2/", env)).toEqual({ endpoint: "fake2", model: "live-1" });
+    expect(await resolveModelCombo("fake2", env)).toEqual("fake2/live-1");
+    expect(await resolveModelCombo("fake2/", env)).toEqual("fake2/live-1");
     expect(liveCalls).toHaveLength(2); // selection reads the catalog, never drives a refresh
   });
 
   test("without collection an endpoint alone takes its first cached model", async () => {
     const { env } = await comboEnv();
-    expect(await resolveModelCombo("fake2", env)).toEqual({ endpoint: "fake2", model: "shared" });
+    expect(await resolveModelCombo("fake2", env)).toEqual("fake2/shared");
   });
 
-  test("an unknown model remains bare and malformed input is rejected", async () => {
+  test("an unknown model remains unresolved and malformed input is rejected", async () => {
     const { env } = await comboEnv();
-    expect(await resolveModelCombo("my-fine-tune", env)).toEqual({ model: "my-fine-tune" });
+    expect(await resolveModelCombo("my-fine-tune", env)).toBeUndefined();
     await expect(resolveModelCombo("", env)).rejects.toThrow("must not be empty");
     await expect(resolveModelCombo("/x", env)).rejects.toThrow("empty endpoint");
   });
@@ -70,9 +70,9 @@ describe("selectEndpointModel: explicit provider with invocation-only URL", () =
     expect(endpointOf(env, "wire")).toBeUndefined();
 
     expect(await selectEndpointModel(env, { model: "wire/m", url: "http://temporary" }))
-      .toEqual({ endpoint: "wire", model: "m" });
+      .toEqual("wire/m");
     expect(await selectEndpointModel(env, { model: "wire/org/model", url: "http://temporary" }))
-      .toEqual({ endpoint: "wire", model: "org/model" });
+      .toEqual("wire/org/model");
     expect(existsSync(`${env._dir}/last-model.json`)).toBe(false);
   });
 
@@ -80,7 +80,7 @@ describe("selectEndpointModel: explicit provider with invocation-only URL", () =
     const { env } = await comboEnv();
     // an invocation-only endpoint (an in-memory login): its list is fetched on demand
     expect(await selectEndpointModel(env, { model: "wire/", url: "http://temporary" }))
-      .toEqual({ endpoint: "wire", model: "live-1" });
+      .toEqual("wire/live-1");
   });
 });
 
@@ -100,7 +100,7 @@ describe("last-used endpoint/model persistence", () => {
     const { env } = await comboEnv();
     expect(readLastCombo(env)).toBeNull();
     remember(env, { endpoint: "fake2", model: "ns/lyricist:latest" });
-    expect(readLastCombo(env)).toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
+    expect(readLastCombo(env)).toEqual("fake2/ns/lyricist:latest");
     const entries = JSON.parse(readFileSync(`${env._dir}/last-model.json`, "utf8"));
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ endpoint: "fake2", model: "ns/lyricist:latest" });
@@ -131,17 +131,17 @@ describe("last-used endpoint/model persistence", () => {
       { endpoint: "ambient", model: "ambient-m", ts: "2026-09-28T11:00:00.000Z" },
       { endpoint: "fake2", model: "ns/lyricist:latest", ts: "2026-09-28T10:00:00.000Z" },
     ]));
-    expect(lastPair(env)).toEqual({ endpoint: "ambient", model: "ambient-m" });
+    expect(lastPair(env)).toBe("ambient/ambient-m");
     await expect(selectEndpointModel(env, {}, { lastUsed: true }))
-      .resolves.toEqual({ endpoint: "ambient", model: "ambient-m" });
+      .resolves.toEqual("ambient/ambient-m");
     isDetected = false;
     await detect(env);
     await expect(selectEndpointModel(env, {}, { lastUsed: true }))
-      .resolves.toEqual({ endpoint: "fake2", model: "ns/lyricist:latest" });
+      .resolves.toEqual("fake2/ns/lyricist:latest");
     isDetected = true;
     await detect(env);
     await expect(selectEndpointModel(env, {}, { lastUsed: true }))
-      .resolves.toEqual({ endpoint: "ambient", model: "ambient-m" });
+      .resolves.toEqual("ambient/ambient-m");
   });
 
   test("Env treats an unavailable last model exactly like a missing file", async () => {
@@ -150,7 +150,7 @@ describe("last-used endpoint/model persistence", () => {
     writeFileSync(`${env._dir}/last-model.json`, JSON.stringify({ endpoint: "fake", model: "removed" }));
     expect(lastPair(env)).toBeNull();
     expect(readLastCombo(env)).toBeNull();
-    await expect(selectEndpointModel(env, {}, { lastUsed: true })).resolves.toEqual({ endpoint: undefined, model: undefined });
+    await expect(selectEndpointModel(env, {}, { lastUsed: true })).resolves.toBeUndefined();
   });
 
   test("does not persist model-only records and ignores a record without an endpoint", async () => {

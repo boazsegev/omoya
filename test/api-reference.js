@@ -60,6 +60,7 @@ const PUBLIC_MODULES = [
   { name: "Web", file: "lib/app/web/index.js" },
   { name: "GTUI", file: "lib/app/gtui/gtui.js" },
   { name: "index", file: "lib/index.js" },
+  { name: "index_app", file: "lib/index_app.js" },
 ];
 
 /* ========================================================== contracts */
@@ -109,17 +110,26 @@ const CONTRACTS = [
       { label: "PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow)", file: "lib/env/tool-registry.js", symbols: ["registerTool", "toolsList", "callTool"] },
       { label: "PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx)", file: "tools/read.js", example: true },
       { label: "PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed)", file: "tools/write.js", example: true },
-      { label: "REQUIRES — every in-process call's (args, ctx) signature: ctx = {question, env, safe, selector, io, call, agent, statusSet}", file: "lib/agent.js", members: { class: "Agent", names: ["_toolContext", "toolContext"] } },
+      { label: "PUBLISHES — Agent's current filtered model-facing descriptors", file: "lib/agent.js", members: { class: "Agent", names: ["tools"] } },
+      { label: "REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them", file: "lib/agent/tool-context.js", symbols: ["toolContextFor"] },
       { label: "REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx)", file: "lib/agent/tool-exec.js", symbols: ["callToolFor"] },
       { label: "REQUIRES — a worked example: an interactive tool (`interactive: true`) using ctx.question.ask", file: "tools/question.js", moduleDoc: true },
-      { label: "REQUIRES — the forked worker's REDUCED ctx: {question: null, env} only — no `call`, no `agent`", file: "lib/agent/tool-worker.js", moduleDoc: true },
+      { label: "REQUIRES — forked worker's serializable ctx: env, sandbox, deadline, onData, agent.folder; question bridge when enabled; no live Agent or IO", file: "lib/agent/tool-worker.js", moduleDoc: true },
       { label: "RETURNS — every shape a tool's return value may take", file: "lib/agent/tool-exec.js", symbols: ["resultContent", "executeToolCall"] },
+    ],
+  },
+  {
+    name: "Skills — activation, explicit composition, and resource overlays",
+    sources: [
+      { file: "lib/env.js", members: { class: "Env", names: ["skills", "skillResource"] } },
+      { file: "tools/skill.js", symbols: ["skill"] },
+      { file: "tools/skill-resource.js", symbols: ["skillResource"] },
     ],
   },
   {
     name: "Agent identity and delegation metadata",
     sources: [
-      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "nameSet", "description", "descriptionSet", "spawnPermission", "spawnPermissionSet"] } },
+      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "description", "spawnPermission"] } },
       { label: "Env plugins: how a higher layer installs its Env members (Env.extend)", file: "lib/env/extend.js", moduleDoc: true },
       { label: "Agent's Env plugin: the active-Agent registry, agentCreate, capacity, AGENT_* events", file: "lib/agent/env-plugin.js", moduleDoc: true },
       { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend"] } },
@@ -215,6 +225,20 @@ function parseDoc(raw) {
   // symbol through its returns/param text: that text is its description
   if (doc.description === "") {
     doc.description = doc.returns?.description || doc.params.map((p) => p.description).find(Boolean) || "";
+  }
+  // A declaration tag that names the symbol ("/** @class JobsError\n * Error
+  // type… */") switches the parser out of description mode on its first line,
+  // so the prose that follows lands in the tag. When there is no leading
+  // description, that trailing prose IS the description — drop the symbol
+  // name (and any {type}) the tag line carries and use the rest.
+  if (doc.description === "") {
+    const NAMING_TAGS = new Set(["class", "constructor", "function", "func", "method", "const", "constant", "namespace", "module", "typedef", "name"]);
+    for (const { tag, text } of doc.tags) {
+      if (!NAMING_TAGS.has(tag)) continue;
+      const m = /^(?:\{[^}]*\}\s*)?(?:[\w$.[\]]+\s*)?([\s\S]*)$/.exec(text);
+      const prose = (m?.[1] ?? "").trim();
+      if (prose) { doc.description = prose; break; }
+    }
   }
   return doc;
 }
@@ -336,13 +360,13 @@ function classMembers(body) {
   const members = [];
   // class-level members sit at exactly two spaces of indentation; nested
   // statements (calls inside a method body) sit deeper and never match
-  const re = /^ {2}(?=\S)(static\s+)?(async\s+)?(get\s+|set\s+)?(\*\s*)?([\w$]+)\s*(\(|=[^=])/gm;
+  const re = /^ {2}(?=\S)(static\s+)?(async\s+)?(get\s+|set\s+)?(\*\s*)?([\w$]+)\s*(\(|=[^=]|;)/gm;
   for (const m of body.matchAll(re)) {
     const name = m[5];
     if (name === "if" || name === "for" || name === "while" || name === "switch" || name === "return" || name === "catch") continue;
     if (name.startsWith("_")) continue; // private by convention
     const doc = docBefore(body, m.index);
-    if (m[6].startsWith("=")) {
+    if (m[6].startsWith("=") || m[6] === ";") {
       members.push({
         name,
         kind: "field",
@@ -485,7 +509,11 @@ function collectModule(file, cache) {
         continue;
       }
       if (target === mod) continue;
-      mod.exports.push({ ...found, name: exported, from: found.from, doc: reexportDoc ?? found.doc });
+      // Prefer the facade-level contract, but a facade stub whose parsed
+      // description is empty (e.g. a bare "@class Name" note) must not shadow
+      // the source symbol's real documentation.
+      const doc = reexportDoc?.description ? reexportDoc : found.doc ?? reexportDoc;
+      mod.exports.push({ ...found, name: exported, from: found.from, doc });
     }
   }
 
@@ -498,6 +526,38 @@ function collectModule(file, cache) {
       doc: { description: `The whole ${basename(target.file)} surface as a namespace.`, params: [], returns: null, tags: [] },
       members: target.exports.map((e) => ({ name: e.name, kind: e.kind, signature: e.signature, doc: e.doc })),
     });
+  }
+  // Static namespaces assembled by Object.assign expose the same contracts
+  // as named exports, plus deliberately documented namespace-only members.
+  for (const assignment of src.matchAll(/Object\.assign\((\w+),\s*\{/g)) {
+    const owner = mod.exports.find((symbol) => symbol.kind === "class" && symbol.name === assignment[1]);
+    if (!owner) continue;
+    const open = assignment.index + assignment[0].lastIndexOf("{");
+    const body = src.slice(open + 1, blockEnd(src, open));
+    for (const entry of body.split(",").map((item) => item.trim()).filter(Boolean)) {
+      const name = /^(\w+)/.exec(entry)?.[1];
+      if (!name || owner.members.some((member) => member.name === name)) continue;
+      const exported = mod.exports.find((symbol) => symbol.name === name);
+      const doc = exported?.doc ?? { description: `Public ${name} namespace member; see its owning module for the contract.`, params: [], returns: null, tags: [] };
+      owner.members.push({ name, kind: exported?.kind === "function" ? "method" : "field", static: true,
+        signature: exported?.kind === "function" ? exported.signature.replace(/^(?:async )?\w+/, name) : `static ${name}`, doc });
+    }
+  }
+  // Default object namespaces (the package entry points) publish each key.
+  const namespace = /^export default\s*\{/m.exec(src);
+  if (namespace) {
+    const open = src.indexOf("{", namespace.index);
+    const body = src.slice(open + 1, blockEnd(src, open));
+    const members = [...body.matchAll(/(?:^|,)\s*([\w$]+)\s*(?=:|,|$)/g)].map((match) => ({
+      name: match[1], kind: "field", signature: match[1],
+      doc: { description: `Public ${match[1]} namespace member; see its owning module for the contract.`, params: [], returns: null, tags: [] },
+    }));
+    if (body.includes("...Core")) {
+      const core = collectModule(resolve(dirname(file), "index.js"), cache);
+      members.unshift(...core.exports.find((symbol) => symbol.name === "default").members);
+    }
+    mod.exports.push({ name: "default", kind: "namespace", from: file, signature: "default namespace", members,
+      doc: { description: mod.doc || "Public package namespace.", params: [], returns: null, tags: [] } });
   }
   return mod;
 }
@@ -957,6 +1017,14 @@ function installedPluginMembers(src) {
  *  source files' declaration order. */
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
+/** A module's exports: object-like symbols (classes, namespaces, frozen
+ *  constant objects — anything carrying members) first, then plain
+ *  functions, each group alphabetical. Members stay alphabetical. */
+const byKindThenName = (a, b) => {
+  const rank = (e) => (e.kind === "function" ? 1 : 0);
+  return rank(a) - rank(b) || byName(a, b);
+};
+
 export async function collect(modules = PUBLIC_MODULES) {
   const cache = new Map();
   const { contracts, missing } = collectContracts(cache);
@@ -998,7 +1066,7 @@ export async function collect(modules = PUBLIC_MODULES) {
     }
   }
   for (const mod of collectedModules) {
-    mod.exports.sort(byName);
+    mod.exports.sort(byKindThenName);
     for (const symbol of mod.exports) symbol.members?.sort(byName);
   }
   collectedModules.sort(byName);
@@ -1011,6 +1079,10 @@ export async function collect(modules = PUBLIC_MODULES) {
     modules: collectedModules,
   };
 }
+
+/** Shared live tool data for Markdown, compact schema, and website renderers. */
+export const toolCatalog = (data) => data.contracts.find((contract) => Array.isArray(contract.tools));
+export const toolContract = (data) => data.contracts.find((contract) => contract.name.startsWith("Tool contract —"));
 
 /* ============================================================= render */
 
@@ -1043,13 +1115,29 @@ export function renderWith(data, callbacks) {
   return parts.join("");
 }
 
-/** Compact API-only renderer: one documented callable per entry. */
+/** API reference renderer: the SAME full doc data the website publishes —
+ *  complete description (every paragraph, not just the first sentence),
+ *  @param list, and @returns — so API.md and the site never drift. */
 export const markdown = {
   document(data) { return "# API (" + data.generated + ")\n\n"; },
+  contract(contract, { document }) {
+    if (contract !== toolContract(document)) return "";
+    const sources = contract.sources.map((source) => {
+      const detail = [source.doc, source.example ? `\`\`\`js\n${source.example.trim()}\n\`\`\`` : "", ...(source.symbols ?? []).map((s) => `${s.signature}: ${s.doc?.description ?? ""}`),
+        ...(source.members ?? []).map((m) => `${m.signature}: ${m.doc?.description ?? ""}`)];
+      return `### ${source.label ?? source.file}\n\nSource: \`${source.file}\`\n\n${detail.filter(Boolean).join("\n\n")}\n`;
+    }).join("\n");
+    const tools = toolCatalog(document)?.tools ?? [];
+    return `## ${contract.name}\n\n${sources}\n## Core tool catalog (live schemas)\n\n${tools.map((tool) =>
+      `### \`${tool.name}\`\n\n${tool.description}\n\nSource: \`${tool.file}\`${tool.flags.length ? `; flags: ${tool.flags.join(", ")}` : ""}\n\n\`\`\`json\n${JSON.stringify(tool.inputSchema, null, 2)}\n\`\`\`\n`).join("\n")}`;
+  },
   module(module) { return "## " + module.name + "\n\n"; },
   symbol(symbol, { module }) {
-    if (symbol.kind === "class" || symbol.kind === "namespace") return "";
     if (module.name === "index") return apiEntry(symbol.signature, symbol.doc);
+    if (symbol.kind === "class" || symbol.kind === "namespace") {
+      // The class/namespace itself documents the object; its members follow.
+      return apiEntry(symbol.signature, symbol.doc);
+    }
     const open = symbol.signature.indexOf("(");
     const equals = symbol.signature.indexOf(" =");
     const qualified = symbol.kind === "function" && open >= 0
@@ -1068,17 +1156,23 @@ export const markdown = {
   },
 };
 
-/** Render a standalone public API entry without expanding its JSDoc tags. */
+/** Render a standalone public API entry with its full JSDoc contract. */
 function apiEntry(signature, doc) {
   const marker = String.fromCharCode(96);
-  return "### " + marker + signature + marker + "\n\n" + (docSummary(doc?.description) || "(undocumented)") + "\n\n";
+  return "### " + marker + signature + marker + "\n\n" + markdownDoc(doc) + "\n";
 }
 
-/** First sentence of a JSDoc description, retaining a useful short fallback. */
-function docSummary(text) {
-  const paragraph = oneParagraph(text);
-  const end = paragraph.search(/[.!?](?:\s|$)/);
-  return end < 0 ? paragraph : paragraph.slice(0, end + 1);
+/** One parsed doc block as markdown: full description, @param list, @returns. */
+function markdownDoc(doc) {
+  const parts = [doc?.description?.trim() || "(undocumented)"];
+  if (doc?.params?.length) {
+    parts.push(doc.params.map((p) =>
+      `- \`${p.name}\`${p.type ? ` (${p.type})` : ""}${p.description ? ` — ${oneParagraph(p.description)}` : ""}`).join("\n"));
+  }
+  if (doc?.returns && (doc.returns.type || doc.returns.description)) {
+    parts.push(`Returns${doc.returns.type ? ` \`${doc.returns.type}\`` : ""}${doc.returns.description ? ` — ${oneParagraph(doc.returns.description)}` : ""}`);
+  }
+  return parts.filter(Boolean).join("\n\n") + "\n";
 }
 
 const firstLine = (text) => (text ?? "").split("\n").map((l) => l.trim()).filter(Boolean).join(" ");

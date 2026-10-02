@@ -703,6 +703,8 @@ test("deleting a live saved session closes its agent and moves all viewers befor
     expect(first.findLast((m) => m.type === "sessions").recent).toContainEqual(expect.objectContaining({ id: "target", live: true }));
     a.send(JSON.stringify({ type: "session.delete", id: "target" }));
     while (Date.now() < deadline && !first.some((m) => m.type === "command.result" && m.text.includes("session deleted"))) await tick();
+    const refreshed = Date.now() + 4000;
+    while (Date.now() < refreshed && [first, second].some((packets) => packets.findLast((m) => m.type === "sessions")?.recent.some((s) => s.id === "target"))) await tick();
     expect(agents[0].closed).toBe(true);
     expect(first.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
     expect(second.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[2].name);
@@ -722,15 +724,34 @@ test("switching sessions keeps the current model unless the session stored its o
   try {
     const socket = await connect(web, received);
     expect(await nextHello(1)).toMatchObject({ endpoint: "p1", model: "launch" });
-    env.agents()[0].modelSet("p2/picked"); // the user switched models since launch
+    env.agents()[0].model = "p2/picked"; // the user switched models since launch
     socket.send(JSON.stringify({ type: "session.new" }));
     expect(await nextHello(2)).toMatchObject({ endpoint: "p2", model: "picked" }); // not the launch last-model
-    stored("with-model", { endpoint: "x", model: "own" });
+    stored("with-model", { model: "x/own" });
     stored("without-model", { name: "plain" });
     socket.send(JSON.stringify({ type: "session.resume", id: "with-model" }));
     expect(await nextHello(3)).toMatchObject({ endpoint: "x", model: "own" }); // the session's own model
     socket.send(JSON.stringify({ type: "session.resume", id: "without-model" }));
     expect(await nextHello(4)).toMatchObject({ endpoint: "x", model: "own" }); // no model stored: the current one stays
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("settings and session.add retain qualified Agent models while displaying native model IDs", async () => {
+  const env = await testEnv();
+  env._endpoints.p.models = { m: {}, "team/nested": {} };
+  const web = await serve({ port: 0, env, model: { model: "p/m" } });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    expect(await until(() => received.some((packet) => packet.type === "settings"))).toBe(true);
+    socket.send(JSON.stringify({ type: "settings.model", model: "p/team/nested" }));
+    expect(await until(() => env.agents()[0]?.model === "p/team/nested")).toBe(true);
+    expect(received.findLast((packet) => packet.type === "settings")).toMatchObject({ endpoint: "p", model: "team/nested" });
+    socket.send(JSON.stringify({ type: "session.add", model: "p/team/nested" }));
+    expect(await until(() => env.agents().length === 2)).toBe(true);
+    expect(env.agents()[1].model).toBe("p/team/nested");
+    expect(received.findLast((packet) => packet.type === "hello")?.agent).toMatchObject({ endpoint: "p", model: "team/nested" });
     socket.close();
   } finally { web.stop(); }
 });
@@ -1024,13 +1045,12 @@ test("endpoints are listed, signed in (direct form) and signed out over the wire
     socket.send(JSON.stringify({ type: "endpoint.login", scope: "package", name: "added", provider: "wire", url: "https://added.test/v1", token: "t" }));
     await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint saved: added")) || received.some((m) => m.type === "error"));
     expect(received.filter((m) => m.type === "error")).toEqual([]);
-    expect(agent.endpoint).toBe("added");
-    expect(agent.model).toBe("model-1");
+    expect(agent.model).toBe("added/model-1");
     expect(namesOf(env)).toContain("added");
     socket.send(JSON.stringify({ type: "endpoint.logout", name: "added" }));
     expect(await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint removed: added")))).toBe(true);
     expect(namesOf(env)).not.toContain("added");
-    expect(agent.endpoint).toBeUndefined();
+    expect(agent.model).toBeUndefined();
     socket.close();
   } finally { web.stop(); }
 });

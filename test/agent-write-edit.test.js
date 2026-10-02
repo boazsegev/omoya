@@ -27,7 +27,7 @@ const seed = (name, content) => {
 
 describe("write tool (pi semantics)", () => {
   test("writes a file, creating parent directories; overwrites", async () => {
-    expect(await write({ path: rel("a/b/c.txt"), content: "hello" })).toBe("Successfully wrote to " + rel("a/b/c.txt"));
+    expect(await write({ path: rel("a/b/c.txt"), content: "hello" })).toBe("Successfully wrote 5 bytes to " + rel("a/b/c.txt"));
     expect(readFileSync(rel("a/b/c.txt"), "utf8")).toBe("hello");
     await write({ path: rel("a/b/c.txt"), content: "again" });
     expect(readFileSync(rel("a/b/c.txt"), "utf8")).toBe("again");

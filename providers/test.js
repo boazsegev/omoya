@@ -65,7 +65,7 @@ const cursors = new WeakMap();
  * @returns {Array<Array<object>>} array of turns (arrays of blocks)
  */
 function resolveScript(aiio) {
-  let source = aiio?.settings?.script ?? process.env[NAMES.testScriptEnv] ?? BUILTIN_SCRIPTS[aiio?.modelCurrent];
+  let source = aiio?.settings?.script ?? process.env[NAMES.testScriptEnv] ?? BUILTIN_SCRIPTS[aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1)];
   if (typeof source === "string") {
     const trimmed = source.trim();
     if (trimmed !== "" && !trimmed.startsWith("[")) {
@@ -88,7 +88,7 @@ function resolveScript(aiio) {
 
 /** The full context rides along untouched for test introspection. */
 function context2msg(context, aiio) {
-  return [{}, { model: aiio?.modelCurrent, messages: context }];
+  return [{}, { model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1), messages: context }];
 }
 
 /** Claim the next turn's blocks into the connection's frame queue. */

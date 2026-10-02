@@ -255,28 +255,36 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
   test("switches explicitly, resolves cached ids, and refreshes endpoint models", async () => {
     const { agent, commands } = await setupEndpoints();
     await commands.handle("/endpoint-model fake2/custom:m");
-    expect([agent.endpoint, agent.model]).toEqual(["fake2", "custom:m"]);
+    expect(agent.model).toBe("fake2/custom:m");
     await commands.handle("/endpoint-model cached-2");
-    expect([agent.endpoint, agent.model]).toEqual(["fake2", "cached-2"]);
+    expect(agent.model).toBe("fake2/cached-2");
     await commands.handle("/endpoint-model fake");
-    expect([agent.endpoint, agent.model]).toEqual(["fake", "live-1"]);
+    expect(agent.model).toBe("fake/live-1");
+  });
+
+  test("keeps slashes within a model ID when selecting a qualified combo", async () => {
+    const { agent, commands, env, lines } = await setupEndpoints();
+    env._endpoints.fake2.models["ns/lyricist"] = {};
+    await commands.handle("/endpoint-model fake2/ns/lyricist");
+    expect(agent.model).toBe("fake2/ns/lyricist");
+    expect(lines.at(-1)).toBe("endpoint: fake2, model: ns/lyricist");
   });
 
   test("refuses unknown models and persists only verified explicit combos", async () => {
     const { agent, commands, env, readLastCombo, lines } = await setupEndpoints();
     env._endpoints.fake.models = { m1: {} };
     await commands.handle("/endpoint-model whatever:9b");
-    expect([agent.endpoint, agent.model]).toEqual(["fake", "m1"]);
+    expect(agent.model).toBe("fake/m1");
     expect(lines.at(-1)).toContain("unknown model");
     await commands.handle("/endpoint-model fake2/custom:m");
-    expect(readLastCombo(env)).toEqual({ endpoint: "fake2", model: "custom:m" });
+    expect(readLastCombo(env)).toBe("fake2/custom:m");
   });
 
   test("validates argument shape and empty endpoint", async () => {
     const { agent, commands, lines } = await setupEndpoints();
     await commands.handle("/endpoint-model a b");
     await commands.handle("/endpoint-model /x");
-    expect([agent.endpoint, agent.model]).toEqual(["fake", "m1"]);
+    expect(agent.model).toBe("fake/m1");
     expect(lines[0]).toContain("usage: /endpoint-model");
     expect(lines[1]).toContain("empty endpoint");
   });
@@ -400,11 +408,11 @@ describe("cli-commands: /agent-thinking", () => {
     const { agent } = await setup([]);
     const io = { state: "idle", options: {}, settingsSet(k, v) { this.options[k] = v; }, async write() { return { type: "done" }; }, async kill() {} };
     agent._io.set("fake", io);
-    agent.thinkingSet("low");
+    (agent.thinking = "low");
     expect(io.options.think).toBe("low");
-    agent.thinkingSet("none");
+    (agent.thinking = "none");
     expect(io.options.think).toBe(false);
-    agent.thinkingSet(undefined);
+    (agent.thinking = undefined);
     expect("think" in io.options ? io.options.think : undefined).toBe(undefined);
   });
 });
@@ -1041,11 +1049,9 @@ describe("cli-commands: /endpoint-logout", () => {
   test("/endpoint-logout <endpoint> removes the endpoint and clears a combo pointing at it", async () => {
     const { agent, commands, lines } = await setup([USER("q")]);
     agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
-    agent.endpoint = "acme";
-    agent.model = "m";
+    (agent.model = "acme/m");
     expect(await commands.handle("/endpoint-logout acme")).toBe(true);
     expect(endpointOf(agent.env, "acme")).toBeUndefined();
-    expect(agent.endpoint).toBeUndefined();
     expect(agent.model).toBeUndefined();
     expect(lines[0]).toContain("endpoint removed: acme");
     expect(lines[0]).toContain("combo is cleared");
@@ -1055,9 +1061,9 @@ describe("cli-commands: /endpoint-logout", () => {
     const { agent, commands, lines } = await setup([]);
     agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
     agent.env._endpoints.other = { provider: "fake", url: "http://y" };
-    agent.endpoint = "other";
+    (agent.model = "other/m");
     await commands.handle("/endpoint-logout acme");
-    expect(agent.endpoint).toBe("other");
+    expect(agent.model).toBe("other/m");
     expect(lines[0]).toBe("endpoint removed: acme");
   });
 
@@ -1091,12 +1097,12 @@ describe("cli-commands: /session-delete-all!", () => {
 
   test("asks for confirmation; only 'Delete all' deletes every session file", async () => {
     const { agent, commands, lines, dir } = await setupSessions();
-    agent.questionSet({ ask: async () => [{ labels: ["Cancel"] }] });
+    (agent.question = { ask: async () => [{ labels: ["Cancel"] }] });
     await commands.handle("/session-delete-all!");
     expect(lines[0]).toContain("cancelled");
     expect(Context.fileOf({ dir: dir, id: "one" })).not.toBeUndefined();
 
-    agent.questionSet({ ask: async (qs) => {
+    (agent.question = { ask: async (qs) => {
       expect(qs[0].header).toBe("Sessions");
       expect(qs[0].question).toContain("ALL 2 session file(s)");
       return [{ labels: ["Delete all"] }];
@@ -1109,7 +1115,7 @@ describe("cli-commands: /session-delete-all!", () => {
 
   test("an empty folder and a missing bridge report cleanly", async () => {
     const { agent, commands, lines } = await setupSessions();
-    agent.questionSet({ ask: async () => [{ labels: ["Delete all"] }] });
+    (agent.question = { ask: async () => [{ labels: ["Delete all"] }] });
     await commands.handle("/session-delete-all!"); // deletes the two
     await commands.handle("/session-delete-all!"); // nothing left
     expect(lines.at(-1)).toContain("no session files");

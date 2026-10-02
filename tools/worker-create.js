@@ -15,7 +15,7 @@ export async function worker_create(args = {}, context = {}) {
     names.add(worker.name);
     if (worker.thinking !== undefined && !["none", "low", "medium", "high", "xhigh", "max"].includes(worker.thinking)) throw new Error(`Choose a valid thinking level for ${worker.name}.`);
   }
-  const chosen = args.workers.map((worker) => worker.model ?? (agent.endpoint && agent.model ? `${agent.endpoint}/${agent.model}` : undefined));
+  const chosen = args.workers.map((worker) => worker.model ?? agent.model);
   const details = args.workers.map((worker, i) => `${worker.name}: ${chosen[i] ?? "no model selected"}`).join("\n");
   await requireControl(agent, context, details, prompt);
   for (const model of chosen) {
@@ -29,7 +29,7 @@ export async function worker_create(args = {}, context = {}) {
     for (const worker of args.workers) {
       const child = agent.childCreate({ name: worker.name, model: worker.model, description: worker.description ?? "", safe: worker.safe === true });
       created.push(child);
-      if (worker.thinking !== undefined) child.thinkingSet(worker.thinking);
+      if (worker.thinking !== undefined) (child.thinking = worker.thinking);
       child.context.append(Context.messageSystem(NOTICE));
     }
   } catch (error) {
@@ -37,7 +37,7 @@ export async function worker_create(args = {}, context = {}) {
     throw new Error(`No workers created; fix the request and retry: ${error.message}`);
   }
   if (starts) for (const worker of created) send(worker, prompt);
-  return created.map((worker) => `${worker.name} (${worker.endpoint}/${worker.model}): ${starts ? "started" : "idle; send a task with worker-message"}`).join("\n");
+  return created.map((worker) => `${worker.name} (${worker.model}): ${starts ? "started" : "idle; send a task with worker-message"}`).join("\n");
 }
 
 export function toolDescription(env) {

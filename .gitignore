@@ -6,6 +6,8 @@ ai-tasks/
 ai-cache/
 ai-output/
 ai-research/
+ai-tools/
+ai-skills/
 tmp/
-AI-*.md
-ai-*/
+/AI-*.md
+/ai-*/

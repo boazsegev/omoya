@@ -1,5 +1,7 @@
 # API schema
 
+Compact contract notation, not executable TypeScript or a validation schema. Getters and setters are listed separately; the full API reference contains their effects and ownership rules.
+
 ### `Env.settings`
 
 ```schema
@@ -23,7 +25,6 @@
       "timeout": "number",
     },
   },
-  "modelAccess": "string",
   "prompts": "string | string[]",
   "providerPaths": "string | string[]",
   "providers": {
@@ -40,7 +41,15 @@
     "<tool>": "boolean",
   },
   "read": {
+    "artifactBytes": "number",
+    "entries": "number",
+    "fileBytes": "number",
+    "files": "number",
     "grepFileSizeLimit": "number",
+    "outputBytes": "number",
+    "regexMs": "number",
+    "scanBytes": "number",
+    "timeoutMs": "number",
   },
   "retry": {
     "attempts": "number",
@@ -196,14 +205,43 @@
 }
 ```
 
-### `Env.toolContext`
+## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
+
+- PUBLISHES — the module shape a tool file must export — `lib/env/tools.js`
+- PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow) — `lib/env/tool-registry.js`
+- PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx) — `tools/read.js`
+- PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed) — `tools/write.js`
+- PUBLISHES — Agent's current filtered model-facing descriptors — `lib/agent.js`
+- REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them — `lib/agent/tool-context.js`
+- REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx) — `lib/agent/tool-exec.js`
+- REQUIRES — a worked example: an interactive tool (`interactive: true`) using ctx.question.ask — `tools/question.js`
+- REQUIRES — forked worker's serializable ctx: env, sandbox, deadline, onData, agent.folder; question bridge when enabled; no live Agent or IO — `lib/agent/tool-worker.js`
+- RETURNS — every shape a tool's return value may take — `lib/agent/tool-exec.js`
+
+### `Env.toolArguments`
+
+```schema
+{
+  "args": "object matching the tool's inputSchema (parsed JSON)",
+  "context": "Internal Agent dispatch context (in-process); serializable worker ctx with env, sandbox, deadline, onData, agent.folder and optional question bridge",
+}
+```
+
+### `Tool execution context (not a public constructor)`
 
 ```schema
 {
   "agent": "Agent | undefined",
-  "call": "ToolCallContent | undefined",
+  "call": "{callId: string, name: string} | undefined",
   "env": "Env",
+  "io": "IO | undefined",
   "question": "{ ask(questions): Promise<answers> } | null",
+  "resetTimeout": "() => void",
+  "safe": "boolean",
+  "selector": "string | undefined",
+  "statusSet?": "(info: object) => void",
+  "storage": "object | undefined",
+  "trusted": "boolean",
 }
 ```
 
@@ -234,14 +272,22 @@
 ```schema
 {
   "description": "string",
+  "fn?": "(args, context) => result | Promise<result>",
   "inputSchema": "JSON Schema",
   "interactive?": "boolean",
   "onTimeout?": "function(args, context)",
   "safe?": "boolean",
   "sandbox?": "boolean",
   "secret?": "boolean",
+  "trusted?": "boolean",
 }
 ```
+
+## Core tool catalog (live schemas)
+
+Run a Bash command in the working folder; return output and any exit code. Prefer read to inspect folders.
+
+Source: `tools/bash.js`; flags: sandbox
 
 ### `Env.toolDescription.bash.inputSchema`
 
@@ -253,17 +299,19 @@
 }
 ```
 
+Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll: true to replace every occurrence of each oldText. To reverse an edit, pass the edit id returned after it as rollback.
+
+Source: `tools/edit.js`; flags: trusted
+
 ### `Env.toolDescription.edit.inputSchema`
 
 ```schema
-{
-  "ask?": "boolean",
-  "edits?": "array",
-  "matchAll?": "boolean",
-  "path?": "string",
-  "rollback?": "string",
-}
+"unknown"
 ```
+
+List, read, create, replace, or remove scheduled Markdown tasks in an operational project. Pause with enabled: false. New/changed tasks wait for a later scan; removal never cancels running work. Task-local schedules determine admission; the optional daemon is not required. Cannot initialize, enable, disable, repair, run, control a daemon, or access secrets. Unavailable to read-only Agents.
+
+Source: `tools/job-schedule.js`; flags: trusted
 
 ### `Env.toolDescription.job-schedule.inputSchema`
 
@@ -273,9 +321,15 @@
   "enabled?": "boolean",
   "filename?": "string",
   "prompt?": "string",
-  "schedule?": "unknown",
+  "schedule?": {
+    "union": ["string", "unknown"],
+  },
 }
 ```
+
+Manage scratchpad notes (short-term memory). Actions: `set` creates or updates notes ({notes: {title: patch}} — missing notes are created; set a patch to null to delete its note), `get` reads notes ({notes: [title, ...]}; use ["*"] for every note and `only` to return specific fields), `list` shows open notes (done notes are omitted), `remove` deletes notes ({notes: [title, ...]}; ["*"] deletes all), `search` regex-searches titles and fields (case-insensitive; use `field` to search one field and `max` to cap matches). Pass `notes` as an array of titles for get/remove or as a title → patch map for set. Note fields are free JSON — content/summary/type are the convention; add any other fields you need.
+
+Source: `tools/note.js`; flags: safe
 
 ### `Env.toolDescription.note.inputSchema`
 
@@ -285,46 +339,238 @@
   "field?": "string",
   "max?": "number",
   "notes?": ["array", "object"],
-  "only?": "array",
+  "only?": {
+    "array": "string",
+  },
   "pattern?": "string",
 }
 ```
+
+Ask structured user questions with selectable options and custom answers.
+
+Source: `tools/question.js`; flags: safe, sandbox
 
 ### `Env.toolDescription.question.inputSchema`
 
 ```schema
 {
-  "questions": "array",
+  "questions": {
+    "array": {
+      "details?": "string",
+      "header": "string",
+      "multiSelect?": "boolean",
+      "options": {
+        "array": {
+          "description": "string",
+          "label": "string",
+          "preview?": {
+            "union": ["string", {
+              "content": "string",
+              "language?": "string",
+              "title?": "string",
+              "type": ["text", "code"],
+            }],
+          },
+        },
+      },
+      "question": "string",
+    },
+  },
 }
 ```
+
+Read files (cat/head/tail), list/filter folders (ls/find), or search literal text OR regex with context. Ignore rules are opt-in; direct files always bypass them. Negative range indexes count from end. Bounded execution reports skips/incompleteness separately.
+
+Source: `tools/read.js`; flags: safe
 
 ### `Env.toolDescription.read.inputSchema`
 
 ```schema
 {
-  "base64?": "boolean",
-  "binary?": "boolean",
-  "endChar?": "integer",
-  "endLine?": "integer",
-  "glob?": "string",
-  "ignoreCase?": "boolean",
-  "info?": "boolean",
-  "maxMatches?": "integer",
+  "annotate?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "base64?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "binary?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "bytes?": {
+    "union": [{
+      "from?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "to?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "characters?": {
+    "union": [{
+      "from?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "to?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "exclude?": {
+    "union": [{
+      "union": ["string", {
+        "array": "string",
+      }],
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "glob?": {
+    "union": [{
+      "union": ["string", {
+        "array": "string",
+      }],
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "ignore?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "info?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "limit?": {
+    "union": ["integer", "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "lines?": {
+    "union": [{
+      "from?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "last?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "to?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "offset?": {
+    "union": ["integer", "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
   "path": "string",
-  "pattern?": "string",
-  "recursive?": "boolean",
-  "startChar?": "integer",
-  "startLine?": "integer",
+  "recursive?": {
+    "union": ["boolean", "null", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
+  "search?": {
+    "union": [{
+      "after?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "before?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "ignoreCase?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "invert?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "regex?": {
+        "union": ["string", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "text?": {
+        "union": ["string", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+    }, "null", "boolean", {
+      "const": "",
+    }, "array", [0, -1]],
+  },
 }
 ```
+
+List skills or atomically activate named skills. Already active skills succeed without reloading; disk edits apply next session.
+
+Source: `tools/skill.js`; flags: safe
 
 ### `Env.toolDescription.skill.inputSchema`
 
 ```schema
 {
-  "names?": "array",
+  "names?": {
+    "union": ["string", {
+      "array": "string",
+    }],
+  },
 }
 ```
+
+List available skill resources when only name is given; supply path to read a resource (last matching layer wins), or target to save its exact bytes to a new project file. No activation/execution. Safe mode refuses saving.
+
+Source: `tools/skill-resource.js`; flags: safe, trusted
+
+### `Env.toolDescription.skill-resource.inputSchema`
+
+```schema
+{
+  "name": "string",
+  "path?": "string",
+  "target?": "string",
+}
+```
+
+Fetch one HTTP(S) URL as bounded Markdown, text, or JSON text.
+
+Source: `tools/web.js`; flags: safe, trusted
 
 ### `Env.toolDescription.web-fetch.inputSchema`
 
@@ -333,6 +579,10 @@
   "url": "string",
 }
 ```
+
+Search the internet and return bounded Markdown results.
+
+Source: `tools/web.js`; flags: safe, trusted
 
 ### `Env.toolDescription.web-search.inputSchema`
 
@@ -343,31 +593,59 @@
 }
 ```
 
+Close named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
+
+Source: `tools/worker-close.js`; flags: trusted
+
 ### `Env.toolDescription.worker-close.inputSchema`
 
 ```schema
 {
-  "workers": "array",
+  "workers": {
+    "array": "string",
+  },
 }
 ```
+
+Create named workers and send the same self-contained first prompt to each. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+
+Source: `tools/worker-create.js`; flags: trusted
 
 ### `Env.toolDescription.worker-create.inputSchema`
 
 ```schema
 {
   "prompt": "string",
-  "workers": "array",
+  "workers": {
+    "array": {
+      "description?": "string",
+      "model?": "string",
+      "name": "string",
+      "safe?": "boolean",
+      "thinking?": ["none", "low", "medium", "high", "xhigh", "max"],
+    },
+  },
 }
 ```
+
+Send one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+
+Source: `tools/worker-message.js`; flags: trusted
 
 ### `Env.toolDescription.worker-message.inputSchema`
 
 ```schema
 {
   "prompt": "string",
-  "workers": "array",
+  "workers": {
+    "array": "string",
+  },
 }
 ```
+
+Show workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
+
+Source: `tools/worker-status.js`; flags: safe, trusted
 
 ### `Env.toolDescription.worker-status.inputSchema`
 
@@ -378,13 +656,175 @@
 }
 ```
 
+Create or overwrite a project file atomically. Supply content OR read (shared read query), never both. read saves selected text/report or raw binary without a model round-trip; incomplete/budget-failed output leaves destination unchanged.
+
+Source: `tools/write.js`; flags: trusted
+
 ### `Env.toolDescription.write.inputSchema`
 
 ```schema
 {
-  "ask?": "boolean",
-  "content": "string",
+  "ask?": {
+    "union": ["boolean", "null", [-1, 0], "array"],
+  },
+  "content?": {
+    "union": ["string", "null", "boolean", [-1, 0], "array"],
+  },
   "path": "string",
+  "read?": {
+    "union": [{
+      "annotate?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "base64?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "binary?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "bytes?": {
+        "union": [{
+          "from?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "to?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "characters?": {
+        "union": [{
+          "from?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "to?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "exclude?": {
+        "union": [{
+          "union": ["string", {
+            "array": "string",
+          }],
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "glob?": {
+        "union": [{
+          "union": ["string", {
+            "array": "string",
+          }],
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "ignore?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "info?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "limit?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "lines?": {
+        "union": [{
+          "from?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "last?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "to?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "offset?": {
+        "union": ["integer", "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "path": "string",
+      "recursive?": {
+        "union": ["boolean", "null", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+      "search?": {
+        "union": [{
+          "after?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "before?": {
+            "union": ["integer", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "ignoreCase?": {
+            "union": ["boolean", "null", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "invert?": {
+            "union": ["boolean", "null", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "regex?": {
+            "union": ["string", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+          "text?": {
+            "union": ["string", "null", "boolean", {
+              "const": "",
+            }, "array", [0, -1]],
+          },
+        }, "null", "boolean", {
+          "const": "",
+        }, "array", [0, -1]],
+      },
+    }, "null", "boolean", [-1, 0], "array", {
+      "const": "",
+    }],
+  },
 }
 ```
 
@@ -393,7 +833,7 @@
 ```ts
 export const EVENT_CALLBACKS: unknown;
 export const finishAdd: (fn: () => void, { process: proc?: unknown) => () => void;
-export const finishRun: () => unknown;
+export const finishRun: () => void;
 export const finishSignalsArm: (options?: Object) => () => void;
 export const reseat: (agent: object, { id }?: unknown) => object;
 export const TOOL_TIMEOUT_DEFAULT: unknown;
@@ -403,59 +843,76 @@ export const TOOL_TIMEOUT_DEFAULT: unknown;
 
 ```ts
 export class Agent {
-  busy: unknown;
+  get busy(): unknown;
   cancel: () => unknown;
   childCreate: (options?: object) => Agent;
-  children: unknown;
+  get children(): unknown;
   close: () => boolean;
-  closed: unknown;
-  closeMarked: unknown;
+  get closed(): unknown;
+  get closeMarked(): unknown;
   compact: (focus?: string) => Promise<{ok: boolean, before: number, summaryText?: string}>;
   constructor(options?: Object);
+  context: Context;
+  static Context: unknown;
   contextFork: (id: string|false) => {id: string, file: string, save: boolean};
   contextNew: (id: string|false) => {id: string, file: string, save: boolean};
   contextResume: (id: string) => {id: string, file: string, cwd: string|undefined, originMissing: boolean};
-  contextUsage: {used: number, total: number|null, approximate: boolean};
-  description: unknown;
-  descriptionSet: (value: string) => string;
+  get contextUsage(): {used: number, total: number|null, approximate: boolean};
+  get description(): unknown;
+  set description(value: string);
+  env: Env;
+  static Env: unknown;
   static EVENT: unknown;
   static EVENT_CALLBACKS: unknown;
-  folder: unknown;
-  folderSet: (folder: string|undefined|null) => string;
-  ioState: "idle"|"working"|"disconnected";
-  modelSet: (selector: string) => {endpoint: string, model: string};
-  name: unknown;
-  nameSet: (value: string) => string;
+  static finishAdd: (fn: () => void, { process: proc?: unknown) => () => void;
+  static finishRun: () => void;
+  static finishSignalsArm: (options?: Object) => () => void;
+  set folder(folder: string|undefined|null);
+  get folder(): unknown;
+  static IO: unknown;
+  get ioState(): "idle"|"working"|"disconnected";
+  set model(selector: string|undefined);
+  get model(): string|undefined;
+  get name(): unknown;
+  set name(value: string);
+  static NAMES: unknown;
   offEvent: (handle: unknown) => unknown;
   onEvent: (event: number, callback: (payload: object) => void) => number;
-  parent: unknown;
+  get parent(): unknown;
   pathInfo: (path: string, options?: unknown) => Promise<{path:string,isFolder:boolean,mimetype?:string}>;
-  pending: unknown;
+  get pending(): unknown;
   pendingPop: () => Array;
-  planUsage: {label?: string, quotas: Object}|null;
-  policy: Readonly<object>;
+  get planUsage(): {label?: string, quotas: Object}|null;
+  get policy(): Readonly<object>;
   static promptCatalog: (prompts: Map<string, object>, options: unknown) => string;
-  questionSet: (callbacks: unknown) => unknown;
+  set question(callbacks: unknown);
+  get question(): object|null;
+  questionInstall: (bridge: unknown) => unknown;
+  questionTimeoutReset: () => unknown;
+  static reseat: (agent: object, { id }?: unknown) => object;
   run: (options?: Object) => Promise<object|null>;
-  safe: boolean;
-  safeSet: (value: boolean) => boolean;
+  get safe(): boolean;
+  set safe(value: boolean);
   send: (message: object) => Promise<object>;
   sendFile: (fileName: string) => Promise<object>;
+  settings: object|undefined;
   static skillCatalog: (skills: Map<string, object>, options: unknown) => string;
   static skillSection: (skill: unknown) => string;
-  spawnPermission: *;
-  spawnPermissionSet: (value: unknown) => unknown;
-  thinking: string|undefined;
-  thinkingSet: (level: string) => unknown;
-  throttledUntil: unknown;
-  toolCallable: (name: string) => Promise<boolean>;
-  static toolContext: (options?: object) => {question: object|null, env: object, safe: boolean, selector: string|undefined, io: object|undefined, call: object|undefined, agent: object|undefined, storage: object|undefined, resetTimeout: Function};
+  get spawnPermission(): *;
+  set spawnPermission(value: *);
+  get thinking(): string|undefined;
+  set thinking(level: string);
+  get throttledUntil(): unknown;
+  timeout: number|string|undefined;
+  static TOOL_TIMEOUT_DEFAULT: unknown;
   toolMessages: () => Array<{name: string, text: string}>;
   toolMessagesDetect: () => Promise<Array<{name: string, text: string}>>;
   toolMessageSet: (name: string, text: string|null) => string|null;
+  get tools(): Promise<Map<string, object>>;
   toolStorage: (toolname: string) => object;
   toolStorageClear: (toolname: string) => void;
-  usage: {inputTokens: number, outputTokens: number, cost: number};
+  url: string|undefined;
+  get usage(): {inputTokens: number, outputTokens: number, cost: number};
 }
 ```
 
@@ -463,7 +920,10 @@ export class Agent {
 
 ```ts
 export class App {
-
+  static GTUI: unknown;
+  static Markdown: unknown;
+  static TUI: unknown;
+  static Web: unknown;
 }
 ```
 
@@ -472,68 +932,100 @@ export class App {
 ```ts
 export const adoptResumeOrigin: (options?: Object) => string|null;
 export const armCancelSignals: (options?: Object) => () => void;
-export const close: (options?: object) => {agent?: object, session?: {id: string, file?: string}|null};
+export const close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
 export const completeOAuthPaste: (input: string) => boolean;
-export const defaultUrl: (provider: unknown) => unknown;
+export const defaultUrl: (provider: string) => string;
 export const execute: (command: unknown) => unknown;
 export const EXIT: unknown;
 export const exitCodeFor: (terminal: unknown) => number;
-export const formatToolResult: (result: unknown) => unknown;
-export const listEndpointModels: (env: unknown) => unknown;
-export const listEndpoints: (env: unknown) => unknown;
-export const listModelCandidates: (env: unknown) => unknown;
-export const listModels: (env: unknown) => unknown;
-export const loginEndpoint: (env: unknown, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => unknown;
+export const formatToolResult: (result: *) => string;
+export const listEndpointModels: (env: object) => {name: string, models: string[], loginRequired?: boolean}[];
+export const listEndpoints: (env: object) => string[];
+export const listModelCandidates: (env: object) => string[];
+export const listModels: (env: object) => Promise<{name: string, models: string[]}[]>;
+export const loginEndpoint: (env: object, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => Promise<*>;
 export const logoutEndpoint: (env: object, name: string) => {name: string, dynamic: boolean};
-export const oauthPasteOnly: (descriptor: unknown) => unknown;
+export const oauthPasteOnly: (descriptor: object) => boolean;
 export const parseAuthorizationInput: (input: string) => {code?: string, state?: string};
-export const parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown, "max-tool-calls"] }: unknown) => Object} the parsed options (`{help: true;
+export const parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown, "max-tool-calls"] }: unknown) => Object;
 export const readContextFromStdin: () => Promise<Array<object>>;
-export const readLastCombo: (env: unknown) => {endpoint: string, model: string}|null;
+export const readLastCombo: (env: object) => string|null;
 export const readStdin: () => Promise<string>;
-export const refreshOAuthTokens: (descriptor: unknown, refresh: unknown, { signal }?: unknown) => unknown;
-export const renderSettingsTemplate: (env: object) => string;
+export const refreshOAuthTokens: (descriptor: object, refresh: string, { signal }?: unknown) => Promise<object>;
+export const renderSettingsTemplate: (env: unknown) => string;
 export const resolveCliToolArgs: (argv: string[], entry: unknown) => object;
-export const resolveModelCombo: (value: unknown, env: unknown) => unknown;
+export const resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
 export const resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
-export const runLoginWizard: (env: unknown, { input?: unknown, output?: unknown, }?: unknown) => unknown;
-export const runOAuthFlow: (descriptor: object, options?: Object) => Promise<object>;
-export const selectEndpointModel: (env: unknown, args: unknown, { lastUsed?: unknown, log?: unknown) => unknown;
-export const tokensToAuth: (tokens: object, previous?: unknown) => {type: string, access: string, token: string, refresh?: string, expires?: number};
+export const runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
+export const runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
+export const selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
+export const tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
 export const unwrapToolResult: (value: *) => {result: *, system: string[], display: string[]};
-export const usageSummary: (usage: unknown) => unknown;
-export const writeSettingsTemplate: (env: object, { force?: unknown) => string;
+export const usageSummary: (usage: object) => string;
+export const writeSettingsTemplate: (env: unknown, { force?: unknown) => string;
 ```
 
 ### `CLI`
 
 ```ts
 export class CLI {
-
+  static adoptResumeOrigin: (options?: Object) => string|null;
+  static armCancelSignals: (options?: Object) => () => void;
+  static close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
+  static completeOAuthPaste: (input: string) => boolean;
+  static defaultUrl: (provider: string) => string;
+  static execute: (command: unknown) => unknown;
+  static EXIT: unknown;
+  static exitCodeFor: (terminal: unknown) => number;
+  static formatToolResult: (result: *) => string;
+  static listEndpointModels: (env: object) => {name: string, models: string[], loginRequired?: boolean}[];
+  static listEndpoints: (env: object) => string[];
+  static listModelCandidates: (env: object) => string[];
+  static listModels: (env: object) => Promise<{name: string, models: string[]}[]>;
+  static loginEndpoint: (env: object, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => Promise<*>;
+  static logoutEndpoint: (env: object, name: string) => {name: string, dynamic: boolean};
+  static oauthPasteOnly: (descriptor: object) => boolean;
+  static parseAuthorizationInput: (input: string) => {code?: string, state?: string};
+  static parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown, "max-tool-calls"] }: unknown) => Object;
+  static readContextFromStdin: () => Promise<Array<object>>;
+  static readLastCombo: (env: object) => string|null;
+  static readStdin: () => Promise<string>;
+  static refreshOAuthTokens: (descriptor: object, refresh: string, { signal }?: unknown) => Promise<object>;
+  static renderSettingsTemplate: (env: unknown) => string;
+  static resolveCliToolArgs: (argv: string[], entry: unknown) => object;
+  static resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
+  static resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
+  static runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
+  static runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
+  static selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
+  static tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
+  static unwrapToolResult: (value: *) => {result: *, system: string[], display: string[]};
+  static usageSummary: (usage: object) => string;
+  static writeSettingsTemplate: (env: unknown, { force?: unknown) => string;
 }
 ```
 
 ### `Context module`
 
 ```ts
-export const assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object;
+export const assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object<string, function(object): void>;
 export const assemblerCreate: () => {consume: (event: object) => void, message: () => object};
 export const callbacksNormalize: (callbacks?: Object, binding?: Object) => Object;
-export const contentBinary: (path: unknown, buffer: unknown) => unknown;
+export const contentBinary: (path: string, buffer: Uint8Array) => {type: "binary", mimetype: string, filename: string, content: string};
 export const contentIndexer: () => {of: (key: *) => number, next: () => number};
-export const contentText: (text: unknown) => unknown;
+export const contentText: (text: *) => TextContent;
 export const ContentType: unknown;
 export const eventCallbackName: (eventName: string) => string;
-export const eventDispatch: (set: Object, event: object) => unknown;
+export const eventDispatch: (set: Object, event: object) => void;
 export const EventType: unknown;
 export const eventValid: (event: *) => boolean;
 export const eventValidate: (event: *) => object;
 export const FALLBACK_CONTEXT_WINDOWS: unknown;
-export const fallbackContextWindow: (model: string) => number|null;
-export const messageAppend: (context: Array, message: object, { merge?: unknown) => object;
-export const messageAssistant: (content?: unknown) => Message;
-export const messageErrorText: (msg: unknown) => unknown;
-export const messageFile: (path: unknown, buffer: unknown) => unknown;
+export const fallbackContextWindow: (model: *) => number|null;
+export const messageAppend: (context: Array<object>, message: object, { merge?: unknown) => object;
+export const messageAssistant: (content?: Content[]) => Message;
+export const messageErrorText: (msg: *) => string;
+export const messageFile: (path: string, buffer: Uint8Array) => {type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>};
 export const messageHasContent: (msg: *) => boolean;
 export const messageHasError: (msg: *) => boolean;
 export const messageIsRecord: (msg: *) => boolean;
@@ -541,21 +1033,21 @@ export const messageRebuild: (msg: object) => object;
 export const messagesParse: (input: string) => Array<object>;
 export const messagesValid: (ctx: *) => boolean;
 export const messagesValidate: (ctx: *) => Array;
-export const messageSystem: (text: unknown) => Message;
+export const messageSystem: (text: *) => Message;
 export const MessageType: unknown;
-export const messageUser: (text: unknown, metadata?: unknown) => Message;
+export const messageUser: (text: string|Content[]|*, metadata?: *) => Message;
 export const messageValid: (msg: *) => boolean;
 export const messageValidate: (msg: *, at?: string) => object;
 export const MIME_BY_EXTENSION: unknown;
-export const mimeDetect: (options?: object) => unknown;
-export const mimeOf: (block: unknown) => unknown;
+export const mimeDetect: (options?: object) => string;
+export const mimeOf: (block: Object|null|undefined) => string|undefined;
 export const TOKENS_PER_WORD: unknown;
-export const tokensEstimate: (text: string) => unknown;
+export const tokensEstimate: (text: *) => number;
 export const tokensEstimateMessages: (context?: Array) => number;
 export const usageEstimate: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
-export const usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string};
-export const usageSummary: (usage: unknown) => unknown;
-export const wordCount: (text: string) => unknown;
+export const usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string, cost?:number};
+export const usageSummary: (usage: object) => string;
+export const wordCount: (text: *) => number;
 ```
 
 ### `Context`
@@ -563,24 +1055,63 @@ export const wordCount: (text: string) => unknown;
 ```ts
 export class Context {
   append: (message: object, options: unknown) => object;
+  static assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object<string, function(object): void>;
+  static assemblerCreate: () => {consume: (event: object) => void, message: () => object};
   at: (i: number) => object|undefined;
   blockAt: (i: number, j: number) => object;
-  close: () => unknown;
+  static callbacksNormalize: (callbacks?: Object, binding?: Object) => Object;
+  close: () => void;
   constructor(options?: Object);
+  static contentBinary: (path: string, buffer: Uint8Array) => {type: "binary", mimetype: string, filename: string, content: string};
+  static contentIndexer: () => {of: (key: *) => number, next: () => number};
+  static contentText: (text: *) => TextContent;
+  static ContentType: unknown;
+  created: string;
   static deleteAll: (options?: Object) => {deleted: number};
   static deleteById: (options?: Object) => {deleted: number};
+  dir: string|undefined;
   edit: (i: number, message: object) => object;
   editBlock: (i: number, j: number, block: object) => object;
   errorPop: () => object|undefined;
+  static eventCallbackName: (eventName: string) => string;
+  static eventDispatch: (set: Object, event: object) => void;
+  static EventType: unknown;
+  static eventValid: (event: *) => boolean;
+  static eventValidate: (event: *) => object;
+  static FALLBACK_CONTEXT_WINDOWS: unknown;
+  static fallbackContextWindow: (model: *) => number|null;
+  file: string|undefined;
   static fileOf: (options?: object) => string|undefined;
-  flush: () => unknown;
-  flushAsync: () => unknown;
+  flush: () => void;
+  flushAsync: () => Promise<void>;
+  id: string;
   static idAnonymous: (id: *) => boolean;
   static latest: (options?: Object) => string|undefined;
-  length: number;
+  get length(): number;
   static list: (options?: Object) => Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>;
   static listAsync: (options?: object) => Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>>;
+  static messageAppend: (context: Array<object>, message: object, { merge?: unknown) => object;
+  static messageAssistant: (content?: Content[]) => Message;
+  static messageErrorText: (msg: *) => string;
+  static messageFile: (path: string, buffer: Uint8Array) => {type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>};
+  static messageHasContent: (msg: *) => boolean;
+  static messageHasError: (msg: *) => boolean;
+  static messageIsRecord: (msg: *) => boolean;
+  static messageRebuild: (msg: object) => object;
   messages: () => object[];
+  static messagesParse: (input: string) => Array<object>;
+  static messagesValid: (ctx: *) => boolean;
+  static messagesValidate: (ctx: *) => Array;
+  static messageSystem: (text: *) => Message;
+  static MessageType: unknown;
+  static messageUser: (text: string|Content[]|*, metadata?: *) => Message;
+  static messageValid: (msg: *) => boolean;
+  static messageValidate: (msg: *, at?: string) => object;
+  static MIME_BY_EXTENSION: unknown;
+  static mimeDetect: (options?: object) => string;
+  static mimeOf: (block: Object|null|undefined) => string|undefined;
+  name: string|undefined;
+  origin: string;
   static originOf: (options?: Object) => string|undefined;
   pop: () => object|undefined;
   prepend: (messages: object[]) => unknown;
@@ -589,13 +1120,21 @@ export class Context {
   static renameById: (options?: Object) => {id: string, file: string};
   static resume: (options?: Object) => Context;
   rollback: (i: number) => object[];
-  save: boolean;
-  saveSet: (value: boolean) => boolean;
-  settings: object|undefined;
-  settingsSet: (value: object) => unknown;
-  summary: string;
+  get save(): boolean;
+  set save(value: boolean);
+  get settings(): object|undefined;
+  set settings(value: object);
+  get summary(): string;
   toJSON: () => unknown;
+  static TOKENS_PER_WORD: unknown;
+  static tokensEstimate: (text: *) => number;
+  static tokensEstimateMessages: (context?: Array) => number;
   update: (fn: (messages: object[]) => boolean) => boolean;
+  static usageEstimate: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
+  static usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string, cost?:number};
+  static usageSummary: (usage: object) => string;
+  uuid: string;
+  static wordCount: (text: *) => number;
 }
 ```
 
@@ -611,18 +1150,21 @@ export class Env {
   connection: (selector: string, { remember?: unknown) => object;
   constructor(options?: Object);
   static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
+  cwd: string;
   static EVENT: unknown;
   static extend: (plugin: unknown) => {EVENT: Object<string, symbol>, emit: (env: object, event: symbol, payload: object) => void};
-  folders: ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}>;
+  get folders(): ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}>;
   login: (name: string, config: unknown, options: unknown) => Promise<{name: string, endpoint: object, auth: object|undefined, scope: string|undefined, verified: *}>;
   loginPresets: () => object[];
   logout: (name: string) => {name: string, dynamic: boolean};
   models: (secret?: boolean) => Map<string, object>;
-  modelsReady: Promise<void>;
-  offEvent: (handle: unknown) => unknown;
+  get modelsReady(): Promise<void>;
+  offEvent: (handle: number) => boolean;
   onEvent: (event: symbol, callback: (payload: object) => void) => number;
   prompts: () => Map<string, {name: string, description: string, file: string, source: string, body: string}>;
+  get settings(): Object;
   settingsSchema: () => Object} key -> {default, description;
+  skillResource: (name: string, path: string) => Promise<Buffer|string[]>;
   skills: () => Map<string, {name: string, description: string, file: string, source: string, body: string}>;
   systemPrompt: () => string[];
   toolAdd: (name: string, fn: Function, schema: object, { builtin?: unknown, file }?: unknown) => Function;
@@ -638,9 +1180,83 @@ export const effect: unknown;
 export const event: unknown;
 export const host: unknown;
 export const memory: (options?: object) => object;
-export const scrollGlyph: (value: unknown, fallback: unknown) => unknown;
+export const scrollGlyph: (value: *, fallback: *) => *;
 export const terminal: (options?: object) => object;
 export const view: unknown;
+```
+
+### `GTUI.effect`
+
+```ts
+after: (ms: number, message: object) => object;
+cancel: (key: *) => object;
+copy: (text: string, id: *) => object;
+notify: (text: string) => object;
+open: (url: string) => object;
+quit: (code?: number) => object;
+refresh: () => object;
+task: (key: *, run: Function) => object;
+theme: (tokens: object) => object;
+```
+
+### `GTUI.event`
+
+```ts
+copyDone: (payload: object) => object;
+focus: (payload: object) => object;
+inputChange: (payload: object) => object;
+inputSubmit: (payload: object) => object;
+key: (payload: object) => object;
+linkOpen: (payload: object) => object;
+menuCancel: (payload?: object) => object;
+menuSelect: (payload: object) => object;
+paste: (payload: object) => object;
+pointer: (payload: object) => object;
+resize: (payload: object) => object;
+selectionCopy: (payload: object) => object;
+taskDone: (payload: object) => object;
+taskFailed: (payload: object) => object;
+```
+
+### `GTUI.host`
+
+```ts
+memory: (: unknown) => unknown;
+terminal: (: unknown) => unknown;
+```
+
+### `GTUI.memory`
+
+```ts
+_effect: (value: object, send: Function) => void;
+_render: (next: object) => void;
+_restore: () => void;
+_setTheme: (theme: object) => void;
+_start: (listener: Function, binding: Function) => void;
+get effects(): object[];
+flush: () => void;
+get restoreCount(): number;
+send: (message: object) => void;
+snapshot: () => object;
+```
+
+### `GTUI.view`
+
+```ts
+button: (props?: object, label?: *) => object;
+column: (: unknown) => object;
+feed: (props?: object) => object;
+footer: (props?: object, items?: Array<object>) => object|null;
+grid: (: unknown) => object;
+input: (props?: object) => object;
+menu: (props?: object) => object;
+overlay: (: unknown) => object;
+panel: (: unknown) => object;
+row: (: unknown) => object;
+scroll: (: unknown) => object;
+table: (props?: object, rows?: object[]) => object;
+text: (props?: object, content?: *) => object;
+toolbar: (: unknown) => object;
 ```
 
 ### `GTUI`
@@ -654,13 +1270,63 @@ export class GTUI {
 }
 ```
 
+### `index module`
+
+```ts
+export const default: unknown;
+```
+
+### `index.default`
+
+```ts
+Agent: unknown;
+Context: unknown;
+Env: unknown;
+EVENT: unknown;
+EVENT_CALLBACKS: unknown;
+finishAdd: unknown;
+finishRun: unknown;
+finishSignalsArm: unknown;
+IO: unknown;
+Jobs: unknown;
+NAMES: unknown;
+reseat: unknown;
+TOOL_TIMEOUT_DEFAULT: unknown;
+```
+
+### `index_app module`
+
+```ts
+export const default: unknown;
+```
+
+### `index_app.default`
+
+```ts
+Agent: unknown;
+App: unknown;
+CLI: unknown;
+Context: unknown;
+Env: unknown;
+EVENT: unknown;
+EVENT_CALLBACKS: unknown;
+finishAdd: unknown;
+finishRun: unknown;
+finishSignalsArm: unknown;
+IO: unknown;
+Jobs: unknown;
+NAMES: unknown;
+reseat: unknown;
+TOOL_TIMEOUT_DEFAULT: unknown;
+```
+
 ### `IO module`
 
 ```ts
 export const Context: unknown;
 export const Env: unknown;
 export const THINKING_LEVELS: unknown;
-export const timeoutsResolve: (options?: Object) => number;
+export const timeoutsResolve: (options?: object) => unknown;
 ```
 
 ### `IO`
@@ -668,20 +1334,36 @@ export const timeoutsResolve: (options?: Object) => number;
 ```ts
 export class IO {
   authSet: (auth: object, options: unknown) => object;
-  close: () => unknown;
-  connectionCreate: (options?: Object) => object;
+  close: () => Promise<void>;
+  connectionCreate: (options?: object) => object;
+  connectTimeout: number;
   constructor(options?: Object);
-  contextUsage: {used: number|undefined, total: number|undefined};
-  contextUsageSet: (options?: object) => {used: number|undefined, total: number|undefined};
+  static Context: unknown;
+  get contextUsage(): {used: number|undefined, total: number|undefined};
+  set contextUsage(options?: object);
+  env: Env;
+  static Env: unknown;
   fetch: (url: string|URL, init?: object, { deadline: unknown, connectTimeout }?: unknown) => Promise<Response>;
-  modelCurrent: string|undefined;
-  planUsage: {label?: string, quotas: Object}|null;
-  planUsageSet: (options?: object) => {label?: string, quotas: Object}|null;
-  requestSignal: AbortSignal|undefined;
-  settings: object;
-  settingsSet: (key: string, value: *) => unknown;
-  state: unknown;
-  tools: () => Array} the request's publishable tool catalog ([{name, ...schema;
+  get model(): string;
+  set model(selector: unknown);
+  get modelCurrent(): string;
+  name: string;
+  get planUsage(): {label?: string, quotas: Object}|null;
+  set planUsage(options?: object);
+  protocol: string;
+  Provider: Function;
+  provider: object;
+  static ProviderError: unknown;
+  get requestSignal(): AbortSignal|undefined;
+  get settings(): object;
+  settingsSet: (key: string, value: *) => void;
+  get state(): "idle"|"sending"|"reading"|"closed";
+  stuckTimeout: number;
+  static THINKING_LEVELS: unknown;
+  timeout: number;
+  static timeoutsResolve: (options?: object) => unknown;
+  tools: () => Array<{name: string, ...Object}>;
+  url: string;
   write: (context: Array, callbacks?: Object, options?: Object) => Promise<object>;
 }
 ```
@@ -697,20 +1379,27 @@ export class ProviderError {
 ### `Jobs module`
 
 ```ts
-export const daemonRun: (projectRoot: string, options?: unknown) => unknown;
-export const disable: (projectRoot: unknown, options?: unknown) => unknown;
-export const init: (projectRoot: unknown, settings?: unknown, options?: unknown) => unknown;
-export const run: (projectRoot: unknown, options?: unknown) => Promise<{outcomes: {id: string, outcome: string}[], errors: object[], warnings: object[], log?: string}>;
-export const schedule: (root: unknown, command: unknown, options?: unknown) => unknown;
-export const status: (projectRoot: unknown, options?: unknown) => unknown;
-export const validate: (root: unknown, options?: unknown) => unknown;
+export const daemonRun: (projectRoot: string, options?: object) => Promise<void>;
+export const disable: (projectRoot: string, options?: object) => Promise<{enabled: boolean}>;
+export const init: (projectRoot: string, settings?: object, options?: object) => Promise<{enabled: boolean}>;
+export const run: (projectRoot: string, options?: object) => Promise<object>;
+export const schedule: (root: string, command: object, options?: object) => Promise<object>;
+export const status: (projectRoot: string, options?: object) => Promise<object>;
+export const validate: (root: string, options?: object) => Promise<object>;
 ```
 
 ### `Jobs`
 
 ```ts
 export class Jobs {
-
+  static daemonRun: (projectRoot: string, options?: object) => Promise<void>;
+  static disable: (projectRoot: string, options?: object) => Promise<{enabled: boolean}>;
+  static init: (projectRoot: string, settings?: object, options?: object) => Promise<{enabled: boolean}>;
+  static JobsError: unknown;
+  static run: (projectRoot: string, options?: object) => Promise<object>;
+  static schedule: (root: string, command: object, options?: object) => Promise<object>;
+  static status: (projectRoot: string, options?: object) => Promise<object>;
+  static validate: (root: string, options?: object) => Promise<object>;
 }
 ```
 
@@ -718,7 +1407,7 @@ export class Jobs {
 
 ```ts
 export class JobsError {
-  constructor(code: unknown, message: unknown, details?: unknown);
+  constructor(code: string, message: string, details?: object);
 }
 ```
 
@@ -728,15 +1417,15 @@ export class JobsError {
 export const classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
 export const lexMarkdown: (text: string) => Promise<Array<object>>;
 export const markdownEngine: () => Promise<"marked"|"builtin">;
-export const mathBlockAt: (lines: unknown, start: unknown) => unknown;
-export const mathText: (node: unknown) => unknown;
-export const parseGitDiff: (text: unknown) => unknown;
-export const parseInline: (text: string) => Array<{type: string, text: string, href?: string}>;
-export const parseMath: (source: unknown) => unknown;
+export const mathBlockAt: (lines: string[], start: number) => {end: number, text: string, source: string, tree: object}|null;
+export const mathText: (node: object|null|undefined) => string;
+export const parseGitDiff: (text: string) => object|null;
+export const parseInline: (text: string|null|undefined) => Array<{type: string, text: string, href?: string, source?: string, tree?: object}>;
+export const parseMath: (source: *) => {type: string, [key: string]: any};
 export const renderInline: (text: string, renderer?: object) => string;
 export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
 export const sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
-export const walkTokens: (tokens: Array<object>, renderer?: object) => string;
+export const walkTokens: (tokens: Array<object>|null|undefined, renderer?: object) => string;
 ```
 
 ### `BashSanitizer`
@@ -744,7 +1433,7 @@ export const walkTokens: (tokens: Array<object>, renderer?: object) => string;
 ```ts
 export class BashSanitizer {
   constructor(options?: object);
-  end: () => unknown;
+  end: () => string;
   push: (chunk: string) => string;
 }
 ```
@@ -753,7 +1442,19 @@ export class BashSanitizer {
 
 ```ts
 export class Markdown {
-
+  static BashSanitizer: unknown;
+  static classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
+  static lexMarkdown: (text: string) => Promise<Array<object>>;
+  static markdownEngine: () => Promise<"marked"|"builtin">;
+  static mathBlockAt: (lines: string[], start: number) => {end: number, text: string, source: string, tree: object}|null;
+  static mathText: (node: object|null|undefined) => string;
+  static parseGitDiff: (text: string) => object|null;
+  static parseInline: (text: string|null|undefined) => Array<{type: string, text: string, href?: string, source?: string, tree?: object}>;
+  static parseMath: (source: *) => {type: string, [key: string]: any};
+  static renderInline: (text: string, renderer?: object) => string;
+  static renderMarkdown: (text: string, renderer?: object) => Promise<string>;
+  static sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
+  static walkTokens: (tokens: Array<object>|null|undefined, renderer?: object) => string;
 }
 ```
 
@@ -764,9 +1465,9 @@ export class Sandbox {
   static osAvailable: () => boolean;
   static osKind: () => "seatbelt"|"bwrap"|"delegated"|null;
   static osWrap: (file: string, args: string[], cwd: string, workingDirectory: string) => [string, string[]];
-  static processStop: (child: unknown, options: unknown) => unknown;
-  static scope: () => unknown;
-  static spawn: (file: unknown, args: unknown, options: unknown) => unknown;
+  static processStop: (child: import("node:child_process").ChildProcess, options: unknown) => Promise<void>;
+  static scope: () => ProcessScope;
+  static spawn: (file: string, args: string[], options: import("node:child_process").SpawnOptions) => import("node:child_process").ChildProcess;
 }
 ```
 
@@ -774,7 +1475,7 @@ export class Sandbox {
 
 ```ts
 export const close: (runtime: unknown) => {agent?: object, session?: {id: string, file?: string}|null};
-export const createLineRepl: (options?: object) => unknown;
+export const createLineRepl: (options?: object) => object;
 export const createRepl: (options?: Object) => {start: () => Promise<void>, close: () => void};
 export const run: (state: object) => Promise<{code: number, agent: object, session: object|null}>;
 export const TUI_ENGINES: unknown;
@@ -784,7 +1485,12 @@ export const TUI_ENGINES: unknown;
 
 ```ts
 export class TUI {
-
+  static close: (runtime: unknown) => {agent?: object, session?: {id: string, file?: string}|null};
+  static createApp: unknown;
+  static createLineRepl: (options?: object) => object;
+  static createRepl: (options?: Object) => {start: () => Promise<void>, close: () => void};
+  static run: (state: object) => Promise<{code: number, agent: object, session: object|null}>;
+  static TUI_ENGINES: unknown;
 }
 ```
 
@@ -792,7 +1498,11 @@ export class TUI {
 
 ```ts
 export class Web {
-
+  static AgentSession: unknown;
+  static createWebServer: unknown;
+  static MAX_WS_PAYLOAD_LENGTH: unknown;
+  static parseClientMessage: unknown;
+  static serve: unknown;
 }
 ```
 

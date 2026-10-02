@@ -1,68 +1,53 @@
-/**
- * tools/skill.js — the `skill` tool: load domain skills into the
- * conversation from Env's accumulated package/settings/configured/
- * environment/project skill roots — env.skills(), lib/env/catalogs.js).
- * The calling Env (context.env) answers; a forked worker without one
- * builds a throwaway Env purely to read settings and resolve roots.
- * Skills are re-scanned from disk on every call (no caching), so a
- * skill added mid-session shows up without a restart.
- *
- * The answer stays BRIEF by design: loading returns "Loaded skills:
- * <names>." (naming any requested names still unavailable, or
- * refusing outright when none of them are), and with no names the
- * skill catalog itself. The skill PAYLOADS never bloat the tool
- * result — they are returned as { result, system }, and the harness
- * appends them as a system message right after the tool result
- * (lib/agent.js), before any queued user messages.
- *
- * Read-only (safe: true): skills are reference material — safe-mode
- * Agents may load them.
- */
-
+/** Skill activation: atomic validation, context-idempotent injection, no disk writes. */
 import Env from "../lib/env.js";
 import Agent from "../lib/agent.js";
 
+function normalizeSkillNames(names) {
+  if (names === undefined) return [];
+  const list = typeof names === "string" ? [names] : names;
+  if (!Array.isArray(list) || list.some((name) => typeof name !== "string")) {
+    throw new TypeError("skill: names must be a string or an array of strings");
+  }
+  return [...new Set(list.map((name) => name.trim()).filter(Boolean))];
+}
+
+function activation(env, names, context) {
+  const active = context?.loadedSkills?.() ?? new Set();
+  const pending = names.filter((name) => !active.has(name));
+  const skills = pending.length || !names.length ? env.skills() : new Map();
+  if (!names.length) return Agent.skillCatalog(skills).trimEnd();
+  const unknown = pending.filter((name) => !skills.has(name));
+  if (unknown.length) throw new Error(`Unknown skills: ${unknown.join(", ")}. Call skill without names to list available skills.`);
+  return {
+    result: `Loaded skills: ${names.join(", ")}.`,
+    system: pending.map((name) => Agent.skillSection(skills.get(name))),
+  };
+}
+
 /**
- * Load skills into the conversation, or list the catalog.
- * @param {Object} [args]
- * @param {string[]} [args.names] - skills to load; omitted/empty lists the catalog
- * @returns {Promise<string|{result: string, system: string[]}>}
+ * List or atomically activate named skills. Active names succeed without reinjection,
+ * even after disk edits; edits apply in the next context. No context means no active state.
+ * @param {{names?: string|string[]}} args Requested names; trim, preserve internal spaces, deduplicate.
+ * @param {object} context Agent capabilities (Env and context-local loadedSkills query).
+ * @returns {Promise<string|{result: string, system: string[]}>} Catalog or activation payload.
+ * @throws {Error} Invalid arguments/unknown names/registry failure; no instructions are injected.
  */
 export async function skill({ names } = {}, context) {
-  const env = context?.env ?? new Env(); // cheap: settings scan only, no providers/tools load
-  const skills = env.skills();
-  const list = Array.isArray(names) ? names.map(String).filter((n) => n.trim() !== "") : [];
-  if (list.length === 0) {
-    return Agent.skillCatalog(skills).trimEnd(); // the skill list IS the answer
-  }
-  const unknown = list.filter((name) => !skills.has(name));
-  const bodies = list.filter((name) => skills.has(name)).map((name) => Agent.skillSection(skills.get(name)));
-  if (bodies.length === 0) return "No requested skills are available. Call skill with no names to list available skills, then try again.";
-  const loaded = list.filter((n) => !unknown.includes(n));
-  const result = unknown.length > 0
-    ? `Loaded skills: ${loaded.join(", ")}. Call skill with no names to find the unavailable skills.`
-    : `Loaded skills: ${loaded.join(", ")}.`;
-  // Each skill payload joins the conversation as its own system
-  // message; the answer itself stays one line.
-  return { result, system: bodies };
+  const list = normalizeSkillNames(names);
+  const env = context?.env ?? new Env();
+  try { return activation(env, list, context); }
+  finally { if (!context?.env) env.close(); }
 }
 
 export function toolDescription() {
-  return {
-    skill: {
-      // READ-ONLY: published as safe (safe-mode Agents may load skills)
-      safe: true,
-      description: "List available skills or load skills for the current task.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          names: {
-            type: "array",
-            items: { type: "string" },
-            description: "skill names to load (one or more); omit to list the catalog",
-          },
-        },
+  return { skill: {
+    safe: true,
+    description: "List skills or atomically activate named skills. Already active skills succeed without reloading; disk edits apply next session.",
+    inputSchema: { type: "object", properties: {
+      names: {
+        anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        description: "One skill name or an array; trim surrounding whitespace, preserve internal spaces, deduplicate. Omit/empty lists the catalog.",
       },
-    },
-  };
+    } },
+  } };
 }

@@ -1,6 +1,6 @@
 // test/base-env-skills-prompts.test.js — proof for Env's skill/prompt
 // discovery: accumulated roots (package folder + settings key + env var,
-// ALL of them, never just one), skills EXTEND same-named entries across
+// ALL of them, never just one), skills OVERRIDE same-named entries across
 // roots while prompts OVERRIDE, and everything is read fresh from disk.
 import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
@@ -95,7 +95,7 @@ describe("Env skill roots — accumulative layers", () => {
   });
 });
 
-describe("env.skills() — skills EXTEND across roots", () => {
+describe("env.skills() — skills OVERRIDE across roots", () => {
   test("a name-sorted Map of {name, description, file, source, body}", () => {
     skillFile(join(dir, "skills"), "beta", 'name: beta\ndescription: "second"', "beta body");
     skillFile(join(dir, "skills"), "alpha", 'name: alpha\ndescription: "first"', "alpha body");
@@ -107,14 +107,13 @@ describe("env.skills() — skills EXTEND across roots", () => {
     expect(Object.isFrozen(skills.get("alpha"))).toBe(true);
   });
 
-  test("a same-named skill in a later root EXTENDS (concatenates), never replaces", () => {
+  test("a same-named skill in a later root overrides; self references explicitly extend", () => {
     skillFile(join(dir, "skills"), "core", "name: core\ndescription: base", "base rules");
     skillFile(extra, "core", "name: core\ndescription: extra", "extra rules");
     const env = new Env({ dir, settings: { skills: [extra] } });
-    const { body } = env.skills().get("core");
-    expect(body).toContain("base rules");
-    expect(body).toContain("extra rules");
-    expect(body.indexOf("base rules")).toBeLessThan(body.indexOf("extra rules"));
+    expect(env.skills().get("core").body).toBe("extra rules");
+    skillFile(extra, "core", "name: core\ndescription: extra", "{{core}}\nextra rules");
+    expect(env.skills().get("core").body).toBe("base rules\nextra rules");
   });
 
   test("skillDirs replaces the accumulated layers (embedders, tests)", () => {

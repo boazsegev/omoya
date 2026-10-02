@@ -53,13 +53,13 @@ const catalog = (c) => openaiModels.call(c.constructor, statics(c));
 describe("OpenAI Responses reasoning", () => {
   test("requests a streamed reasoning summary at the native effort IO mapped", () => {
     const [, body] = context2msg.call(conn({}), [{ type: 2, content: [{ type: "text", text: "hi" }] }], {
-      settings: { think: "high" }, tools: () => [], modelCurrent: "gpt-5.5",
+      settings: { think: "high" }, tools: () => [], modelCurrent: "test/gpt-5.5",
     });
     expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
   });
 
   const reasoningOf = (settings, model = "gpt-x") => context2msg.call(conn({}), [{ type: 2, content: [{ type: "text", text: "hi" }] }], {
-    settings, tools: () => [], modelCurrent: model,
+    settings, tools: () => [], modelCurrent: `test/${model}`,
   })[1].reasoning;
 
   test("no effort leaves the model default (the summary is still requested)", () => {
@@ -101,7 +101,7 @@ describe("OpenAI Responses reasoning", () => {
   test("passes the final text to the normalized text end event", () => {
     const events = msg2events({
       type: "response.output_text.done", output_index: 0, text: "final answer",
-    }, {}, { contextUsageSet() {} });
+    }, {}, { set contextUsage(value) {} });
     expect(events).toEqual([{ type: "text_end", contentIndex: 0, text: "final answer" }]);
   });
 });
@@ -176,7 +176,7 @@ describe("reportPlanUsage: the Codex backend has no rate-limit response headers 
     const aiio = {
       settings: { auth: { token } },
       reports: [],
-      planUsageSet(report) { this.reports.push(report); },
+      set planUsage(report) { this.reports.push(report); },
     };
     return { conn: { baseUrl: "https://chatgpt.com/backend-api/codex", aiio }, aiio };
   }
@@ -328,7 +328,7 @@ describe("the chatgpt-account-id header", () => {
 
 describe("the codex backend request shape", () => {
   const msg = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-  const io = { settings: { auth: { token: freshJwt() } }, tools: () => [], modelCurrent: "gpt-5.5" };
+  const io = { settings: { auth: { token: freshJwt() } }, tools: () => [], modelCurrent: "test/gpt-5.5" };
   test("codex demands store: false, present instructions, and the experimental beta header", () => {
     const [headers, body] = context2msg.call(conn({ verify: "jwt" }), msg, io);
     expect(body.store).toBe(false);

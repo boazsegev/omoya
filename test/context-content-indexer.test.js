@@ -33,7 +33,7 @@ describe("text that resumes after a tool call is its own block, in order", () =>
   ];
 
   test("kimi: chat-completions chunks (the call also closes on ITS block, so its arguments parse)", () => {
-    const provider = new KimiProvider("https://api.moonshot.ai/v1", { settings: {}, modelCurrent: "m" });
+    const provider = new KimiProvider("https://api.moonshot.ai/v1", { settings: {}, modelCurrent: "test/m" });
     const state = {};
     const events = [
       { choices: [{ delta: { content: "before" } }] },
@@ -46,7 +46,7 @@ describe("text that resumes after a tool call is its own block, in order", () =>
   });
 
   test("ollama: complete message chunks", () => {
-    const provider = new OllamaProvider("http://localhost:11434", { settings: {}, modelCurrent: "m" });
+    const provider = new OllamaProvider("http://localhost:11434", { settings: {}, modelCurrent: "test/m" });
     const state = {};
     const events = [
       { message: { content: "before" } },

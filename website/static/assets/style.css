@@ -337,7 +337,13 @@ main { width: var(--page-w); margin: auto; padding: 3rem 0 5rem; }
 .api-nav .current > a { border-left-color: var(--accent); }
 .api-sections { margin: .15rem 0 .5rem; }
 .api-sections a { font-size: .76rem; padding: .14rem .6rem .14rem 1.15rem; }
-.api-sections ul a { font-size: .72rem; padding-left: 1.85rem; opacity: .85; }
+/* An object group (a class/namespace and its members): the header reads as a
+   group, its members are clearly nested beneath it — so a class never looks
+   like it swallows the plain functions that follow it. */
+.api-sections .api-group > a { color: var(--ink); font-weight: 600; }
+.api-sections .api-group > a::before { content: "▸ "; color: var(--accent); font-weight: 400; }
+.api-sections .api-group ul { margin: .05rem 0 .3rem; padding-left: .55rem; border-left: 1px solid var(--line); }
+.api-sections ul a { font-size: .72rem; padding-left: 1.5rem; opacity: .9; }
 .api-sections a.current { color: var(--accent); font-weight: 700; border-left-color: var(--accent); }
 .api-sections,
 .api-sections ul { animation: nav-grow var(--motion) var(--ease); transform-origin: top left; }
@@ -610,8 +616,16 @@ blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--wa
   /* In the horizontal layout the sub-list becomes a second row of chips. */
   .api-nav li.current { flex-basis: 100%; }
   .api-sections { display: flex; flex-wrap: wrap; gap: .15rem .25rem; }
-  .api-sections ul { display: contents; }
   .api-sections a { border-left: 0; border-bottom: 0; padding: .1rem .4rem; }
+  /* Keep each object group a block: display:contents would splice the class
+     name and its members into one undifferentiated list (the reported
+     glitch). A group takes a full row, its members wrap as chips below the
+     header, indented and bordered so membership stays visible. */
+  .api-sections .api-group { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .15rem .25rem; align-items: center; }
+  .api-sections .api-group > a { flex-basis: 100%; }
+  .api-sections .api-group > a::before { content: none; }
+  .api-sections .api-group ul { display: flex; flex-wrap: wrap; gap: .15rem .25rem; padding-left: .85rem; border-left: 1px solid var(--line); }
+  .api-sections .api-group ul a { opacity: .9; padding-left: .4rem; }
   .why { grid-template-columns: 1fr; gap: 2rem; }
   .terminal-body li { grid-template-columns: 1.1em minmax(0, 1fr); }
   .terminal-body .note { grid-column: 2; margin: -.3rem 0 .4rem; font-size: .8rem; line-height: 1.5; }

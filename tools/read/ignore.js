@@ -1,31 +1,14 @@
-/**
- * tools/read/ignore.js — INTERNAL helper of the `read` tool (never a
- * tool itself: the scan is not recursive). Decides which files the
- * read tool treats as PROJECT-IRRELEVANT: they never appear in folder
- * LISTINGS and never match in SEARCHES — but a file asked for BY NAME
- * still reads normally (relevance, never an access wall):
- *
- *   1. well-known system / junk names (an exact basename set, matched
- *      against EVERY path segment — a `.git` folder anywhere hides
- *      everything under it from listings and searches);
- *   2. files matched by a `.ignore` file — same rule syntax as
- *      `.gitignore`, but ONLY `.ignore` is consulted (`.gitignore`
- *      stays a git concern: the tool must not hide a tracked file).
- *
- * `.ignore` rules are collected from every visited folder while a
- * listing walks down (nested `.ignore` files refine deeper paths,
- * a `!` rule re-includes what an outer rule excluded) and, for a
- * direct file read, from every folder from the read boundary down to
- * the file. Matching is gitignore-like: blank lines and `#` comments
- * are skipped, `dir/` matches folders only, a pattern without `/`
- * matches any basename, a leading `/` anchors the pattern to the
- * `.ignore` file's own folder, and `*`, `?`, `**`, `{a,b}` globs
- * apply. A pattern may match a DIRECTORY anywhere above the path —
- * excluding `build/` hides `build/x/y.js` too.
+/** Opt-in discovery filtering. Git publication exclusions are not relevance/access policy.
+ * At each directory .gitignore precedes .ignore; deeper rules refine ancestors.
+ * Direct files never load these rules. Ignored directories are pruned, like Git.
+ * Auxiliary files use guarded no-follow regular-file opens and finite reads.
  */
 
-import { readFile } from "node:fs/promises";
-import { matchesGlob } from "./glob.js";
+import { toolRevision } from "../../lib/tool-runtime.js";
+const revision = toolRevision();
+import { join, relative, sep } from "node:path";
+const { matchesGlob } = await import(`./glob.js?revision=${revision}`);
+const { createReadState, openReadFile, readChunk, checkReadState } = await import(`./fs.js?revision=${revision}`);
 
 /**
  * Well-known system / junk names — never listed, never searched (a
@@ -52,10 +35,15 @@ export const SYSTEM_FILES = new Set([
 export function parseIgnore(content, base) {
   const rules = [];
   for (const raw of content.split("\n")) {
-    let line = raw.trimEnd(); // trailing spaces/CR are never meaningful
+    if (rules.length >= 4096) throw new Error("Ignore rules exceed 4096 per directory");
+    if (raw.length > 4096) throw new Error("Ignore pattern exceeds 4096 characters");
+    let line = raw.replace(/\r$/, "");
+    while (line.endsWith(" ") && !line.endsWith("\\ ")) line = line.slice(0, -1);
     if (line === "" || line.startsWith("#")) continue;
+    const escapedPrefix = line.startsWith("\\#") || line.startsWith("\\!");
+    if (escapedPrefix) line = line.slice(1);
     let negated = false;
-    if (line.startsWith("!")) { negated = true; line = line.slice(1); }
+    if (!escapedPrefix && line.startsWith("!")) { negated = true; line = line.slice(1); }
     if (line === "") continue;
     let dirOnly = false;
     if (line.endsWith("/")) { dirOnly = true; line = line.slice(0, -1); }
@@ -63,7 +51,7 @@ export function parseIgnore(content, base) {
     if (line.startsWith("/")) { anchored = true; line = line.slice(1); }
     else if (line.includes("/")) anchored = true; // git: any slash anchors
     if (line === "") continue;
-    rules.push({ negated, dirOnly, anchored, pattern: line });
+    rules.push({ negated, dirOnly, anchored, pattern: line.replace(/\\ /g, " ") });
   }
   return { base, rules };
 }
@@ -88,12 +76,12 @@ function ruleMatches(rule, base, rel, isDir) {
     // (git's leading "/"), not a whole-path match: "/deep-root.txt"
     // names only the root file, never "sub/deep-root.txt"
     if (!rule.pattern.includes("/")) {
-      if (sub.includes("/")) return false;
-      return matchesGlob(sub, rule.pattern) && (!rule.dirOnly || isDir);
+      const first = sub.split("/")[0];
+      return matchesGlob(first, rule.pattern) && (!rule.dirOnly || isDir || sub.includes("/"));
     }
     if (matchesGlob(sub, rule.pattern)) return !rule.dirOnly || isDir;
-    // only a directory pattern also covers everything UNDER it
-    return rule.dirOnly && ancestors.some((folder) => matchesGlob(folder, rule.pattern));
+    // A matched ancestor is a directory even without a trailing slash in the pattern.
+    return ancestors.some((folder) => matchesGlob(folder, rule.pattern));
   }
   // no slash: the pattern matches any BASENAME below the .ignore
   // folder; for dirOnly, only ancestor segments (folders) count
@@ -107,13 +95,14 @@ function ruleMatches(rule, base, rel, isDir) {
  * @param {Array<IgnoreFile>} stack
  * @param {string} rel - path relative to the read root (files; folders end with "/")
  */
-export function isIgnored(stack, rel) {
+export function isIgnored(stack, rel, state) {
   const isDir = rel.endsWith("/");
   const path = isDir ? rel.slice(0, -1) : rel;
   let ignored = false;
   for (const file of stack) {
     const base = file.base === "" ? "" : `${file.base}/`;
     for (const rule of file.rules) {
+      if (state) checkReadState(state);
       if (ruleMatches(rule, base, path, isDir)) ignored = !rule.negated;
     }
   }
@@ -129,35 +118,36 @@ export function isSystemFile(rel) {
   return rel.split("/").some((part) => SYSTEM_FILES.has(part));
 }
 
-/** Load the `.ignore` of ONE folder, if it exists. */
-export async function loadIgnore(absFolder, relBase) {
-  try {
-    const content = await readFile(`${absFolder}/.ignore`, "utf8");
-    return parseIgnore(content, relBase);
-  } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
-    throw error;
+/** Opt-in ignore files: Git publication rules first, tool rules second. All auxiliary opens guarded. */
+export async function loadIgnore(absFolder, relBase, state = createReadState()) {
+  const rules = [];
+  for (const name of [".gitignore", ".ignore"]) {
+    let opened;
+    try {
+      opened = await openReadFile(join(absFolder, name), state);
+      if (opened.metadata.size > 256 * 1024) throw new Error("Ignore file exceeds 256 KiB limit");
+      const buffer = await readChunk(opened.handle, 0, opened.metadata.size, state);
+      rules.push(...parseIgnore(buffer.toString("utf8"), relBase).rules);
+      if (rules.length > 4096) throw new Error("Ignore rules exceed 4096 per directory");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    } finally { await opened?.handle.close(); }
   }
+  return rules.length ? { base: relBase, rules } : null;
 }
 
-/**
- * The `.ignore` stack of every folder from the read boundary down to
- * `rel`'s folder — the ancestors a DIRECT file read must consult even
- * though no listing walked through them.
- * @param {string} boundary - absolute read boundary (env cwd)
- * @param {string} absFile - absolute path of the file being read
- */
-export async function ancestorIgnores(boundary, absFile) {
-  if (!absFile.startsWith(boundary)) return [];
-  const chain = absFile.slice(boundary.length).split("/").filter(Boolean).slice(0, -1);
+/** Ancestor rules up to, but excluding, the explicitly selected directory. */
+export async function ancestorIgnores(boundary, directory, state = createReadState()) {
+  const rel = relative(boundary, directory);
+  if (rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("Ignore ancestry escapes project boundary");
   const stack = [];
   let abs = boundary;
-  let rel = "";
-  for (const folder of chain) {
-    const found = await loadIgnore(abs, rel);
+  let base = "";
+  for (const part of rel.split(sep).filter(Boolean)) {
+    const found = await loadIgnore(abs, base, state);
     if (found) stack.push(found);
-    abs = `${abs}/${folder}`;
-    rel = rel === "" ? folder : `${rel}/${folder}`;
+    abs = join(abs, part);
+    base = base ? `${base}/${part}` : part;
   }
-  return stack.concat((await loadIgnore(abs, rel)) ?? []);
+  return stack;
 }

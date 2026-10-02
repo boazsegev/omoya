@@ -10,7 +10,7 @@ import { USER } from "./fakes.js";
 import { Context } from "../lib/context.js";
 
 function stubAgent(context = []) {
-  return { context: new Context({ id: "stub", messages: context }), pending: [], model: "test/model", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "high" };
+  return { context: new Context({ id: "stub", messages: context }), pending: [], model: "test/model", questionInstall() { return () => {}; }, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "high" };
 }
 const plain = (bytes) => bytes.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 

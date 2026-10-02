@@ -45,13 +45,10 @@ function fail(message) {
 // and the tool registry — the returned environment is ready for an Agent.
 const env = await Agent.Env.create();
 
-const endpoint = MODEL_SELECTOR.split("/")[0];
-if (!env.endpoints[endpoint]) {
-  fail(
-    `no endpoint named "${endpoint}" is configured. ` +
-    `Run "omoya --login" (or edit your user settings "providers" table), ` +
-    `or change MODEL_SELECTOR to one of: ${Object.keys(env.endpoints).join(", ") || "(none configured)"}.`,
-  );
+try {
+  env.connection(MODEL_SELECTOR, { remember: false });
+} catch (error) {
+  fail(`${error.message}. Run "omoya --login" or choose a model from: ${[...env.models().keys()].join(", ") || "(none configured)"}.`);
 }
 
 // --- Agent ------------------------------------------------------------------

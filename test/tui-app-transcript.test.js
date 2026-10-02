@@ -56,10 +56,31 @@ function assertOffsetsReconstruct(raw, rows) {
     const text = rows.map((row) => row.content.map((span) => span.text).join(""));
     expect(text.slice(0, 2)).toEqual(["☑ done", "☐ todo"]);
     expect(rows[0].content[0].source).toEqual({ start: 0, end: 5 }); // the box copies back as "- [x]"
-    expect(text.slice(3)).toEqual(["╭─ js", "│ const a = 1;", "╰─"]);
+    expect(text.slice(3)).toEqual(["╭─ js", "│ const a = 1;", "╰─ copy"]);
     assertOffsetsReconstruct(raw, [rows[0], rows[1]].map((row) => ({ content: row.content.slice(1) })).concat(rows.slice(3)));
     const framed = rows.slice(3).flatMap((row) => row.content).filter((span) => /[╭│╰]/.test(span.text));
     expect(framed.every((span) => span.source === undefined)).toBe(true);
+  });
+
+  test("each closed or unfinished fence exposes a mouse action for only its code, including blank lines", () => {
+    const raw = "```js\nfirst\n\n```\n~~~txt\nsecond\n~~~\n```\nlast";
+    const block = { type: "text", text: raw, group: "m", section: "Message", ordinal: 0 };
+    const node = transcriptItems([block], 0, { previews: false })[0].node;
+    const actions = node.children.flatMap((row) => row.content ?? []).filter((span) => span.action);
+    expect(actions.map((span) => span.text)).toEqual(["copy", "copy", "copy"]);
+    expect(actions.map(({ action }) => {
+      const [, start, end] = /:(\d+):(\d+)$/.exec(action);
+      return raw.slice(Number(start), Number(end));
+    })).toEqual(["first\n", "second", "last"]);
+    expect(actions.every((span) => span.source === undefined)).toBe(true);
+    const snapshot = layoutView(node, { width: 40, height: 12 }).snapshot;
+    expect(snapshot.lines.some((line) => line.includes("╰─ copy"))).toBe(true);
+  });
+
+  test("an empty fenced block copies an empty body and an omitted preview does not expose a hidden footer", () => {
+    const raw = "```\n```";
+    expect(markdownRows(raw)[1].content[1].copyRange).toEqual({ start: 4, end: 4 });
+    expect(markdownRows("```\nmore\nlines\n```", { head: 1, tail: 0 }).some((row) => row.content?.some((span) => span.copyRange))).toBe(false);
   });
 
   test("a small source renders complete even with a window configured", () => {
@@ -170,7 +191,7 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     // no result and no running turn: the call was never run
     expect(items[0].node.children[0].content.map((s) => s.text).join("")).toBe("– read  x");
     const memory = GTUI.host.memory({ width: 80 });
-    const ui = new GTUI({ host: memory, theme: createApp({ context: new Context({ id: "stub", messages: [] }), pending: [], endpoint: "", model: "", questionSet() {}, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
+    const ui = new GTUI({ host: memory, theme: createApp({ context: new Context({ id: "stub", messages: [] }), pending: [], model: undefined, questionInstall() { return () => {}; }, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
     ui.run({ init: () => ({ model: {}, effects: [] }), update: (m) => ({ model: m, effects: [] }), view: () => GTUI.view.feed({ items }) });
     expect(memory.snapshot().lines[0]).toContain("▌   – read  x");
     ui.stop();
@@ -415,6 +436,38 @@ describe("the app end to end: transcript, links, and notices", () => {
 
     ui.stop();
     await running;
+  });
+
+  test("clicking each code footer copies its body without fences or neighboring text", async () => {
+    const env = await testEnv();
+    const raw = "before\n```js\nconst a = 1;\n```\nbetween\n~~~sh\necho hi\n~~~";
+    const agent = new Agent({ env, model: "p/m", context: [{ type: 3, content: [{ type: "text", text: raw }] }], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const memory = GTUI.host.memory({ width: 80, height: 22 });
+    const controls = createControls((event) => memory.send(event));
+    const ui = new GTUI({ host: memory });
+    const running = ui.run(createApp(agent, { env }));
+    try {
+      const lines = memory.snapshot().lines;
+      const hits = lines.flatMap((line, row) => line.includes("╰─ copy") ? [{ row, start: line.indexOf("╰─ copy") + 3 }] : []);
+      expect(hits).toHaveLength(2);
+      const feed = transcriptItems(contextBlocks(agent.context.messages()));
+      const { canvas } = layoutView(GTUI.view.column({}, feed.map((item) => item.node)), { width: 80, height: 22, controls });
+      controls.endFrame(GTUI.view.column({}, feed.map((item) => item.node)), canvas);
+      const actions = canvas.cells.flatMap((cells, row) => cells.map((cell, x) => ({ cell, x, row })))
+        .filter(({ cell }) => cell?.action?.startsWith("code.copy:"));
+      expect(actions).toHaveLength(8);
+      for (const [index, text] of ["const a = 1;", "echo hi"].entries()) {
+        const hit = actions[index * 4];
+        const pointer = controls.resolvePoint({ x: hit.x, y: hit.row });
+        expect(pointer).toMatchObject({ control: "action", action: hit.cell.action });
+        memory.send(GTUI.event.pointer({ ...pointer, kind: "press", button: 0, x: hit.x, y: hit.row }));
+        await tick();
+        expect(memory.effects.filter((effect) => effect.type === "copy").at(-1)?.text).toBe(text);
+      }
+      memory.send(GTUI.event.key({ key: "copy" }));
+      await tick();
+      expect(memory.effects.filter((effect) => effect.type === "copy")).toHaveLength(2);
+    } finally { ui.stop(); await running; }
   });
 
   test("mouse-selected message text copies through the app in logical source order", async () => {

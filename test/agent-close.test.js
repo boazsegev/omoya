@@ -69,13 +69,13 @@ describe("Agent close lifecycle", () => {
     expect(standalone.parent).toBeUndefined();
     expect(child.name).toBe("planner");
     expect(child.description).toBe("Plans work.");
-    child.nameSet("reviewer");
-    child.descriptionSet("");
+    (child.name = "reviewer");
+    (child.description = "");
     expect(child.name).toBe("reviewer");
     expect(child.description).toBe("");
     expect(standalone.name).toMatch(/^agent-\d+$/);
-    expect(() => { child.nameSet(1); }).toThrow(/name must be a string/i);
-    expect(() => { child.descriptionSet(null); }).toThrow(/description must be a string/i);
+    expect(() => { (child.name = 1); }).toThrow(/name must be a string/i);
+    expect(() => { (child.description = null); }).toThrow(/description must be a string/i);
   });
 
   test("tracks direct children through construction and close", async () => {
@@ -117,11 +117,11 @@ describe("Agent close lifecycle", () => {
     const child = new Agent({ env, parent: agent, spawnPermission: true });
     expect(agent.spawnPermission).toBe(true);
     expect(child.spawnPermission).toBe(false);
-    expect(child.spawnPermissionSet(false)).toBe(false);
-    expect(child.spawnPermissionSet(true)).toBe(true);
+    expect((child.spawnPermission = false)).toBe(false);
+    expect((child.spawnPermission = true)).toBe(true);
     expect(child.spawnPermission).toBe(false);
-    expect(agent.spawnPermissionSet()).toBeUndefined();
-    expect(agent.spawnPermissionSet("yes")).toBeUndefined();
+    expect((agent.spawnPermission = undefined)).toBeUndefined();
+    agent.spawnPermission = "yes";
     expect(agent.spawnPermission).toBeUndefined();
   });
 
@@ -129,7 +129,7 @@ describe("Agent close lifecycle", () => {
     const env = await testEnv();
     const parent = new Agent({ env, model: "p/m" });
     const child = parent.childCreate({ name: "review" });
-    expect(child).toMatchObject({ endpoint: "p", model: "m" });
+    expect(child).toMatchObject({ model: "p/m" });
     expect(() => parent.childCreate({ name: "review" })).toThrow(/already in use/);
     expect(() => parent.childCreate({ name: "*" })).toThrow(/name other than/);
     expect(parent.children).toEqual([child]);

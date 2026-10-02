@@ -8,7 +8,7 @@
 // documented, every contract source resolving.
 import { describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
-import { collect, contractProblems, renderApiReference } from "./api-reference.js";
+import { collect, contractProblems, renderApiReference, toolCatalog, toolContract } from "./api-reference.js";
 import { buildApiLinks, linkApiReferences } from "../website/lib/api.js";
 import { generate } from "./api-schema.js";
 
@@ -16,6 +16,33 @@ describe("generated API documentation", () => {
   test("every public export is documented, every contract source resolves", async () => {
     const problems = contractProblems(await collect());
     expect(problems).toEqual([]);
+  }, 20_000);
+
+  test("instance data fields and both property accessors are documented consistently", async () => {
+    const data = await collect();
+    const klass = (name) => data.modules.find((module) => module.name === name).exports.find((symbol) => symbol.name === name);
+    expect(klass("Agent").members.map(({ name }) => name)).toEqual(expect.arrayContaining(["env", "context", "url", "timeout", "settings", "model"]));
+    expect(klass("IO").members.map(({ name }) => name)).toEqual(expect.arrayContaining(["env", "model", "name", "url", "timeout", "provider", "Provider", "protocol"]));
+    expect(klass("Env").members.map(({ name }) => name)).toContain("cwd");
+    const Core = (await import("../lib/index.js")).default;
+    for (const name of ["Agent", "IO", "Env", "Context"]) {
+      const documented = new Set(klass(name).members.map(({ name }) => name));
+      const instance = name === "Context" ? new Core.Context({ save: false })
+        : name === "Env" ? new Core.Env({ dir: "./providers", cwd: "./providers", settingsDir: null })
+        : name === "Agent" ? new Core.Agent({ env: new Core.Env({ dir: "./providers", cwd: "./providers", settingsDir: null, settings: { system: "docs" } }) })
+        : Object.create(Core.IO.prototype);
+      const publicNames = [...Object.getOwnPropertyNames(Core[name]), ...Object.getOwnPropertyNames(Core[name].prototype), ...Object.keys(instance)]
+        .filter((key) => !key.startsWith("_") && !["length", "name", "prototype", "caller", "arguments"].includes(key));
+      expect(publicNames.filter((key) => !documented.has(key)), `${name} runtime coverage`).toEqual([]);
+      await instance.close?.();
+    }
+    expect(klass("Context").members.map(({ name }) => name)).toEqual(expect.arrayContaining(["id", "dir", "uuid", "file", "origin", "name", "created"]));
+    const text = await generate();
+    expect(text).toContain("get model(): string|undefined;");
+    expect(text).toContain("set model(selector: string|undefined);");
+    expect(text).not.toContain("model: (selector:");
+    expect(data.modules.find(({ name }) => name === "index").exports.find(({ name }) => name === "default").members.map(({ name }) => name)).toContain("Agent");
+    expect(data.modules.find(({ name }) => name === "index_app").exports.find(({ name }) => name === "default").members.map(({ name }) => name)).toContain("App");
   }, 20_000);
 
   test("GTUI frozen namespaces and factory protocols expose documented callables", async () => {
@@ -54,11 +81,55 @@ describe("generated API documentation", () => {
     expect(local).toBe('<p><a href="#Env-settings"><code>Env.settings</code></a></p>');
   }, 20_000);
 
+  test("both references document the tool contract and the same live catalog", async () => {
+    const data = await collect();
+    const md = await renderApiReference();
+    const schema = await generate();
+    expect(toolContract(data).sources.length).toBeGreaterThan(0);
+    expect(md).toContain("## Tool contract — PUBLISHES / REQUIRES / RETURNS");
+    expect(md).toContain("## Core tool catalog (live schemas)");
+    expect(schema).toContain("## Core tool catalog (live schemas)");
+    expect(schema).toContain("Env.toolArguments");
+    for (const tool of toolCatalog(data).tools) {
+      expect(md).toContain(`### \`${tool.name}\``);
+      expect(md).toContain(tool.description);
+      expect(schema).toContain(`Env.toolDescription.${tool.name}.inputSchema`);
+      expect(schema).toContain(tool.description);
+    }
+  }, 20_000);
+
   test("API.md regenerates from the live tree on every run", async () => {
     const text = await renderApiReference();
     writeFileSync("API.md", text);
     expect(readFileSync("API.md", "utf8")).toBe(text);
     expect(text).toContain("# API (");
+  }, 20_000);
+
+  test("both renderers publish the FULL doc: class doc, params, returns (JobsError)", async () => {
+    // The collected doc is the single source; both surfaces must show all of it.
+    const data = await collect();
+    const jobsError = data.modules.find((m) => m.name === "Jobs").exports.find((e) => e.name === "JobsError");
+    expect(jobsError.doc.description).toContain("Error type used for actionable Jobs failures");
+    const ctor = jobsError.members.find((m) => m.name === "constructor");
+    expect(ctor.doc.params.map((p) => p.name)).toEqual(["code", "message", "[details={}]"]);
+    expect(ctor.doc.returns.type).toBe("JobsError");
+
+    // API.md (markdown): the class doc block exists (never omitted), and the
+    // constructor publishes every @param and the @returns.
+    const md = await renderApiReference();
+    expect(md).toContain("### `class JobsError extends Error`");
+    expect(md).toContain("Error type used for actionable Jobs failures.");
+    expect(md).toContain("- `code` (string) — Stable error code");
+    expect(md).toContain("- `[details={}]` (object)");
+    expect(md).toContain("Returns `JobsError`");
+
+    // Website (HTML): the same member publishes the same params and returns.
+    const { apiPages } = await import("../website/lib/api.js");
+    const html = apiPages(data).find((p) => p.path === "/api/jobs/").html;
+    const section = html.split('id="JobsError-constructor"')[1]?.split("</section>")[0] ?? "";
+    expect(section).toContain("Stable error code identifying the failure.");
+    expect(section).toContain("Optional contextual data");
+    expect(section).toContain("Returns <code>JobsError</code>");
   }, 20_000);
 
   test("settings schema includes live nested defaults and dynamic-key contracts", async () => {

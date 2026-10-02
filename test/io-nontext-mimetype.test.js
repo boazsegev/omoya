@@ -10,7 +10,7 @@ const binary = (mimetype, content = "QUJD") => ({
   type: Context.ContentType.Binary, mimetype, content,
 });
 const user = (block) => ({ type: Context.MessageType.User, content: [block] });
-const io = { modelCurrent: "model", settings: {}, tools: () => [] };
+const io = { modelCurrent: "test/model", settings: {}, tools: () => [] };
 
 describe("non-text context mimetype contract", () => {
   test("mimetype is a public content field and survives context edits", () => {

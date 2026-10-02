@@ -48,7 +48,7 @@ function ndjson(frames) {
 describe("Ollama thinking control", () => {
   test("native modes: none disables, a level passes through, undefined omits", () => {
     const think = (value) => ollama.context2msg([{ type: 2, content: [{ type: "text", text: "q" }] }],
-      { settings: { think: value }, modelCurrent: "gpt-oss:20b" })[1].think;
+      { settings: { think: value }, modelCurrent: "test/gpt-oss:20b" })[1].think;
     expect(think(undefined)).toBeUndefined();
     expect(think("none")).toBe(false);
     expect(think("low")).toBe("low");
@@ -118,7 +118,7 @@ describe("Ollama metadata surface", () => {
 
 describe("Ollama context2msg (outgoing shape)", () => {
   const aiio = {
-    modelCurrent: "qwen3:8b",
+    modelCurrent: "test/qwen3:8b",
     settings: {},
     tools: () => [],
   };

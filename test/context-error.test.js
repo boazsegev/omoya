@@ -40,7 +40,7 @@ describe("Context: a failed response is a message carrying `error`", () => {
   test("errorPop retracts only a trailing failed response", () => {
     const failed = FAILED("boom", [{ type: "text", text: "partial" }]);
     const context = new Context({ messages: [USER("go"), ASSISTANT("ok"), USER("more"), failed] });
-    expect(context.errorPop()).toBe(failed);
+    expect(context.errorPop()).toEqual(failed);
     expect(context.messages()).toEqual([USER("go"), ASSISTANT("ok"), USER("more")]);
     expect(context.errorPop()).toBeUndefined(); // nothing else is ever taken
   });
@@ -113,7 +113,7 @@ describe("IO: every failed response carries its message with `error`", () => {
 });
 
 describe("OpenAI Responses: the provider names how a response ended", () => {
-  const io = { contextUsageSet() {} };
+  const io = { set contextUsage(value) {} };
   test("response.completed carries its status as doneReason", () => {
     const [event] = msg2events({ type: "response.completed", response: { id: "r1", status: "completed" } }, {}, io);
     expect(event).toMatchObject({ type: "done", doneReason: "completed" });

@@ -30,7 +30,7 @@ describe("Env active-Agent capacity inspection", () => {
     const env = new Env({ settings: { maxActive: 4 } });
     env._endpoints.ep = { provider: "test", maxActive: 3, models: { m: { maxActive: 2 }, other: {} } };
     agent(env, "ep", "m");
-    env.agentAdd({ endpoint: "ep", model: "m", busy: true });
+    env.agentAdd({ model: "ep/m", busy: true });
 
     expect(pair(env, "ep/m")).toMatchObject({ active: 1, available: 1 });
     expect(pair(env, "ep/other")).toMatchObject({ active: 0, available: 2 }); // the endpoint's busy agent counts

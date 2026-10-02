@@ -263,7 +263,7 @@ describe("TUI add-agent", () => {
     const added = app.currentAgent();
     expect(added).toBeInstanceOf(Agent);
     expect(added).not.toBe(original);
-    expect(added).toMatchObject({ env, endpoint: "p", model: "m" });
+    expect(added).toMatchObject({ env, model: "p/m" });
     expect(env.agents()).toEqual([original, added]);
     expect(transition.model.overlay).toBeNull();
   });

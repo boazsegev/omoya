@@ -6,7 +6,7 @@ describe("OpenAI final text emission", () => {
   test("passes the final snapshot to text_end", () => {
     const events = msg2events({
       type: "response.output_text.done", output_index: 0, text: "final answer",
-    }, {}, { contextUsageSet() {} });
+    }, {}, { set contextUsage(value) {} });
     expect(events).toEqual([{ type: "text_end", contentIndex: 0, text: "final answer" }]);
   });
 });

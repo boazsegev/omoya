@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
-const runtimeFiles = ["tools/read/read.js", "tools/read/grep.js", "tools/edit.js", "tools/write.js", "tools/guard/symlinks.js", "tools/guard/paths.js"];
+const runtimeFiles = ["tools/read/read.js", "tools/read/fs.js", "tools/read/engine.js", "tools/read/text.js", "tools/read/ignore.js", "tools/edit.js", "tools/write.js", "tools/guard/symlinks.js", "tools/guard/paths.js"];
 for (const file of runtimeFiles) {
   test(`${file} does not perform blocking filesystem calls during a tool invocation`, async () => {
     const source = await readFile(file, "utf8");

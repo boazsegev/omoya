@@ -44,7 +44,7 @@ async function webSearch({ aiio, args, signal, deadline }) {
   const query = String(args?.query ?? "").trim();
   if (query === "" || !aiio?.url) return undefined;
   // the Codex catalog already says when a model cannot use web_search
-  if (aiio.settings?.models?.[aiio.modelCurrent]?.webSearch === false) return undefined;
+  if (aiio.settings?.models?.[aiio.modelCurrent.slice(aiio.modelCurrent.indexOf("/") + 1)]?.webSearch === false) return undefined;
   const probeKey = `${aiio.url} ${aiio.modelCurrent}`;
   if (unsupported.has(probeKey)) return undefined;
   const controller = new AbortController();

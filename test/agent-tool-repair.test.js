@@ -17,7 +17,7 @@ const CANCELLED = { type: "error", error: "cancelled", kind: "cancelled" };
 /** The Moonshot wire view of a context: every tool_call id answered? */
 function kimiWire(context) {
   const provider = new KimiProvider("https://api.kimi.com/coding/v1", {
-    modelCurrent: "kimi-for-coding",
+    modelCurrent: "test/kimi-for-coding",
     settings: {},
     tools: () => [],
   });

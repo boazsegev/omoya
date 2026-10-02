@@ -133,13 +133,14 @@ describe("Agent.folderSet: agent-local tool root", () => {
     writeFileSync(`${root}/plain-file`, "not a folder");
     const env = new Env({ dir: ROOT, cwd: root, settings: {} });
     const agent = new Agent({ env });
-    expect(agent.folderSet("project")).toBe(resolve(child));
+    agent.folder = "project";
     expect(agent.folder).toBe(resolve(child));
     expect(env.cwd).toBe(root);
-    expect(() => agent.folderSet("missing")).toThrow(/does not exist/);
-    expect(() => agent.folderSet("../")).toThrow(/inside env\.cwd/);
-    expect(() => agent.folderSet("plain-file")).toThrow(/not a folder/);
-    expect(agent.folderSet()).toBe(root);
+    expect(() => (agent.folder = "missing")).toThrow(/does not exist/);
+    expect(() => (agent.folder = "../")).toThrow(/inside env\.cwd/);
+    expect(() => (agent.folder = "plain-file")).toThrow(/not a folder/);
+    agent.folder = undefined;
+    expect(agent.folder).toBe(root);
   });
 });
 

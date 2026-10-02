@@ -128,7 +128,7 @@ describe("Agent: cumulative usage", () => {
     });
     await agent.run();
     expect(agent.planUsage).toEqual({ quotas: { "5h": { total: 100, used: 80, remaining: 20 } } });
-    agent.modelSet("x/m");
+    (agent.model = "x/m");
     await agent.run();
     expect(agent.planUsage).toEqual({ quotas: { requests: { total: 500, remaining: 499 } } });
   });

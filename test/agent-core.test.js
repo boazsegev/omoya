@@ -1,4 +1,4 @@
-// Agent owns context and reuses IO by endpoint, never protocol.
+// Agent owns context and reuses IO by qualified model, never protocol.
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, recordingFactory, testEnv, USER, TEXT } from "./fakes.js";
@@ -51,16 +51,17 @@ describe("Agent core: context ownership", () => {
 });
 
 describe("Agent endpoint/model selection and reuse", () => {
-  test("selects endpoint/model per request; run options override defaults", async () => {
+  test("selects endpoint/model through property assignments", async () => {
     const env = await testEnv();
     const factory = recordingFactory(() => scriptedIO([[{ type: "done" }]]));
     const agent = new Agent({ env, model: "p1/m1", createIO: factory });
     await agent.run();
-    await agent.run({ model: "p2/m2" });
+    agent.model = "p2/m2";
+    await agent.run();
     expect(factory.made.map(({ opts }) => opts.model)).toEqual(["p1/m1", "p2/m2"]);
   });
 
-  test("reuses an IO per endpoint and reconstructs after cancellation", async () => {
+  test("reuses an IO per qualified model and reconstructs after cancellation", async () => {
     const env = await testEnv();
     const factory = recordingFactory(() => scriptedIO([[{ type: "done" }]]));
     const agent = new Agent({ env, model: "p1/m", createIO: factory });
@@ -82,5 +83,66 @@ describe("Agent endpoint/model selection and reuse", () => {
     expect(terminal).toEqual({ type: "error", error: "Please load a model" });
     expect(events).toEqual([{ error: terminal.error }]);
     expect(factory.made).toHaveLength(0);
+  });
+
+  test("retains qualified models through assignments, children and IO reuse", async () => {
+    const env = await testEnv();
+    const factory = recordingFactory(() => scriptedIO([[{ type: "done" }]]));
+    const agent = new Agent({ env, model: "p1/org/first", createIO: factory });
+    expect(Object.hasOwn(agent, "endpoint")).toBeFalse();
+    agent.model = "p1/org/second";
+    await agent.run();
+    agent.model = "p1/org/first";
+    await agent.run();
+    agent.model = "p1/org/second";
+    await agent.run();
+    expect(factory.made.map(({ opts }) => opts.model)).toEqual(["p1/org/second", "p1/org/first"]);
+    expect(factory.made.map(({ io }) => io.writes.length)).toEqual([2, 1]);
+    expect(factory.made.flatMap(({ io }) => io.writes).every(({ options }) => !Object.hasOwn(options, "model"))).toBe(true);
+    expect(agent.model).toBe("p1/org/second");
+    expect(agent.childCreate({ name: "child" }).model).toBe("p1/org/second");
+    expect((agent.model = "p2/org/third")).toBe("p2/org/third");
+    expect((agent.model = undefined)).toBeUndefined();
+    expect(agent.model).toBeUndefined();
+    agent.close();
+  });
+
+  test("routes tool contexts and capacity to the assigned model", async () => {
+    const env = await testEnv({ providers: {
+      p1: { provider: "test", models: { base: {} } },
+      p2: { provider: "test", models: { "org/next": {} } },
+    } });
+    let seen;
+    env.toolAdd("inspect-model", (_, context) => {
+      seen = [context.selector, context.io.model, env.models(true).get("p2/org/next")?.active];
+      return "ok";
+    }, { safe: true, inputSchema: { type: "object" } });
+    const factory = recordingFactory((opts) => {
+      const io = scriptedIO([
+        [{ type: "done", message: { type: 3, content: [{ type: "toolCall", name: "inspect-model", callId: "inspect", arguments: {} }] } }],
+        [{ type: "done" }],
+      ]);
+      io.model = opts.model;
+      return io;
+    });
+    const agent = new Agent({ env, model: "p1/base", createIO: factory });
+    agent.model = "p2/org/next";
+    await agent.run();
+    expect(seen).toEqual(["p2/org/next", "p2/org/next", 1]);
+    expect(factory.made).toHaveLength(1);
+    expect(agent.model).toBe("p2/org/next");
+    agent.close();
+  });
+
+  test("rejects split options and bare run models without changing the selection", async () => {
+    const env = await testEnv();
+    expect(() => new Agent({ env, endpoint: "p", model: "m" })).toThrow(/use model/);
+    expect(env.agents()).toHaveLength(0);
+    const agent = new Agent({ env, model: "p/m" });
+    expect(() => agent.run({ endpoint: "p2", model: "p2/m" })).toThrow(/assign agent.model/);
+    expect(() => agent.run({ model: "m" })).toThrow(/assign agent.model/);
+    expect(agent.model).toBe("p/m");
+    expect(agent.busy).toBeFalse();
+    agent.close();
   });
 });
