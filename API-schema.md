@@ -306,10 +306,21 @@ Source: `tools/edit.js`; flags: trusted
 ### `Env.toolDescription.edit.inputSchema`
 
 ```schema
-"unknown"
+{
+  "ask?": "boolean",
+  "edits?": {
+    "array": {
+      "newText": "string",
+      "oldText": "string",
+    },
+  },
+  "matchAll?": "boolean",
+  "path": "string",
+  "rollback?": "string",
+}
 ```
 
-List, read, create, replace, or remove scheduled Markdown tasks in an operational project. Pause with enabled: false. New/changed tasks wait for a later scan; removal never cancels running work. Task-local schedules determine admission; the optional daemon is not required. Cannot initialize, enable, disable, repair, run, control a daemon, or access secrets. Unavailable to read-only Agents.
+Manage scheduled project tasks: list, read, create, update, or remove. Use enabled: false to pause a task. Updates preserve omitted fields and take effect on a later scan; removing a task does not stop a running job. This tool does not run tasks or configure the scheduler.
 
 Source: `tools/job-schedule.js`; flags: trusted
 
@@ -322,12 +333,19 @@ Source: `tools/job-schedule.js`; flags: trusted
   "filename?": "string",
   "prompt?": "string",
   "schedule?": {
-    "union": ["string", "unknown"],
+    "fields": {
+      "at?": {
+        "array": "string",
+      },
+      "days?": "Restrict runs with the string weekdays/weekends, or an array of day abbreviations (sun, mon, tue, wed, thu, fri, sat).",
+      "every?": "string",
+    },
+    "forms": "Task schedule: a string (once or every <duration>, e.g. every 1h), or an object with exactly one of at/every and optional days. Omit on update to preserve it.",
   },
 }
 ```
 
-Manage scratchpad notes (short-term memory). Actions: `set` creates or updates notes ({notes: {title: patch}} — missing notes are created; set a patch to null to delete its note), `get` reads notes ({notes: [title, ...]}; use ["*"] for every note and `only` to return specific fields), `list` shows open notes (done notes are omitted), `remove` deletes notes ({notes: [title, ...]}; ["*"] deletes all), `search` regex-searches titles and fields (case-insensitive; use `field` to search one field and `max` to cap matches). Pass `notes` as an array of titles for get/remove or as a title → patch map for set. Note fields are free JSON — content/summary/type are the convention; add any other fields you need.
+Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use ["*"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.
 
 Source: `tools/note.js`; flags: safe
 
@@ -337,8 +355,8 @@ Source: `tools/note.js`; flags: safe
 {
   "action": ["set", "get", "list", "remove", "search"],
   "field?": "string",
-  "max?": "number",
-  "notes?": ["array", "object"],
+  "max?": "integer",
+  "notes?": "set: a map of title → patch object. get/remove: an array of titles ([\"*\"] = every note).",
   "only?": {
     "array": "string",
   },
@@ -346,7 +364,7 @@ Source: `tools/note.js`; flags: safe
 }
 ```
 
-Ask structured user questions with selectable options and custom answers.
+Ask the user to resolve a decision or provide missing information. Send 1–4 clear questions with distinct options; users can also give custom answers.
 
 Source: `tools/question.js`; flags: safe, sandbox
 
@@ -364,12 +382,13 @@ Source: `tools/question.js`; flags: safe, sandbox
           "description": "string",
           "label": "string",
           "preview?": {
-            "union": ["string", {
-              "content": "string",
+            "fields": {
+              "content?": "string",
               "language?": "string",
               "title?": "string",
-              "type": ["text", "code"],
-            }],
+              "type?": ["text", "code"],
+            },
+            "forms": "Optional focused preview: a plain string, or an object with type (text/code) and content. Add title or language when useful.",
           },
         },
       },
@@ -379,7 +398,7 @@ Source: `tools/question.js`; flags: safe, sandbox
 }
 ```
 
-Read files (cat/head/tail), list/filter folders (ls/find), or search literal text OR regex with context. Ignore rules are opt-in; direct files always bypass them. Negative range indexes count from end. Bounded execution reports skips/incompleteness separately.
+Read project files, list folders, or search their contents. Use ranges for excerpts, glob/exclude to filter files, and search for literal text or regex matches. Set recursive for subfolders. Check skip and incomplete-result notices before assuming coverage.
 
 Source: `tools/read.js`; flags: safe
 
@@ -387,158 +406,42 @@ Source: `tools/read.js`; flags: safe
 
 ```schema
 {
-  "annotate?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "base64?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "binary?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
+  "annotate?": "boolean",
+  "base64?": "boolean",
+  "binary?": "boolean",
   "bytes?": {
-    "union": [{
-      "from?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "to?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
+    "from?": "integer",
+    "to?": "integer",
   },
   "characters?": {
-    "union": [{
-      "from?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "to?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
+    "from?": "integer",
+    "to?": "integer",
   },
-  "exclude?": {
-    "union": [{
-      "union": ["string", {
-        "array": "string",
-      }],
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "glob?": {
-    "union": [{
-      "union": ["string", {
-        "array": "string",
-      }],
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "ignore?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "info?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
-  "limit?": {
-    "union": ["integer", "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
+  "exclude?": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}.",
+  "glob?": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames.",
+  "ignore?": "boolean",
+  "info?": "boolean",
+  "limit?": "integer",
   "lines?": {
-    "union": [{
-      "from?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "last?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "to?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
+    "from?": "integer",
+    "last?": "integer",
+    "to?": "integer",
   },
-  "offset?": {
-    "union": ["integer", "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
+  "offset?": "integer",
   "path": "string",
-  "recursive?": {
-    "union": ["boolean", "null", {
-      "const": "",
-    }, "array", [0, -1]],
-  },
+  "recursive?": "boolean",
   "search?": {
-    "union": [{
-      "after?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "before?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "ignoreCase?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "invert?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "regex?": {
-        "union": ["string", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "text?": {
-        "union": ["string", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-    }, "null", "boolean", {
-      "const": "",
-    }, "array", [0, -1]],
+    "after?": "integer",
+    "before?": "integer",
+    "ignoreCase?": "boolean",
+    "invert?": "boolean",
+    "regex?": "string",
+    "text?": "string",
   },
 }
 ```
 
-List skills or atomically activate named skills. Already active skills succeed without reloading; disk edits apply next session.
+Load relevant skills before starting a task and follow their instructions. Omit names to list available skills; pass an array of catalog names to load them.
 
 Source: `tools/skill.js`; flags: safe
 
@@ -547,14 +450,12 @@ Source: `tools/skill.js`; flags: safe
 ```schema
 {
   "names?": {
-    "union": ["string", {
-      "array": "string",
-    }],
+    "array": "string",
   },
 }
 ```
 
-List available skill resources when only name is given; supply path to read a resource (last matching layer wins), or target to save its exact bytes to a new project file. No activation/execution. Safe mode refuses saving.
+Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new project file. In read-only mode, omit target.
 
 Source: `tools/skill-resource.js`; flags: safe, trusted
 
@@ -568,7 +469,7 @@ Source: `tools/skill-resource.js`; flags: safe, trusted
 }
 ```
 
-Fetch one HTTP(S) URL as bounded Markdown, text, or JSON text.
+Read one HTTP(S) page or API response as Markdown, text, or JSON text. Supply the direct URL; check truncation notices before assuming the response is complete.
 
 Source: `tools/web.js`; flags: safe, trusted
 
@@ -580,7 +481,7 @@ Source: `tools/web.js`; flags: safe, trusted
 }
 ```
 
-Search the internet and return bounded Markdown results.
+Search the internet for relevant pages. Use a focused query and limit the number of results; use web-fetch to read a result's full page.
 
 Source: `tools/web.js`; flags: safe, trusted
 
@@ -593,7 +494,7 @@ Source: `tools/web.js`; flags: safe, trusted
 }
 ```
 
-Close named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
+Closes named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
 
 Source: `tools/worker-close.js`; flags: trusted
 
@@ -622,13 +523,14 @@ Source: `tools/worker-create.js`; flags: trusted
       "model?": "string",
       "name": "string",
       "safe?": "boolean",
+      "subfolder?": "Existing subfolder path relative to the project root; restrict the worker's working folder and sandbox to it. Omit or use \"\", \".\", \"/\", \"./\", false, or null for the project root (\"/\" never means the filesystem root). Other absolute paths, parent traversal, and symlinks outside the project are forbidden.",
       "thinking?": ["none", "low", "medium", "high", "xhigh", "max"],
     },
   },
 }
 ```
 
-Send one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Sends one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
 
 Source: `tools/worker-message.js`; flags: trusted
 
@@ -643,7 +545,7 @@ Source: `tools/worker-message.js`; flags: trusted
 }
 ```
 
-Show workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
+Shows workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -656,7 +558,7 @@ Source: `tools/worker-status.js`; flags: safe, trusted
 }
 ```
 
-Create or overwrite a project file atomically. Supply content OR read (shared read query), never both. read saves selected text/report or raw binary without a model round-trip; incomplete/budget-failed output leaves destination unchanged.
+Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.
 
 Source: `tools/write.js`; flags: trusted
 
@@ -664,166 +566,42 @@ Source: `tools/write.js`; flags: trusted
 
 ```schema
 {
-  "ask?": {
-    "union": ["boolean", "null", [-1, 0], "array"],
-  },
-  "content?": {
-    "union": ["string", "null", "boolean", [-1, 0], "array"],
-  },
+  "ask?": "boolean",
+  "content?": "string",
   "path": "string",
-  "read?": {
-    "union": [{
-      "annotate?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "base64?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "binary?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "bytes?": {
-        "union": [{
-          "from?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "to?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "characters?": {
-        "union": [{
-          "from?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "to?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "exclude?": {
-        "union": [{
-          "union": ["string", {
-            "array": "string",
-          }],
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "glob?": {
-        "union": [{
-          "union": ["string", {
-            "array": "string",
-          }],
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "ignore?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "info?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "limit?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "lines?": {
-        "union": [{
-          "from?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "last?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "to?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "offset?": {
-        "union": ["integer", "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "path": "string",
-      "recursive?": {
-        "union": ["boolean", "null", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-      "search?": {
-        "union": [{
-          "after?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "before?": {
-            "union": ["integer", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "ignoreCase?": {
-            "union": ["boolean", "null", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "invert?": {
-            "union": ["boolean", "null", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "regex?": {
-            "union": ["string", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-          "text?": {
-            "union": ["string", "null", "boolean", {
-              "const": "",
-            }, "array", [0, -1]],
-          },
-        }, "null", "boolean", {
-          "const": "",
-        }, "array", [0, -1]],
-      },
-    }, "null", "boolean", [-1, 0], "array", {
-      "const": "",
-    }],
+  "source?": {
+    "annotate?": "boolean",
+    "base64?": "boolean",
+    "binary?": "boolean",
+    "bytes?": {
+      "from?": "integer",
+      "to?": "integer",
+    },
+    "characters?": {
+      "from?": "integer",
+      "to?": "integer",
+    },
+    "exclude?": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}.",
+    "glob?": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames.",
+    "ignore?": "boolean",
+    "info?": "boolean",
+    "limit?": "integer",
+    "lines?": {
+      "from?": "integer",
+      "last?": "integer",
+      "to?": "integer",
+    },
+    "offset?": "integer",
+    "path": "string",
+    "recursive?": "boolean",
+    "search?": {
+      "after?": "integer",
+      "before?": "integer",
+      "ignoreCase?": "boolean",
+      "invert?": "boolean",
+      "regex?": "string",
+      "text?": "string",
+    },
   },
 }
 ```
@@ -869,6 +647,7 @@ export class Agent {
   static finishSignalsArm: (options?: Object) => () => void;
   set folder(folder: string|undefined|null);
   get folder(): unknown;
+  static folderResolve: (env: Env, folder: string|undefined|null) => string;
   static IO: unknown;
   get ioState(): "idle"|"working"|"disconnected";
   set model(selector: string|undefined);

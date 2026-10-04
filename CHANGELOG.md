@@ -1,84 +1,101 @@
 # Changelog
 
-Notable changes to Omoya are listed by release, newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not.
+Omoya releases are listed newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not. Tool descriptions and model-facing schemas can change between runs as the agent receives the current tool catalog.
+
+## 0.2.2 — 2026-10-05
+
+### Clearer tools, quicker reads
+
+- Improved tool names, descriptions, and schemas so models can choose arguments more reliably across providers. The `write` tool now calls its read-query input `source`, not `read`: use `write({ path, source: { path: "notes.md" } })`. The old input name is no longer accepted. Built-in schemas avoid constructs some providers do not support; runtime validation still accepts the documented input forms.
+
+- Filtered folder reads skip files that cannot match before checking their metadata. Search uses one isolated worker per query and avoids indexing files with no matches.
+
+### Better Web and worker experience
+
+- Web displays user messages as Markdown. Tool display output, including edit diffs, remains visible on collapsed cards and after a session reload.
+
+- Worker creation checks every assigned subfolder before creating a batch. An invalid folder no longer leaves a partly created team. Each worker uses its assigned folder for file tools and sandboxing.
 
 ## 0.2.1 — 2026-10-04
 
-### Breaking changes
+### Easier context and tool workflows
 
-- Single-value controls use properties instead of `*Set()` methods on Agent (model, name, description, safe, thinking, folder, question, spawnPermission), Context (save, settings), and IO (model, contextUsage, planUsage). Keyed methods such as `IO.settingsSet(key, value)` remain. There are no compatibility aliases.
-- `Agent.run` no longer accepts model or endpoint overrides. Set `agent.model` instead; `io.model` can change only while idle and within its current endpoint. Removed `modelAccess` and endpoint local/remote classification; auth persistence scopes are unchanged.
-- Replace `Agent.toolCallable(name)` with lookup in `await agent.tools`, a Map of current model-facing tool descriptors. `Agent.toolContext` is no longer public. TUI and Web show a read-only tools block without adding it to conversation history.
-- `read` replaces flat range/pattern/maxMatches options with grouped `lines`, `characters`, `bytes`, and `search` options. Literal and regex searches combine with OR. Negative range indexes count from the end; `glob`, `exclude`, `limit`, and `offset` support bounded discovery. Ignore filtering is opt-in (`ignore: true`); direct file reads are unaffected. Symlinks are not followed.
-- `write` accepts exactly one of `content` or `read`. The latter saves a shared read-query result as text, a search report, base64, or raw bytes without a model round-trip. Failed validation or an incomplete query leaves the destination unchanged. Non-search saves omit annotations; searches honor `annotate`.
-- Same-named skill definitions now override rather than concatenate. To retain a lower layer, include `{{skill-name}}` explicitly (or `{{skill-name[L1-L2]}}` for a line range). Existing additive overrides need a self reference.
-- `/team` was replaced by `/task` for delegated tasks and `/author` for sourced document workflows; no alias remains.
+- The `read` tool now groups line, character, byte, and search options. Negative range indexes count from the end; folder queries support inclusion, exclusion, result limits, and offsets. Ignore filtering is opt-in with `ignore: true`, and symlinks are not followed. Queries have scan, time, and output limits, so a stopped scan is marked incomplete rather than presented as a full result.
 
-### Added and fixed
+- `write` gained a read-query input for saving a selected file, listing, or search result without sending the content through the model. At the time of this release, the input was called `read`; **0.2.2 renames it to `source`**. `write` accepts this input or `content`, not both, and leaves the destination unchanged if the query fails or is incomplete.
 
-- `skill` accepts one name or an array, deduplicates names, and rejects unknown names without partial activation. Already active skills are not reinjected; edits apply in a new context. Activation survives compaction, fork, and resume.
-- `skill-resource` lists available resource identifiers when given only a name, reads resources by path, and can export exact bytes to a new project file with `target`. Unlisted resources can still be read. Safe mode blocks exports; no skill is activated by listing or reading. `Env.skillResource(name, path)` provides bounded reads or, without a path, a list of identifiers.
-- Read queries now enforce scan, time, and output budgets and report incomplete results separately from content. `write.read` is atomic after successful validation.
-- Context copies constructor messages so forks do not share message objects; read APIs still expose live messages. Child initialization and close-listener failures no longer retain parent or registry state. Worker tool bootstrap excludes nested and disk-loaded auth.
-- Generated API documentation now covers public instance fields, namespace statics, and property accessors.
+- Skills can be activated together by name. Unknown names fail the request without partly activating it; already active skills are not injected again. Activation survives compaction, forks, and resumed sessions. `skill-resource` can list resource names, read a resource, or save its exact bytes to a new project file without activating the skill.
+
+- Generated API documentation now includes public fields, namespace statics, and property accessors. Context construction copies seed messages, so forks do not share message objects; child cleanup and worker bootstrap were also tightened.
+
+### Update library integrations
+
+**These library changes have no compatibility aliases.** See [API.md](API.md) for the full signatures.
+
+- Set single-value Agent, Context, and IO controls through properties rather than `*Set()` methods—for example, `agent.model = selector`. Keyed methods such as `IO.settingsSet(key, value)` remain. Set the model on the Agent instead of passing model or endpoint overrides to `Agent.run`; `io.model` changes only while idle and within its endpoint. The removed `modelAccess` and endpoint local/remote classification have no replacements; authentication storage scopes have not changed.
+
+- Use `await agent.tools` to inspect the current model-facing tool descriptors instead of `Agent.toolCallable(name)`. `Agent.toolContext` is no longer public. TUI and Web show tools in a read-only block without adding them to the conversation history.
+
+- Same-named skill definitions now replace, rather than append to, lower layers. To retain an earlier definition, include `{{skill-name}}` explicitly; use `{{skill-name[L1-L2]}}` for a line range.
+
+- Replace `/team` with `/task` for delegation or `/author` for sourced document work.
 
 ## 0.2.0 — 2026-10-02
 
-### Highlights
+### More capable interfaces and more reliable requests
 
-- **Updated tools, providers, and interfaces.** Tested built-in OpenAI, Anthropic, and Kimi providers with API keys. Web search and fetch can use provider-hosted tools where available; disable either per endpoint or model with `search: false` or `fetch: false` to control API use. Expanded the `om --serve` web interface.
-- **Read-only tools can run in parallel.** Calls marked `safe: true` run in contiguous groups, up to the configured `tools.concurrency` limit (default 3). Mutating or unmarked calls remain sequential barriers; results stay in call order. `toolCall.async` no longer allows mutating calls to overlap.
-- **Install trusted extension packages.** List installed npm package names in the user settings folder's `settings.json` under `extensions`. Their JSON settings, themes, providers, tools, skills, and prompts load after Omoya's package and before user settings. Project settings and extensions cannot activate further extensions. Providers and tools execute code with host access: install only packages you trust, and restart after changing them.
-- **Inspect and control more from the TUI and web app.** The web app gains the command palette, theme previews, endpoint sign-in, session and context editing, and TUI command parity. Both interfaces show endpoint, model, thinking, safety, and logging controls; the TUI adds a block-oriented transcript, context gauge, syntax-highlighted code fences, and a turn-activity footer.
-- **Failed responses are visible and retryable.** Provider and transport failures now live on the assistant response message as `error`, including partial responses. On the next request, a failed *last* message is retracted; a user reply after it preserves it. Empty or reasoning-only answers and OpenAI incomplete responses no longer silently end a turn. HTTP 429 and coded streaming rate limits with a retry delay schedule a continuation instead of a hidden immediate retry; the message retains the retry delay.
+- Use the expanded `om --serve` Web app for command-palette navigation, theme previews, endpoint sign-in, and session and context editing. Web and TUI both expose model, thinking, safety, and logging controls. The TUI adds a block-oriented transcript, context gauge, highlighted code fences, and a turn-activity footer. Both share themes but save their selections independently.
 
-### Providers, tools, and reliability
+- Search and fetch can use provider-hosted tools when available, then fall back to MCP or local backends. OpenAI, Anthropic, and Kimi API-key providers were tested. Disable provider web access for either tool at global, endpoint, or model scope. Web backends have bounded connection and response times; debug output identifies the backend used. Kimi's direct fetch returns extracted text and images, not preserved hyperlinks. Claude Pro/Max OAuth users must sign in again: its provider changed from `anthropic-claude` to `claude`. Anthropic may restrict subscription-quota use with third-party harnesses; the Anthropic API-key provider is unchanged.
 
-- Web search and fetch can use provider-hosted tools before falling back to MCP or local backends. OpenAI Responses probes hosted search availability; Claude Pro/Max OAuth tries Anthropic server tools; Kimi platform and coding endpoints use direct search and fetch APIs. Claude Pro/Max OAuth now uses the `claude` provider instead of `anthropic-claude`: existing OAuth users must sign in again. Anthropic may restrict subscription-quota use with third-party harnesses; the separate Anthropic API-key provider is unchanged. Provider web access can be disabled independently for search or fetch at model, endpoint, or global scope. Empty results fall through rather than stopping the search. Kimi's direct fetch returns extracted text/images, not preserved hyperlinks.
-- Web backends now have bounded connection and response deadlines. Web-tool burst pacing and concurrency are configurable; a full capacity window waits only when the cooldown fits the caller's remaining timeout, otherwise it fails promptly. Debug output identifies whether a result came from the provider, MCP, or local backend.
-- Model discovery retries empty or timed-out startup probes twice in the background, with bounded timeouts and protection against stale results. Codex uses its authenticated model catalog rather than per-model probes; OpenAI-compatible listings retain available context and capability metadata. Recent model selection remembers up to eight endpoint/model pairs and skips unavailable endpoints on restore.
-- The context gauge loads the models.dev window registry once per process in the background where needed, with offline fallbacks. This fixes repeated downloads and a startup/first-request stall. Plan quotas are replaced per response, ranked and capped in the status display; reset times normalize epoch seconds/milliseconds and suppress near-zero countdown noise. Context usage estimates are memoized per message.
-- Kimi attachment extraction is cached per IO instance. Shared provider content indexing preserves the order of text and thinking around tool calls and fixes Kimi's streamed tool-call arguments. Kimi API-key detection uses the platform endpoint and reads live model metadata.
-- Dynamic endpoints now track the environment without persisting credentials or retaining removed endpoints. Session previews show meaningful first lines; session files retain agent configuration so resume restores it unless an explicit launch model overrides it. Logging can be turned on for an existing, previously unlogged conversation without losing its messages.
-- Jobs run in-process, and stopping the daemon cancels the active job. Job problems and warnings are recorded in readable `ai-jobs/errors/YYYY-MM-DD.md` entries with useful messages; `om-jobs` prints concise results. The former hash-named JSON error records are no longer used.
-- Web and TUI share the named theme catalog but save selections independently (`web.theme` and `tui.theme`); each falls back to global `theme` when unset. Web theme changes no longer alter the TUI selection.
-- Other fixes: safe mode now blocks unsafe tools even when inherited from a parent or forced by sandbox policy, while newly registered read-only tools become available; untrusted tool output cannot inject terminal control sequences into the TUI or web renderer; TUI context-edit completion no longer crashes; web questions and agent-state displays survive reloads and competing agent updates; the website has a refreshed homepage and generated 404 page.
+- Read-only tools marked `safe: true` can run in parallel, up to `tools.concurrency` (default 3). Mutating calls remain sequential barriers, and results keep their call order. Mutating calls no longer overlap through `toolCall.async`.
 
-### Breaking library and provider changes
+- Failed or partial provider responses remain visible on the assistant message. A failed *last* message is retracted on the next request so the agent can retry; a user reply preserves it. Empty or reasoning-only answers and incomplete OpenAI responses no longer silently end a turn. Rate-limit responses with retry delays schedule a continuation rather than an immediate hidden retry.
 
-**No compatibility aliases are provided.** Update integrations before upgrading:
+- Install trusted extension packages through the user settings folder's `settings.json` to add settings, themes, providers, tools, skills, and prompts. Extensions load after Omoya's package and before user settings; project settings cannot install more extensions. Provider and tool extensions run code with host access, so install only packages you trust and restart after changing them.
 
-- Presentation exports moved under `App` (`App.TUI`, `App.Web`, `App.GTUI`, `App.Markdown`). `omoya/app` exports `{ ...core, CLI, App }`, not top-level `TUI`, `Web`, `GTUI`, or `Markdown`; the former `lib/tui.js`, `lib/web.js`, and `lib/markdown.js` entry points are gone.
-- Every Agent now owns a `Context` at `agent.context`, rather than a separate message array and `agent.session`. Read it with `length`, `at(i)`, `messages()` or iteration; mutate it through `append`, `prepend`, `edit`, `editBlock`, `pop`, `remove`, `rollback`, or `update(fn)`. Logging and naming belong to the Context (`save`, `saveSet`, `rename`, `flush`). A memory-only Context is created when no ID is supplied; `contextId: false` also selects one. The Agent options `session`/`sessionSave` become `contextId`/`contextSave`; `newSession`/`resumeSession`/`fork` become `contextNew`/`contextResume`/`contextFork`. Session file operations move to `Context.list`, `listAsync`, `latest`, `resume`, `renameById`, and `deleteById`, with an explicit `dir` where required. CLI flags and interface labels still say “session.”
-- Session storage now belongs to `Env` as `settings.sessions` (replacing `sessionsDir`), defaulting to the settings folder's `sessions` directory. The Agent `sessionDir` option and `Agent.sessionDir(env)` are removed. Safe mode is passed to `env.tools(safe, selector)` or `toolCall` via `context.safe`; `env.safe` and `env.safeEnv` are removed. `Env.extend({ methods, getters, events, settings })` installs Agent-owned Env members. Env membership events are only `AGENT_ADDED` and `AGENT_REMOVED`; subscribe to each agent's request events instead of the removed global start/done events.
-- Agent setters use noun-first names: `modelSet`, `safeSet`, `thinkingSet`, `folderSet`, `questionSet`, `spawnPermissionSet`, `nameSet`, and `descriptionSet`. Likewise, `enqueue`/`enqueueFile`/`drainPending` become `pendingAdd`/`pendingAddFile`/`pendingDrain`, `compact` becomes `contextCompact`, and `createChild` becomes `childCreate`. Direct message-editor pass-throughs are removed; use `agent.context`.
-- Agent request events are now `REQUEST_START`, `REQUEST_DONE`, and `REQUEST_ERROR` (per provider request, not per tool-loop run). Tool-call event names consistently use `tool_call_start`/`delta`/`end`, `Context.EventType.ToolCallStart`/…, `Agent.EVENT.TOOL_CALL_START`/…, and IO `onToolCallStart`/… callbacks. Third-party providers must emit the new event types.
-- Context's static data-model helpers now use noun-first names such as `messageUser`, `contentText`, `messagesParse`, `eventDispatch`, `tokensEstimate`, and `usageFinalize`; static array editors are no longer public. `Context.contentIndexer()` provides one block-numbering contract for provider translators. Consult [API.md](API.md) for the full surface.
-- IO `kill()` becomes `close()` (permanently closes the instance); `setOption` becomes `settingsSet`, `currentModel` becomes `modelCurrent`, `setContextUsage`/`setPlanUsage` become `contextUsageSet`/`planUsageSet`, and `IO.resolveTimeout` becomes `IO.timeoutsResolve`. Request sanitization and connection-budget helpers are private.
-- Env's public surface and provider contract have been reduced further below; see [API.md](API.md) and [API-schema.md](API-schema.md) for current names and settings.
-- `Jobs` exposes only `init`, `disable`, `status`, `run`, `daemonRun`, `schedule`, `validate`, and `JobsError`. `Jobs.run` returns `{ outcomes, errors, warnings, log }`; the full scan record remains on disk. `Jobs.daemonRun` resolves without a result. The former internal job helper exports are removed.
+### Daily-use fixes
 
-- **Env surface.** `Env.create`/`new Env`, `Env.extend`, `Env.EVENT` (adds `MODELS_CHANGED`), `onEvent`/`offEvent`, `close()`, `settings`, `settingsSchema()`, `folders`, `cwd`, `models(secret)`, `modelsReady`, `connection(selector, {remember})`, `loginPresets`/`login`/`logout`, `tools(safe, selector)`, `toolCall`, `toolAdd`, `skills()`/`prompts()`. Endpoint-keyed members, refresh/load/save controls, the provider kit statics (`http*`, `thinking*`, `provider*`, `ProviderError`), `mcp*` statics, `NAMES`, and the raw fields `dir`, `settingsDir`, `endpoints`, `providers`, `environment`, `extensionRoots` are gone.
-- **Models.** `env.models(secret)` is a Map keyed `endpoint/model` whose entries carry caps (context window, native thinking modes, provider tools, streaming), `secret`, `local`, `loginRequired`, `lastUsed`, and Agent's capacity (`maxActive`, `active`, `available`). The catalog fills in the background; repaint on `Env.EVENT.MODELS_CHANGED`. Change a capacity limit with a settings write.
-- **Settings.** `env.settings` is the live view: reads apply schema defaults and derived values (`settings.sessions` replaces `sessionsDir`); assigning a key persists only that change to the layer file that owns it. `themeSave`, `endpointSave`, `settingsFlush`, and `agentsLimitSet` are gone.
-- **Login.** `env.login(name, {provider, url, token|auth}, {scope, verify})` is transactional: a failed connection test or a `verify` rejection leaves nothing behind. Without `scope` it registers in memory only.
-- **Tools and safe mode.** `env.tools(safe, selector)` resolves to a Map of ToolInfo; with a selector, the model's provider tools (`web-search`, `web-fetch`) shadow the global tools. Safe mode is the caller's argument: `toolCall` refuses unsafe tools under `context.safe`; `safeEnv`, `env.safe`, and `Agent.providerCapabilityCall` are gone. A tool reports its live status through `context.statusSet(info)`.
-- **MCP.** MCP servers in `settings.mcp` are an Env tool source: the `mcp` tool and `mcp-<name>` shortcuts appear only while a server is configured, and `env.close()` stops the servers. The `mcp` key is now refused in project settings by the schema.
-- **Skills and prompts.** `env.skills()`/`env.prompts()` return Maps of `{name, description, file, source, body}`; `Agent.skillCatalog`, `Agent.promptCatalog`, and `Agent.skillSection` format them. The `skill` tool answers from the calling Env.
-- **Providers.** A provider imports only `lib/context.js` (and the namespace foundation). Anthropic's model catalog, thinking modes, and `webTools` are no longer named exports; the Claude dialect uses the Anthropic provider class instead. `capabilities.thinking` lists native modes (least to most); `capabilities.tools` is `false`, `true`, or a map of built-in tools. Static `detect`, `models`, `testConnection`, and `login` form the catalog side; Env and IO complete the defaults. Errors are plain errors carrying `kind` or `status`. Provider tool opt-outs generalize to `<ep>.models.<m>.tools.<name>`, `<ep>.tools.<name>`, and `providerTools.<name>`.
-- **Agent policy settings.** The runaway guard and request retries are nested settings: `context.cap`/`context.turn` replace `contextGuardCap`/`contextGuardTurnCap`, and `retry.attempts`/`retry.base`/`retry.max` replace `maxAttempts`/`retryBase`/`retryMax` (the old keys are ignored). Each Agent reads them, with `tools.timeout`/`timeoutLimit`/`concurrency`, once when it is created and keeps them as `agent.policy`; a settings edit applies to the next Agent. The Env getters `toolTimeout`, `toolTimeoutLimit`, `contextGuardCap`, `contextGuardTurnCap`, `maxAttempts` and the method `retryDelay()` are gone. An invalid `tools.concurrency` now fails when the Agent is created.
-- **Auto-compaction.** `settings.context.autocompact` defaults to `0` (off). `false`, absent, and `1` (100% of the window) also disable it; `true` means 65%, and other fractions/percentages set the threshold in `agent.policy.context.autocompact`. At that threshold, it compacts the context before any provider request — after tool calls, user messages, and worker messages alike — and before the runaway guard checks. Trailing unanswered user/worker messages are held out of the summary and re-attached in order; messages queued meanwhile stay pending; a waiting manual `/compact [focus]` joins the automatic round (its focus guides the summary, and when nothing else waits the turn ends there) instead of running a second compaction; a failed compaction leaves the context — and any waiting `/compact` — as it was. The `context` keys (`cap`, `turn`, `autocompact`) resolve global → `<endpoint>.context` → `<endpoint>.models.<model>.context`, per key, so an endpoint or model can override the global values; an Agent re-resolves them when it selects another model. A successful compaction (manual or automatic) drops the stale provider usage report, so the guard no longer trips on the pre-compaction figure.
-- **OS sandbox.** `Sandbox.osKind()`, `Sandbox.osAvailable()`, and `Sandbox.osWrap()` replace the Env statics; `durationParse`/`durationTry` live in `lib/util.js`.
+- Model discovery retries empty or timed-out startup probes in the background; Codex uses its authenticated catalog. Recent selection remembers up to eight endpoint/model pairs and skips unavailable endpoints when restoring. The context gauge caches its window registry, with offline fallbacks, instead of repeatedly downloading it or delaying the first request.
+
+- Kimi attachments are cached per IO instance, and provider content keeps text, thinking, and tool calls in order. Kimi streamed tool-call arguments were fixed. Dynamic endpoints track changes without saving credentials; resumed sessions restore agent settings unless an explicit launch model overrides them. Logging can be enabled on an existing unlogged conversation without losing its messages.
+
+- Scheduled jobs now run in-process; stopping the daemon cancels the active job. Errors and warnings appear in readable `ai-jobs/errors/YYYY-MM-DD.md` records, and `om-jobs` prints concise results.
+
+- Safe mode blocks unsafe tools inherited from a parent or required by sandbox policy, while newly registered read-only tools remain available. Untrusted tool output cannot inject terminal control sequences into TUI or Web. Fixed a TUI context-edit crash and Web question and agent-state display problems after reload. The website gained a refreshed homepage and a generated 404 page.
+
+### Update library integrations
+
+**The 0.2.0 library and provider changes have no compatibility aliases.** The items below name the main migrations; [API.md](API.md) and [API-schema.md](API-schema.md) document current methods and settings.
+
+- **Presentation:** Import `App.TUI`, `App.Web`, `App.GTUI`, or `App.Markdown` instead of top-level presentation exports. `omoya/app` exports core, `CLI`, and `App`; the old `lib/tui.js`, `lib/web.js`, and `lib/markdown.js` entry points are gone.
+
+- **Context and sessions:** Each Agent owns `agent.context`. Use Context methods to read and edit messages; logging and naming also belong to Context. An omitted or false `contextId` creates memory-only context. Replace `session`/`sessionSave` with `contextId`/`contextSave`, and `newSession`/`resumeSession`/`fork` with `contextNew`/`contextResume`/`contextFork`. File operations move to `Context.list`, `listAsync`, `latest`, `resume`, `renameById`, and `deleteById`. CLI labels still say “session.” Session storage is `env.settings.sessions`, not `sessionsDir` or the Agent's `sessionDir` option.
+
+- **Agent methods and events:** Agent setters use noun-first names such as `modelSet` and `safeSet`; `enqueue`/`enqueueFile`/`drainPending` become `pendingAdd`/`pendingAddFile`/`pendingDrain`, `compact` becomes `contextCompact`, and `createChild` becomes `childCreate`. Edit messages through `agent.context`, not Agent pass-throughs. Request events are `REQUEST_START`, `REQUEST_DONE`, and `REQUEST_ERROR` per provider request. Tool-call events use `tool_call_start`/`delta`/`end`; third-party providers must emit the new names.
+
+- **Env and settings:** `Env` owns settings, endpoint discovery, login, tools, and MCP servers. `env.settings` is a live view: changing a key persists that change to its owning layer. `Env.extend({ methods, getters, events, settings })` installs Agent-owned Env members. Agent membership events are `AGENT_ADDED` and `AGENT_REMOVED`; listen on agents for request events. The former endpoint-keyed members, raw internal fields, provider-kit statics, and manual refresh/save controls are removed. MCP tools appear only while servers are configured; project settings cannot set `mcp`.
+
+- **Models and login:** `env.models(secret)` returns a Map keyed by `endpoint/model`, including capabilities and agent capacity. It fills in the background; use `Env.EVENT.MODELS_CHANGED` to refresh displays. `env.login(name, { provider, url, token|auth }, { scope, verify })` leaves no saved login after a failed test or verification; without `scope`, login is memory-only.
+
+- **Tools and safe mode:** Pass safety to `env.tools(safe, selector)` or `toolCall` through `context.safe`; `env.safe` and `env.safeEnv` are removed. The selected provider's web tools can take precedence over global tools. Tool status uses `context.statusSet(info)`. Skills and prompts come from `env.skills()` and `env.prompts()`; MCP servers are also Env tool sources.
+
+- **IO and providers:** Use `IO.close()` instead of `kill()`; `settingsSet`, `modelCurrent`, `contextUsageSet`, `planUsageSet`, and `IO.timeoutsResolve` replace the older method names. Context data helpers use noun-first names such as `messageUser` and `contentText`; `Context.contentIndexer()` provides shared block numbering. Providers import only Context and the namespace foundation. Provider errors carry `kind` or `status`; tool opt-outs use global, endpoint, or model settings.
+
+- **Jobs:** The public surface is `init`, `disable`, `status`, `run`, `daemonRun`, `schedule`, `validate`, and `JobsError`. `Jobs.run` returns `{ outcomes, errors, warnings, log }`; the full scan stays on disk. `daemonRun` resolves without a result.
+
+- **Policy and compaction:** `context.cap`/`context.turn` replace the old guard keys; `retry.attempts`/`retry.base`/`retry.max` replace the old retry keys. Agents resolve policy when created and when selecting a different model; other settings edits apply to the next Agent. Optional `settings.context.autocompact` defaults off; `true` compacts at 65% of the context window, while a fraction or percentage sets another threshold. It compacts before a provider request, preserves unanswered messages, and leaves context intact if compaction fails. Global, endpoint, and model context settings can override each other per key.
+
+- **Sandbox helpers:** `Sandbox.osKind()`, `Sandbox.osAvailable()`, and `Sandbox.osWrap()` replace the Env statics. Duration parsing lives in `lib/util.js`.
 
 ## 0.1.1 — 2026-09-25
 
-- Rewrote the README and website homepage for clarity and adoption: bunx-first quickstart, runnable snippets per surface (TUI, `om-agent`/`om-io` JSONL, `omoya/agent` embed, `om --serve`, `om-jobs`, direct tool CLIs), and a four-point "Why Omoya" pitch verified against the codebase.
-- Improved tools, documentation, and the TUI/Web apps, plus misc fixes (including invalid model selection across CLI and web).
-- Fixed the TUI login wizard overlay at startup.
-- Reflected the public GitHub repo; tightened the README; wired fixes for Kimi message ordering and notice selection.
-- Added npm `keywords`, a linked README logo, and this changelog (now included in the published package).
-- Gates: 1838/1838 tests, website self-test 25/25.
+- Find the right way to start faster: the rewritten README and homepage include a `bunx` quickstart and runnable examples for the TUI, JSONL CLIs, embedded library, Web app, scheduled jobs, and direct tool commands.
+
+- Fixed invalid model selection across CLI and Web, the TUI login overlay at startup, and Kimi message ordering and notice selection. Improved the tools, docs, and both interfaces.
+
+- The npm package now includes keywords, a linked README logo, and this changelog. Release checks passed 1,838 tests and 25 website checks.
 
 ## 0.1.0 — 2026-09-23
 
-- Initial public release: a transparent, composable Bun AI agent harness library with a TUI, JSONL agent/IO CLIs, provider plugins (OpenAI Responses/Codex OAuth, Kimi, Anthropic, Ollama), direct tool CLIs, jobs, project-scoped memory, and enforced filesystem boundaries.
+- Initial public release: use a transparent Bun AI agent harness through a TUI, JSONL agent/IO CLIs, or an embedded library. Includes provider plugins, direct tool commands, scheduled jobs, and project-scoped memory.

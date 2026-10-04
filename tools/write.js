@@ -1,4 +1,4 @@
-/** Mutating writer. Optional read query uses the shared engine, never provider dispatch. */
+/** Mutating writer. Optional source query uses the shared read engine, never provider dispatch. */
 import { constants } from "node:fs";
 import { mkdir, open, rename, unlink, lstat } from "node:fs/promises";
 import { dirname, basename, join, relative } from "node:path";
@@ -41,9 +41,9 @@ async function queryPayload(query, resolved, context) {
   const result = await executeReadQuery(normalized, context, { artifact: true });
   let metadata;
   try { metadata = await lstat(resolved); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  if (result.source === resolved || sameFile(result, metadata)) throw new Error("write.read source and destination must differ");
+  if (result.source === resolved || sameFile(result, metadata)) throw new Error("write source and destination must differ");
   const payload = serializeReadResult(result);
-  if (!result.selectionComplete) throw new Error(`write.read refused incomplete output: ${result.status.join("; ")}`);
+  if (!result.selectionComplete) throw new Error(`write source query refused incomplete output: ${result.status.join("; ")}`);
   const skipped = Object.entries(result.skips).filter(([, count]) => count).map(([name, count]) => `${count} ${name} skipped`);
   return { payload, binary: result.binary && !result.query.base64, status: [...result.status, ...skipped] };
 }
@@ -77,20 +77,20 @@ function relativeDestination(resolved, scope) {
   return relative(scope.cwd, resolved) || ".";
 }
 
-/** Exactly one effective content/read; destination changes only after guarded successful serialization. */
+/** Exactly one effective content/source; destination changes only after guarded successful serialization. */
 export async function write(args = {}, context) {
   if (context?.safe === true) throw new Error("write is unavailable in safe mode");
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new TypeError("write arguments must be an object");
-  for (const key of Object.keys(args)) if (!["path", "content", "read", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
+  for (const key of Object.keys(args)) if (!["path", "content", "source", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
   const hasContent = !absent(args.content);
-  const hasRead = !absent(args.read) && args.read !== "";
-  if (hasContent === hasRead) throw new TypeError("write requires exactly one effective content or read");
+  const hasSource = !absent(args.source) && args.source !== "";
+  if (hasContent === hasSource) throw new TypeError("write requires exactly one effective content or source");
   if (hasContent && typeof args.content !== "string") throw new TypeError("write.content must be a string");
   if (!absent(args.ask) && typeof args.ask !== "boolean") throw new TypeError("write.ask must be a boolean");
   checkWrite(context);
   const scope = readScope(context);
   const resolved = await destination(args.path, scope);
-  const data = hasRead ? await queryPayload(args.read, resolved, context) : { payload: Buffer.from(args.content), binary: false, status: [] };
+  const data = hasSource ? await queryPayload(args.source, resolved, context) : { payload: Buffer.from(args.content), binary: false, status: [] };
   if (!data.binary) await enforceContentPolicy({ path: args.path, content: data.payload.toString("utf8"),
     ask: args.ask === true || typeof context?.question?.ask === "function", context, askable: true, cwd: scope.boundary, lax: true });
   await atomicWrite(resolved, data.payload, context, scope);
@@ -99,12 +99,12 @@ export async function write(args = {}, context) {
 
 export function toolDescription() {
   return { write: { trusted: true,
-    description: "Create or overwrite a project file atomically. Supply content OR read (shared read query), never both. read saves selected text/report or raw binary without a model round-trip; incomplete/budget-failed output leaves destination unchanged.",
+    description: "Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.",
     inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: {
       path: { type: "string", description: "Destination path relative to the working folder, inside the project." },
-      content: { anyOf: [{ type: "string" }, { type: "null" }, { type: "boolean" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }], description: "Text to save, including empty string. Exactly one effective content or read; wrong-type model fillers are absent." },
-      read: { anyOf: [readQuerySchema(), { type: "null" }, { type: "boolean" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }, { type: "string", const: "" }], description: "Shared read query. Without an effective search, annotate is forced false even if supplied true; searches honor annotate (default true). Save payload, not status/preview blocks. Binary saves bytes; base64 saves encoded text. Explicit selection limits are honored; execution-incomplete output is refused." },
-      ask: { anyOf: [{ type: "boolean" }, { type: "null" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }], description: "Request permission when saved text references an existing path outside the project. Wrong-type model fillers are absent." },
+      content: { type: "string", description: "Writes text to file. Use an empty string to create an empty file or clear an existing file. Omit when using a source." },
+      source: { ...readQuerySchema(), description: "Writes directly from file system source. Use to copy files, or save folder listings and search results to a file. Binary reads save raw bytes unless base64 is true. Omit when writing text to file." },
+      ask: { type: "boolean", description: "Ask permission if saved text references an existing path outside the project; without permission, the write is refused." },
     } },
   } };
 }

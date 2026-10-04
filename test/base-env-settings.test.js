@@ -383,7 +383,7 @@ describe("the settings view: defaults, derived values, and delta persistence", (
     expect(env.settings.tui.cursor.shape).toBe("line"); // a default fills what no layer sets
     expect(env.settings.modelAccess).toBeUndefined();
     expect(env.settings.sessions).toBe(join(user, NAMES.sessionsDir));
-    expect(JSON.parse(JSON.stringify(env.settings.tui))).toMatchObject({ theme: "mine", alt: false });
+    expect(JSON.parse(JSON.stringify(env.settings.tui))).toMatchObject({ theme: "mine", alt: true });
   });
 
   test("global theme descends to each app, whose own setting overrides it independently", async () => {

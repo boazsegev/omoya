@@ -131,9 +131,10 @@ describe("edit tool (pi semantics)", () => {
 
   test("schema requires path alongside rollback — a rollback is intentional", () => {
     const schema = editDescription().edit.inputSchema;
-    expect(schema.required ?? []).not.toContain("path");
-    expect(schema.required ?? []).not.toContain("edits");
-    expect(schema.anyOf).toEqual([{ required: ["path", "edits"] }, { required: ["path", "rollback"] }]);
+    expect(schema.required).toEqual(["path"]);
+    expect(schema.required).not.toContain("edits");
+    expect(schema.anyOf).toBeUndefined();
+    expect(schema.properties.edits.description).toContain("required unless using rollback");
     expect(schema.properties.rollback.type).toBe("string");
   });
   test("rollback reverses a recorded edit by its tool call id (and records itself — a redo)", async () => {

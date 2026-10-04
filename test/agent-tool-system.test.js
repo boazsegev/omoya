@@ -228,7 +228,8 @@ describe("tools/skill.js: the skill tool", () => {
     const { toolDescription } = await import("../tools/skill.js");
     const schema = toolDescription().skill;
     expect(schema.safe).toBe(true);
-    expect(schema.inputSchema.properties.names.anyOf.map((item) => item.type)).toEqual(["string", "array"]);
+    expect(schema.inputSchema.properties.names.type).toBe("array");
+    expect(schema.inputSchema.properties.names.items.type).toBe("string");
   });
 
   test("end to end through the Agent: answer in the result, payload in the context", async () => {

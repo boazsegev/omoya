@@ -82,18 +82,20 @@ function memberDeclaration(member) {
   return `${prefix}${member.name}: ${memberType(member)}`;
 }
 function inputSchema(schema) {
-  if (schema?.anyOf || schema?.oneOf) {
-    const variants = (schema.anyOf ?? schema.oneOf).map(inputSchema);
+  const alternatives = schema?.anyOf ?? schema?.oneOf;
+  if (alternatives && (!schema.properties || alternatives.some((branch) => branch.properties || branch.type))) {
+    const variants = alternatives.map(inputSchema);
     const unique = [...new Map(variants.map((variant) => [JSON.stringify(variant), variant])).values()];
     return unique.length === 1 ? unique[0] : { union: unique };
   }
   if (schema?.enum) return schema.enum;
   if (!schema?.properties || typeof schema.properties !== "object") {
     if (schema?.const !== undefined) return { const: schema.const };
-    return schema?.type === "array" && schema.items ? { array: inputSchema(schema.items) } : schema?.type || "unknown";
+    return schema?.type === "array" && schema.items ? { array: inputSchema(schema.items) } : schema?.type || schema?.description || "unknown";
   }
   const required = new Set(schema.required || []);
-  return Object.fromEntries(Object.entries(schema.properties).map(([key, spec]) => [required.has(key) ? key : `${key}?`, inputSchema(spec)]));
+  const fields = Object.fromEntries(Object.entries(schema.properties).map(([key, spec]) => [required.has(key) ? key : `${key}?`, inputSchema(spec)]));
+  return !schema.type && schema.description ? { forms: schema.description, fields } : fields;
 }
 function publicSchemas(data) {
   const renderedClasses = new Set();

@@ -3,7 +3,7 @@
  * cwd-rooted file access tool. Thin WRAPPER publishing the callable
  * implemented under tools/read/. The tool scan is NOT recursive:
  * sub-folders are never scanned. read/ owns query normalization,
- * guarded execution and serialization; write.read consumes those explicit
+ * guarded execution and serialization; write.source consumes those explicit
  * shared contracts. No helper is independently published as a tool.
  *
  * One exception BY DESIGN: tools/guard/ is the shared guard layer

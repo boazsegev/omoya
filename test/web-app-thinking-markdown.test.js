@@ -12,6 +12,7 @@ function extractFunction(name, nextDeclaration) {
 }
 const previewSource = extractFunction("previewNode", "\n/**\n * A collapsible card");
 const thinkingSource = extractFunction("renderThinking", "\nconst TOOL_STATE");
+const userSource = extractFunction("renderUser", "\n/**\n * Preview row cap");
 const turnSource = source.slice(source.indexOf("function onDelta("), source.indexOf("\n/* ------------------------------------------------------------- transcript */", source.indexOf("function onDelta(")));
 
 function node(tag, className, text = "") {
@@ -60,6 +61,17 @@ test("web turn completion repaints final Markdown/math instead of streamed previ
   ] });
   expect(client.state().blocks.filter((block) => block.kind === "error")).toHaveLength(1);
   expect(client.state().blocks[0].text).toBe("final thought");
+});
+
+test("web user bubble renders safe Markdown without changing attachment or copy controls", () => {
+  const el = node;
+  const markdownNode = (tag, className, text) => ({ ...node(tag, className), html: renderMarkdown(text) });
+  const renderUser = new Function("el", "markdownNode", "blockControls", "formatBytes", `${userSource}; return renderUser;`)(el, markdownNode, () => node("controls"), (size) => `${size} B`);
+  const bubble = renderUser({ text: "**hello** <img src=x onerror=alert(1)>", attachments: [{ name: "notes.txt", size: 10 }] });
+  expect(bubble.children[0].html).toContain("<strong>hello</strong>");
+  expect(bubble.children[0].html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  expect(bubble.children[1].children[0].textContent).toContain("notes.txt");
+  expect(bubble.children[2].tag).toBe("controls");
 });
 
 describe("web thinking Markdown", () => {

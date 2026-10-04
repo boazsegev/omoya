@@ -1,4 +1,4 @@
-/** Shared model-facing query schema and normalization for read and write.read. */
+/** Shared model-facing query schema and normalization for read and write.source. */
 import { toolRevision } from "../../lib/tool-runtime.js";
 const { validateGlob } = await import(`./glob.js?revision=${toolRevision()}`);
 const EMPTY = (value) => value == null || value === "" || (Array.isArray(value) && value.length === 0);
@@ -92,48 +92,44 @@ export function normalizeReadQuery(args) {
   return query;
 }
 
-function optional(schema, description) {
-  return { anyOf: [schema, { type: "null" }, { type: "boolean" }, { type: "string", const: "" }, { type: "array", maxItems: 0 }, { type: "integer", enum: [0, -1] }], description };
-}
+function numberSchema(description, bounds = {}) { return { type: "integer", ...bounds, description }; }
+function flag(description, fallback) { return { type: "boolean", default: fallback, description }; }
+function objectSchema(properties, description) { return { type: "object", additionalProperties: false, properties, description }; }
 
-function numberSchema(description) { return optional({ type: "integer" }, description); }
-function flag(description, fallback) { return optional({ type: "boolean" }, `${description} Default ${fallback}; valid true/false are preserved.`); }
-function objectSchema(properties, description) { return optional({ type: "object", additionalProperties: false, properties }, description); }
-
-/** Return a fresh JavaScript JSON Schema; consumers may inline it without sharing mutable state. */
+/** Return a fresh schema of intended inputs; recovery stays in normalizeReadQuery. */
 export function readQuerySchema() {
   const rangeProperties = (unit) => ({
-    from: numberSchema(`First ${unit}; negative indexes count from end (-1 is last).`),
-    to: numberSchema(`Last ${unit}${unit === "line" ? ", inclusive" : " offset, exclusive"}; negative indexes count from end.`),
+    from: numberSchema(`Start ${unit}${unit === "line" ? " (1-based)" : " offset (0-based)"}; negative indexes count from the end (-1 is last).`),
+    to: numberSchema(`End ${unit}, ${unit === "line" ? "inclusive" : "exclusive"}; negative indexes count from the end.`),
   });
-  const pattern = (description) => optional({ type: "string", maxLength: MAX_PATTERN }, description);
-  const glob = (description) => optional({ anyOf: [{ type: "string", maxLength: MAX_PATTERN }, { type: "array", maxItems: MAX_GLOBS, items: { type: "string", maxLength: MAX_PATTERN } }] }, description);
+  const pattern = (description) => ({ type: "string", minLength: 1, maxLength: MAX_PATTERN, description });
+  const glob = (description) => ({ minLength: 1, maxLength: MAX_PATTERN, maxItems: MAX_GLOBS, items: { type: "string", minLength: 1, maxLength: MAX_PATTERN }, description });
   return {
     type: "object", additionalProperties: false, required: ["path"],
-    description: "Read query. Null/empty/wrong-type scalar fillers are absent; meaningful booleans, zero offsets/limits and negative range indexes are preserved. Unknown fields fail.",
+    description: "Select a file or folder, then add filters, ranges, or search. Omit options you do not need.",
     properties: {
-      path: { type: "string", maxLength: 4096, description: "Relative file/folder path within the project. Empty string means current folder. Explicit files bypass ignore rules." },
-      recursive: flag("Descend into subfolders for listings/searches.", false),
-      ignore: flag("Opt into .gitignore then .ignore and system-file exclusions; never disables security guards. Git exclusion is not a relevance verdict.", false),
-      glob: glob("Include filenames/relative paths matching any glob, e.g. *.md or src/**/*.js. Slashless patterns match basenames. Filters files, not traversal directories."),
-      exclude: glob("Exclude matching paths/subtrees; exclusions win over glob. Supports *, ?, ** and {a,b}."),
-      lines: objectSchema({ ...rangeProperties("line"), last: numberSchema("Select last N lines (tail); excludes from/to. Zero selects nothing.") }, "File lines: positive indexes are 1-based inclusive; zero is absent. Negative indexes count from end. Applies before characters/search."),
-      characters: objectSchema(rangeProperties("character"), "Unicode code-point slice within selected lines: 0-based, exclusive to. Zero is meaningful."),
-      bytes: objectSchema(rangeProperties("byte"), "Positioned byte slice with binary:true: 0-based, exclusive to. Zero is meaningful."),
+      path: { type: "string", maxLength: 4096, description: "File or folder relative to the working folder. Use . for the current folder." },
+      recursive: flag("Include subfolders in listings and searches.", false),
+      ignore: flag("Apply .gitignore, .ignore, and system-file exclusions to folder scans. Explicit file paths bypass these filters.", false),
+      glob: glob("Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames."),
+      exclude: glob("Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}."),
+      lines: objectSchema({ ...rangeProperties("line"), last: numberSchema("Read the last N lines instead of from/to. Use 0 for no lines.", { minimum: 0 }) }, "Select file lines before character slicing or search. Use from/to or last, not both."),
+      characters: objectSchema(rangeProperties("character"), "Slice Unicode characters within the selected lines. Use 0-based offsets and an exclusive end; do not combine with binary."),
+      bytes: objectSchema(rangeProperties("byte"), "Read a byte range with binary: true. Use 0-based offsets and an exclusive end."),
       search: objectSchema({
-        text: pattern("Literal substring, ORed with regex if both supplied. Empty is absent."),
-        regex: pattern("JavaScript global multiline regular expression; isolated execution has a hard time budget."),
-        ignoreCase: flag("Case-insensitive literal and regex matching.", false),
-        invert: flag("Select lines matched by neither condition.", false),
-        before: optional({ type: "integer", minimum: 0, maximum: 1000 }, "Context lines before selected lines, 0–1000; overlapping context merges."),
-        after: optional({ type: "integer", minimum: 0, maximum: 1000 }, "Context lines after selected lines, 0–1000; overlapping context merges."),
-      }, "Search selected text or raw bytes (binary:true); OR conditions select unique source lines. No effective expression means no search."),
-      limit: optional({ type: "integer", minimum: 0 }, "Maximum listing entries/selected search lines (matching paths in info), default 100. Context is additional but budgeted. Zero intentionally selects nothing; -1 is absent."),
-      offset: optional({ type: "integer", minimum: 0 }, "Skip listing entries/selected search lines (matching paths in info), default 0. Zero is meaningful; -1 is absent."),
-      info: flag("Return contextual metadata/counts: file totals, listing counts, or matching paths and per-file selected-line counts. Scans are bounded; incomplete counts are labeled.", false),
-      annotate: flag("Decorate payload with MIME/ranges/locations/sizes. False returns plain selected text or newline-separated paths. Execution status stays separate.", true),
-      binary: flag("Select raw bytes using bytes; without search return binary content, with search return a text report.", false),
-      base64: flag("Encode selected payload as base64 text, including when saved by write.read. Excludes info.", false),
+        text: pattern("Match this literal substring. With regex, select lines matching either expression."),
+        regex: pattern("Match a JavaScript regular expression with global and multiline behavior; omit / delimiters."),
+        ignoreCase: flag("Match text and regex without case sensitivity.", false),
+        invert: flag("Select lines matching neither text nor regex.", false),
+        before: numberSchema("Include this many lines before each match; overlapping context is merged.", { minimum: 0, maximum: 1000, default: 0 }),
+        after: numberSchema("Include this many lines after each match; overlapping context is merged.", { minimum: 0, maximum: 1000, default: 0 }),
+      }, "Search selected text, or raw bytes with binary: true. Supply text, regex, or both."),
+      limit: numberSchema("Return at most this many listing entries or matching lines (matching paths with info). Context lines are additional. Use 0 for none.", { minimum: 0, default: 100 }),
+      offset: numberSchema("Skip this many listing entries or matching lines (matching paths with info).", { minimum: 0, default: 0 }),
+      info: flag("Return file metadata, listing counts, or matching paths with per-file match counts. Check incomplete-scan notices before treating counts as totals.", false),
+      annotate: flag("Include MIME types, ranges, and locations. Set false for plain text or newline-separated paths.", true),
+      binary: flag("Read raw bytes; use bytes instead of lines/characters. With search, return a text report of matches.", false),
+      base64: flag("Encode selected data as base64 text. Do not combine with info.", false),
     },
   };
 }

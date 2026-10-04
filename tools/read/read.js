@@ -1,4 +1,4 @@
-/** Read-only wrapper. Shared query execution is also consumed directly by write.read. */
+/** Read-only wrapper. Shared query execution is also consumed directly by write.source. */
 import { toolRevision } from "../../lib/tool-runtime.js";
 const revision = toolRevision();
 const { executeReadQuery } = await import(`./engine.js?revision=${revision}`);
@@ -11,7 +11,7 @@ export function readSettingsSchema() {
 }
 
 export function readDescription() {
-  return { safe: true, description: "Read files (cat/head/tail), list/filter folders (ls/find), or search literal text OR regex with context. Ignore rules are opt-in; direct files always bypass them. Negative range indexes count from end. Bounded execution reports skips/incompleteness separately.", inputSchema: readQuerySchema() };
+  return { safe: true, description: "Read project files, list folders, or search their contents. Use ranges for excerpts, glob/exclude to filter files, and search for literal text or regex matches. Set recursive for subfolders. Check skip and incomplete-result notices before assuming coverage.", inputSchema: readQuerySchema() };
 }
 
 /** Execute a read-only project-bounded query; throws actionable input/filesystem errors. */

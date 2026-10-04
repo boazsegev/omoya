@@ -4,6 +4,7 @@ const revision = toolRevision();
 const { isBinary } = await import(`./binary.js?revision=${revision}`);
 const { readChunk, checkReadState, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
 const CHUNK = 64 * 1024;
+const BULK_CHUNK = 8 * 1024 * 1024;
 
 export function textEncoding(sample) {
   if (sample[0] === 0xff && sample[1] === 0xfe) return "utf-16le";
@@ -43,18 +44,19 @@ export async function loadText(opened, query, state) {
   let text;
   try { text = query.binary ? sample.toString("latin1") : decoder.decode(sample, { stream: true }); }
   catch { throw new Error("Invalid text encoding; use binary: true for bytes"); }
-  let newlines = countNewlines(text);
+  let newlines = query.lines ? countNewlines(text) : 0;
   let characters = query.characters ? [...text].length : 0;
   while (position < opened.metadata.size && !positiveStop(query, characters, newlines)) {
     if (position >= state.budgets.fileBytes) throw new ReadBudgetError("read fileBytes budget exhausted; narrow the selection");
-    const length = Math.min(CHUNK, opened.metadata.size - position, state.budgets.fileBytes - position);
+    const prefix = !query.info && (query.lines?.to > 0 || query.characters?.to >= 0);
+    const length = Math.min(prefix ? CHUNK : BULK_CHUNK, opened.metadata.size - position, state.budgets.fileBytes - position);
     const buffer = await readChunk(opened.handle, position, length, state);
     if (!buffer.length) break;
     let chunk;
     try { chunk = query.binary ? buffer.toString("latin1") : decoder.decode(buffer, { stream: true }); }
     catch { throw new Error("Invalid text encoding; use binary: true for bytes"); }
     text += chunk;
-    newlines += countNewlines(chunk);
+    if (query.lines) newlines += countNewlines(chunk);
     if (query.characters) characters += [...chunk].length;
     position += buffer.length;
   }
@@ -111,6 +113,12 @@ export function countNewlines(text) {
   return count;
 }
 
+function countCharacters(text) {
+  let count = 0;
+  for (const point of text) count++;
+  return count;
+}
+
 export function sourceLines(text) {
   if (!text.length) return [];
   const lines = text.split("\n");
@@ -136,7 +144,7 @@ export function rangeBounds(range, length, line = false) {
 /** Apply lines then characters, retaining original first source line. */
 export function selectText(loaded, query) {
   const { text } = loaded;
-  const lines = sourceLines(text);
+  const lines = query.lines ? sourceLines(text) : null;
   let selection = text;
   let lineOffset = 1;
   const descriptions = [];
@@ -156,5 +164,5 @@ export function selectText(loaded, query) {
     descriptions.push(`${query.binary ? "bytes" : "characters"} ${from}–${to} (exclusive end)`);
   }
   return { text: selection, lineOffset, descriptions,
-    totals: loaded.complete ? { characters: [...text].length, lines: lines.length } : null };
+    totals: loaded.complete && query.info ? { characters: countCharacters(text), lines: lines?.length ?? (countNewlines(text) + Number(Boolean(text.length) && !text.endsWith("\n"))) } : null };
 }

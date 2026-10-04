@@ -168,17 +168,17 @@ export function toolDescription(env) {
       fn: webSearch,
       safe: true,
       trusted: true,
-      description: "Search the internet and return bounded Markdown results.",
+      description: "Search the internet for relevant pages. Use a focused query and limit the number of results; use web-fetch to read a result's full page.",
       inputSchema: { type: "object", properties: {
         query: { type: "string", description: "Search query, including any engine syntax" },
-        limit: { type: "integer", description: "Result count; default/max 40, zero means 40, negatives use absolute value" },
+        limit: { type: "integer", minimum: 1, maximum: 40, default: 40, description: "Maximum number of results to return (1–40)." },
       }, required: ["query"] },
     },
     "web-fetch": {
       fn: webFetch,
       safe: true,
       trusted: true,
-      description: "Fetch one HTTP(S) URL as bounded Markdown, text, or JSON text.",
+      description: "Read one HTTP(S) page or API response as Markdown, text, or JSON text. Supply the direct URL; check truncation notices before assuming the response is complete.",
       inputSchema: { type: "object", properties: {
         url: { type: "string", description: "HTTP(S) URL without embedded credentials" },
       }, required: ["url"] },

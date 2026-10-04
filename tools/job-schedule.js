@@ -78,18 +78,23 @@ export function toolDescription() {
     "job-schedule": {
       trusted: true,
       available,
-      description: "List, read, create, replace, or remove scheduled Markdown tasks in an operational project. Pause with enabled: false. New/changed tasks wait for a later scan; removal never cancels running work. Task-local schedules determine admission; the optional daemon is not required. Cannot initialize, enable, disable, repair, run, control a daemon, or access secrets. Unavailable to read-only Agents.",
+      description: "Manage scheduled project tasks: list, read, create, update, or remove. Use enabled: false to pause a task. Updates preserve omitted fields and take effect on a later scan; removing a task does not stop a running job. This tool does not run tasks or configure the scheduler.",
       inputSchema: {
         type: "object", additionalProperties: false, required: ["action"],
         properties: {
-          action: { type: "string", enum: ["list", "read", "create", "update", "remove"], description: "Task operation. update replaces complete Markdown; remove leaves history and running work intact." },
+          action: { type: "string", enum: ["list", "read", "create", "update", "remove"], description: "Choose the task operation. For update, supply only fields to change; remove keeps history and running work." },
           filename: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9 ._-]*\\.md$", maxLength: 120, description: "Leaf .md filename for read/create/update/remove; never a path or opaque task ID." },
           prompt: { type: "string", minLength: 1, description: "Task instructions. Required for create; omitted on update to preserve the current prompt." },
           enabled: { type: "boolean", description: "Whether the task may run. Omitted on update to preserve the current value." },
-          schedule: { description: "Task schedule. Omitted on update to preserve it. Use once, every <duration>, or one structured at/every schedule with optional days.", oneOf: [
-            { type: "string", pattern: "^(once|every [1-9][0-9]*[mhdw])$" },
-            { type: "object", additionalProperties: false, properties: { at: { type: "array", minItems: 1, items: { type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?: GMT)?$" } }, every: { type: "string", pattern: "^[1-9][0-9]*[mhdw]$" }, days: { oneOf: [{ type: "string", enum: ["weekdays", "weekends"] }, { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] } }] } }, oneOf: [{ required: ["at"] }, { required: ["every"] }] },
-          ] },
+          schedule: {
+            description: "Task schedule: a string (once or every <duration>, e.g. every 1h), or an object with exactly one of at/every and optional days. Omit on update to preserve it.",
+            additionalProperties: false,
+            properties: {
+              at: { type: "array", minItems: 1, description: "Run at these HH:MM times; append GMT for UTC, otherwise use local time. Do not combine with every.", items: { type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?: GMT)?$" } },
+              every: { type: "string", pattern: "^[1-9][0-9]*[mhdw]$", description: "Run at this interval: a positive number followed by m, h, d, or w. Do not combine with at." },
+              days: { description: "Restrict runs with the string weekdays/weekends, or an array of day abbreviations (sun, mon, tue, wed, thu, fri, sat).", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] } },
+            },
+          },
         },
       },
     },

@@ -61,7 +61,7 @@ Fresh sessions layer instructions from three `AGENTS.md` files — the harness's
 
 Reusable **skills** and **prompts** accumulate across package, user, and project roots (`ai-skills/`, `ai-prompts/`). Later same-named skills replace earlier instruction bodies; use `{{skill-name}}` to explicitly include another skill, or the previous definition when overriding that same skill. `{{skill-name[1-10]}}` includes 1-based, inclusive lines of its expanded body (excluding frontmatter). Cross-skill references resolve the effective definition; unknown placeholders stay literal, while cycles and invalid known ranges fail. Resource files overlay independently: the last existing match wins.
 
-The `skill` tool accepts one name or an array, trims surrounding whitespace without splitting names, and deduplicates requests. Activation is atomic: unknown names fail without loading any new instructions. Skills already active in the current context succeed without reinjection, even after disk edits; edits apply to a new session. Prefilled skills count as active, and compaction/fork/resume retain them. Portable authored names should still follow Agent Skills naming conventions.
+Use the `skill` tool with an array of catalog names, or omit `names` to list available skills. Direct calls also accept one name; names are trimmed without splitting and deduplicated. Activation is atomic: unknown names fail without loading any new instructions. Skills already active in the current context succeed without reinjection, even after disk edits; edits apply to a new session. Prefilled skills count as active, and compaction/fork/resume retain them. Portable authored names should still follow Agent Skills naming conventions.
 
 Use `skill-resource` with `{name: "web"}` to list available skill-relative resource identifiers (without activating the skill), or `{name: "web", path: "examples/build.js"}` to read an existing UTF-8 resource (up to 128 KiB); listings are optional and do not gate access. Add `target: "web/examples/build.js"` to save its exact bytes (including binary resources, up to 16 MiB) to a new project file, creating parent folders. Existing targets, traversal, and observed symlinks are refused; safe mode allows reads but refuses saving. Resources do not activate skills or execute code. Installation paths are not exposed. Ordinary `read` continues to read workspace files, with no skill-resource fallback.
 
@@ -92,6 +92,8 @@ Omoya resolves each listed installed package at startup and treats its package r
 ## Tools with enforced boundaries
 
 The built-in tools — `read`, `edit`, `write`, `bash`, `question`, `skill`, `skill-resource`, `note`, `worker-create`, `worker-message`, `worker-close`, `worker-status`, `mcp`, `web-search`, `web-fetch` — cover file reading and search, exact-text edits (a unified diff shows what the agent did, and each edit can be rolled back), file writing, bounded shell commands with cancellation, structured questions, a skill catalog, scratchpad notes, named workers, MCP servers, and web search and fetch.
+
+Tool descriptions give short usage instructions. Built-in input schemas avoid `anyOf`/`oneOf` and multi-type arrays for provider compatibility. Mixed-shape fields describe their supported forms without a restrictive type; conditional requirements are explained in descriptions and checked at runtime. Argument names and supported forms—including string/array globs and null note-deletion patches—are unchanged. Omit unused fields rather than sending placeholder values; runtime recovery remains internal.
 
 ### Direct tool access from your shell
 
@@ -170,14 +172,14 @@ Math in messages can use explicit `\(x^2\)` inline delimiters (recommended when 
 
 ## File queries without shell pipelines
 
-The read-only `read` tool handles cat/head/tail, listings, filename filters, and literal/regex search. `write.read` saves query payloads without sending them back through the model. Without an effective search it forces `annotate: false`, even if supplied true; searches honor `annotate` (default true) to retain source locations:
+The read-only `read` tool handles cat/head/tail, listings, filename filters, and literal/regex search. `write.source` saves query payloads without sending them back through the model. Without an effective search it forces `annotate: false`, even if supplied true; searches honor `annotate` (default true) to retain source locations:
 
 ```js
 read({ path: "README.md", annotate: false });
 read({ path: "log.txt", lines: { from: -8 } }); // last eight lines
 read({ path: "src", recursive: true, glob: ["*.js", "*.md"],
   exclude: "generated/**", search: { text: "TODO", regex: "\\bFIXME\\b", before: 2, after: 2 }, limit: 20 });
-write({ path: "report.txt", read: { path: "src", recursive: true,
+write({ path: "report.txt", source: { path: "src", recursive: true,
   glob: "*.md", search: { text: "TODO" }, info: true } });
 ```
 
@@ -185,7 +187,7 @@ write({ path: "report.txt", read: { path: "src", recursive: true,
 
 `ignore` defaults false: Git publishing exclusions often hide useful AI artifacts. Opt in with `ignore: true` to load `.gitignore` then `.ignore` and system exclusions; explicit files always bypass ignore rules. Symlinks are never followed. `info` gives contextual file metadata/listing counts/search paths and line counts. `annotate: false` strips payload decoration, not execution-status warnings. `binary` selects bytes; `base64` produces encoded text. No JSON format switch or separate copy API.
 
-Finite `read` settings bound work: `scanBytes` (64 MiB), `fileBytes` (16 MiB), `files` (10000), `entries` (20000), `grepFileSizeLimit` (5 MiB per discovered search file), `outputBytes` (64 KiB), `artifactBytes` (16 MiB for `write.read`), `regexMs` (1000), and `timeoutMs` (30000). Positive safe integers customize budgets; nonpositive values do not disable them. Counts stopped by budgets are incomplete. Explicit result limits are intentional; execution/serialization failures prevent saving. Raw binary saves contain bytes, not annotations; status is never inserted into saved data. `write` accepts exactly one `content` or `read` and still overwrites existing files, now through atomic replacement.
+Finite `read` settings bound work: `scanBytes` (64 MiB), `fileBytes` (16 MiB), `files` (10000), `entries` (20000), `grepFileSizeLimit` (5 MiB per discovered search file), `outputBytes` (64 KiB), `artifactBytes` (16 MiB for `write.source`), `regexMs` (1000), and `timeoutMs` (30000). Positive safe integers customize budgets; nonpositive values do not disable them. Counts stopped by budgets are incomplete. Explicit result limits are intentional; execution/serialization failures prevent saving. Raw binary saves contain bytes, not annotations; status is never inserted into saved data. `write` accepts exactly one `content` or `source` (a read query) and still overwrites existing files, now through atomic replacement.
 
 ## Sessions and jobs
 

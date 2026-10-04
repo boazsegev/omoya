@@ -30,6 +30,18 @@ describe("manual Jobs surfaces", () => {
     expect(listed.diagnostics).toContainEqual({ filename: "bad.md", code: "JOBS_TASK_UNKNOWN_KEY", message: "task frontmatter has an unknown key \"unknown\" (known: id, enabled, schedule, tools, timeout, model)" });
     const after = await tree(paths.root); delete after.tasks; delete before.tasks; expect(after).toEqual(before);
   });
+  test("schedule alternatives and conditional errors are enforced at runtime", async () => {
+    const { env } = await fixture();
+    const schedules = ["once", "every 1h", { every: "2h", days: "weekdays" }, { at: ["09:00 GMT"], days: ["mon", "fri"] }];
+    for (const [index, schedule] of schedules.entries()) {
+      await jobSchedule({ action: "create", filename: `alternative${index}.md`, prompt: "work", schedule }, { env });
+      expect((await jobSchedule({ action: "read", filename: `alternative${index}.md` }, { env })).task.metadata.schedule).toEqual(schedule);
+    }
+    for (const schedule of [{}, { every: "1h", at: ["09:00"] }, "sometimes"]) {
+      await expect(jobSchedule({ action: "create", filename: "bad.md", prompt: "work", schedule }, { env })).rejects.toThrow(/schedule/);
+    }
+    await expect(jobSchedule({ action: "create", filename: "missing.md" }, { env })).rejects.toThrow(/prompt/);
+  });
   test("disable after task publication cannot be undone by tool repair", async () => {
     const { root, env } = await fixture();
     // A scheduler getter is an old post-publication repair trap: any access would

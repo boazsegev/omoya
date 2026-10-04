@@ -1,4 +1,4 @@
-/** Payload serialization shared by read and write.read; operational status never enters saved data. */
+/** Payload serialization shared by read and write.source; operational status never enters saved data. */
 import { toolRevision } from "../../lib/tool-runtime.js";
 const revision = toolRevision();
 const { infoBlock } = await import(`./util.js?revision=${revision}`);

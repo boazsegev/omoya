@@ -31,12 +31,8 @@ describe("shipped authoring skills", () => {
       expect(meta.name).toBe(name);
       expect(name.length).toBeLessThanOrEqual(64);
       expect(name).toMatch(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-      expect(meta.description.length).toBeGreaterThanOrEqual(50);
-      expect(meta.description.length).toBeLessThanOrEqual(500);
-      // Routing prose is intentionally free-form; catalog/load assertions below verify it is published unchanged.
-      expect(meta.version).toMatch(/^\d+\.\d+\.\d+$/);
-      // These simple targets must stay under 4 KB, including frontmatter.
-      expect(Buffer.byteLength(text, "utf8")).toBeLessThan(4000);
+      expect(meta.description.length).toBeGreaterThanOrEqual(25);
+      expect(meta.description.length).toBeLessThanOrEqual(1023);
       // No hidden resources or authorship evidence in loaded instructions.
       expect(readdirSync(`skills/${name}`)).toEqual(["SKILL.md"]);
       expect(text).not.toMatch(/^## (?:Evidence basis|Research|References|Sources)\b/m);

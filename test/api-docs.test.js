@@ -98,6 +98,19 @@ describe("generated API documentation", () => {
     }
   }, 20_000);
 
+  test("compact schemas retain object fields and prose for mixed-shape inputs", async () => {
+    const text = await generate();
+    for (const name of ["edit", "write"]) {
+      const section = text.split(`### \`Env.toolDescription.${name}.inputSchema\`\n\n\`\`\`schema\n`)[1]?.split("\n```")[0];
+      expect(section).toContain('"path');
+      expect(section).not.toBe('"unknown"');
+    }
+    expect(text).toContain('"glob?": "Include files matching a glob');
+    expect(text).toContain('"notes?": "set: a map');
+    expect(text).toContain('"forms": "Task schedule: a string');
+    expect(text).toContain('"forms": "Optional focused preview: a plain string');
+  }, 20_000);
+
   test("API.md regenerates from the live tree on every run", async () => {
     const text = await renderApiReference();
     writeFileSync("API.md", text);

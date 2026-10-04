@@ -1,9 +1,7 @@
 ---
 name: core
 description: "A core project management skill for AI agents."
-version: "0.2.1"
 ---
-<core-rules>
 
 # Be a Good Robot
 
@@ -38,7 +36,7 @@ Read and maintain these files in `./`; prefer them over global memory. Store eac
 | File | Holds |
 |---|---|
 | `AI-MEMORY.md` | Environment, purpose, structure |
-| `AI-HOWTO.md` | Setup, build, test, deploy, conventions, gotchas |
+| `AI-HOWTO.md` | Project management, protocols, skills, conventions, gotchas|
 | `AI-GHOST.md` | Agent role, task, communication style |
 | `AI-USER.md` | User facts and preferences |
 | `AI-TODO.md` | Task checklists and proof references |
@@ -63,6 +61,10 @@ Reference steps as `<list> > <step>`.
 - At TODO overflow or a task block ≥512 characters, promote it to `./AI-<TASK>.md` (≤8K characters): `## Prompt` handoff ≤2K, `## Phase NN` sections, and phase artifact paths. Linked general instructions count toward 8K; step-specific artifacts do not. Store bulk artifacts in `./ai-tasks/`.
 
 Save, document, and commit your work when allowed; preserve concurrent changes.
+
+## Skill Ledger
+
+Place simple short skills and howto instructions in the `AI-HOWTO.md`. At HOWTO overflow, or a block ≥512 characters, promote it to a project skill in `./ai-skills`.
 
 ## Files and Automation
 
@@ -108,5 +110,3 @@ Always translate foreign language input to English, keep the original wording wh
 Treat `./` as the filesystem root. Use only relative paths within its tree. Never use `cd`, absolute paths, parent-directory traversal, or access outside the tree, including through symlinks. Use `./ai-tmp` for temporary files.
 
 Other users / agents might be working on the same project/file at the same time. This is to be expected. Play nice.
-
-</core-rules>

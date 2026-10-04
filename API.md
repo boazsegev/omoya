@@ -1,4 +1,4 @@
-# API (2026-10-04)
+# API (2026-10-05)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -102,7 +102,7 @@ Source: `tools/read.js`
  * cwd-rooted file access tool. Thin WRAPPER publishing the callable
  * implemented under tools/read/. The tool scan is NOT recursive:
  * sub-folders are never scanned. read/ owns query normalization,
- * guarded execution and serialization; write.read consumes those explicit
+ * guarded execution and serialization; write.source consumes those explicit
  * shared contracts. No helper is independently published as a tool.
  *
  * One exception BY DESIGN: tools/guard/ is the shared guard layer
@@ -141,7 +141,7 @@ export function settingsSchema() {
 Source: `tools/write.js`
 
 ```js
-/** Mutating writer. Optional read query uses the shared engine, never provider dispatch. */
+/** Mutating writer. Optional source query uses the shared read engine, never provider dispatch. */
 import { constants } from "node:fs";
 import { mkdir, open, rename, unlink, lstat } from "node:fs/promises";
 import { dirname, basename, join, relative } from "node:path";
@@ -184,9 +184,9 @@ async function queryPayload(query, resolved, context) {
   const result = await executeReadQuery(normalized, context, { artifact: true });
   let metadata;
   try { metadata = await lstat(resolved); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  if (result.source === resolved || sameFile(result, metadata)) throw new Error("write.read source and destination must differ");
+  if (result.source === resolved || sameFile(result, metadata)) throw new Error("write source and destination must differ");
   const payload = serializeReadResult(result);
-  if (!result.selectionComplete) throw new Error(`write.read refused incomplete output: ${result.status.join("; ")}`);
+  if (!result.selectionComplete) throw new Error(`write source query refused incomplete output: ${result.status.join("; ")}`);
   const skipped = Object.entries(result.skips).filter(([, count]) => count).map(([name, count]) => `${count} ${name} skipped`);
   return { payload, binary: result.binary && !result.query.base64, status: [...result.status, ...skipped] };
 }
@@ -220,20 +220,20 @@ function relativeDestination(resolved, scope) {
   return relative(scope.cwd, resolved) || ".";
 }
 
-/** Exactly one effective content/read; destination changes only after guarded successful serialization. */
+/** Exactly one effective content/source; destination changes only after guarded successful serialization. */
 export async function write(args = {}, context) {
   if (context?.safe === true) throw new Error("write is unavailable in safe mode");
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new TypeError("write arguments must be an object");
-  for (const key of Object.keys(args)) if (!["path", "content", "read", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
+  for (const key of Object.keys(args)) if (!["path", "content", "source", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
   const hasContent = !absent(args.content);
-  const hasRead = !absent(args.read) && args.read !== "";
-  if (hasContent === hasRead) throw new TypeError("write requires exactly one effective content or read");
+  const hasSource = !absent(args.source) && args.source !== "";
+  if (hasContent === hasSource) throw new TypeError("write requires exactly one effective content or source");
   if (hasContent && typeof args.content !== "string") throw new TypeError("write.content must be a string");
   if (!absent(args.ask) && typeof args.ask !== "boolean") throw new TypeError("write.ask must be a boolean");
   checkWrite(context);
   const scope = readScope(context);
   const resolved = await destination(args.path, scope);
-  const data = hasRead ? await queryPayload(args.read, resolved, context) : { payload: Buffer.from(args.content), binary: false, status: [] };
+  const data = hasSource ? await queryPayload(args.source, resolved, context) : { payload: Buffer.from(args.content), binary: false, status: [] };
   if (!data.binary) await enforceContentPolicy({ path: args.path, content: data.payload.toString("utf8"),
     ask: args.ask === true || typeof context?.question?.ask === "function", context, askable: true, cwd: scope.boundary, lax: true });
   await atomicWrite(resolved, data.payload, context, scope);
@@ -242,12 +242,12 @@ export async function write(args = {}, context) {
 
 export function toolDescription() {
   return { write: { trusted: true,
-    description: "Create or overwrite a project file atomically. Supply content OR read (shared read query), never both. read saves selected text/report or raw binary without a model round-trip; incomplete/budget-failed output leaves destination unchanged.",
+    description: "Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.",
     inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: {
       path: { type: "string", description: "Destination path relative to the working folder, inside the project." },
-      content: { anyOf: [{ type: "string" }, { type: "null" }, { type: "boolean" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }], description: "Text to save, including empty string. Exactly one effective content or read; wrong-type model fillers are absent." },
-      read: { anyOf: [readQuerySchema(), { type: "null" }, { type: "boolean" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }, { type: "string", const: "" }], description: "Shared read query. Without an effective search, annotate is forced false even if supplied true; searches honor annotate (default true). Save payload, not status/preview blocks. Binary saves bytes; base64 saves encoded text. Explicit selection limits are honored; execution-incomplete output is refused." },
-      ask: { anyOf: [{ type: "boolean" }, { type: "null" }, { type: "integer", enum: [-1, 0] }, { type: "array", maxItems: 0 }], description: "Request permission when saved text references an existing path outside the project. Wrong-type model fillers are absent." },
+      content: { type: "string", description: "Writes text to file. Use an empty string to create an empty file or clear an existing file. Omit when using a source." },
+      source: { ...readQuerySchema(), description: "Writes directly from file system source. Use to copy files, or save folder listings and search results to a file. Binary reads save raw bytes unless base64 is true. Omit when writing text to file." },
+      ask: { type: "boolean", description: "Ask permission if saved text references an existing path outside the project; without permission, the write is refused." },
     } },
   } };
 }
@@ -423,7 +423,7 @@ Source: `tools/edit.js`; flags: trusted
     },
     "edits": {
       "type": "array",
-      "description": "The replacements to make. Match each oldText against the file as it is now, not against earlier edits in the same call. Never send overlapping or nested edits; merge them into one edit.",
+      "description": "The replacements to make; required unless using rollback. Match each oldText against the file as it is now, not against earlier edits in the same call. Never send overlapping or nested edits; merge them into one edit.",
       "items": {
         "type": "object",
         "properties": {
@@ -452,29 +452,18 @@ Source: `tools/edit.js`; flags: trusted
     },
     "rollback": {
       "type": "string",
-      "description": "Reverse a recent edit by passing the edit id returned after it succeeded. Pass the same path the edit targeted. The file must still hold the replacement text at the edited positions; if it does not, read the file and make a new targeted edit instead."
+      "description": "Reverse a recent edit by passing the edit id returned after it succeeded. Omit edits when using rollback. Pass the same path the edit targeted. The file must still hold the replacement text at the edited positions; if it does not, read the file and make a new targeted edit instead."
     }
   },
-  "anyOf": [
-    {
-      "required": [
-        "path",
-        "edits"
-      ]
-    },
-    {
-      "required": [
-        "path",
-        "rollback"
-      ]
-    }
+  "required": [
+    "path"
   ]
 }
 ```
 
 ### `job-schedule`
 
-List, read, create, replace, or remove scheduled Markdown tasks in an operational project. Pause with enabled: false. New/changed tasks wait for a later scan; removal never cancels running work. Task-local schedules determine admission; the optional daemon is not required. Cannot initialize, enable, disable, repair, run, control a daemon, or access secrets. Unavailable to read-only Agents.
+Manage scheduled project tasks: list, read, create, update, or remove. Use enabled: false to pause a task. Updates preserve omitted fields and take effect on a later scan; removing a task does not stop a running job. This tool does not run tasks or configure the scheduler.
 
 Source: `tools/job-schedule.js`; flags: trusted
 
@@ -495,7 +484,7 @@ Source: `tools/job-schedule.js`; flags: trusted
         "update",
         "remove"
       ],
-      "description": "Task operation. update replaces complete Markdown; remove leaves history and running work intact."
+      "description": "Choose the task operation. For update, supply only fields to change; remove keeps history and running work."
     },
     "filename": {
       "type": "string",
@@ -513,71 +502,41 @@ Source: `tools/job-schedule.js`; flags: trusted
       "description": "Whether the task may run. Omitted on update to preserve the current value."
     },
     "schedule": {
-      "description": "Task schedule. Omitted on update to preserve it. Use once, every <duration>, or one structured at/every schedule with optional days.",
-      "oneOf": [
-        {
-          "type": "string",
-          "pattern": "^(once|every [1-9][0-9]*[mhdw])$"
+      "description": "Task schedule: a string (once or every <duration>, e.g. every 1h), or an object with exactly one of at/every and optional days. Omit on update to preserve it.",
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Run at these HH:MM times; append GMT for UTC, otherwise use local time. Do not combine with every.",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?: GMT)?$"
+          }
         },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "at": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "string",
-                "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?: GMT)?$"
-              }
-            },
-            "every": {
-              "type": "string",
-              "pattern": "^[1-9][0-9]*[mhdw]$"
-            },
-            "days": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "weekdays",
-                    "weekends"
-                  ]
-                },
-                {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "sun",
-                      "mon",
-                      "tue",
-                      "wed",
-                      "thu",
-                      "fri",
-                      "sat"
-                    ]
-                  }
-                }
-              ]
-            }
-          },
-          "oneOf": [
-            {
-              "required": [
-                "at"
-              ]
-            },
-            {
-              "required": [
-                "every"
-              ]
-            }
-          ]
+        "every": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[mhdw]$",
+          "description": "Run at this interval: a positive number followed by m, h, d, or w. Do not combine with at."
+        },
+        "days": {
+          "description": "Restrict runs with the string weekdays/weekends, or an array of day abbreviations (sun, mon, tue, wed, thu, fri, sat).",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "sun",
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat"
+            ]
+          }
         }
-      ]
+      }
     }
   }
 }
@@ -585,7 +544,7 @@ Source: `tools/job-schedule.js`; flags: trusted
 
 ### `note`
 
-Manage scratchpad notes (short-term memory). Actions: `set` creates or updates notes ({notes: {title: patch}} — missing notes are created; set a patch to null to delete its note), `get` reads notes ({notes: [title, ...]}; use ["*"] for every note and `only` to return specific fields), `list` shows open notes (done notes are omitted), `remove` deletes notes ({notes: [title, ...]}; ["*"] deletes all), `search` regex-searches titles and fields (case-insensitive; use `field` to search one field and `max` to cap matches). Pass `notes` as an array of titles for get/remove or as a title → patch map for set. Note fields are free JSON — content/summary/type are the convention; add any other fields you need.
+Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use ["*"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.
 
 Source: `tools/note.js`; flags: safe
 
@@ -605,10 +564,6 @@ Source: `tools/note.js`; flags: safe
       "description": "The operation to perform."
     },
     "notes": {
-      "type": [
-        "array",
-        "object"
-      ],
       "description": "set: a map of title → patch object. get/remove: an array of titles ([\"*\"] = every note).",
       "items": {
         "type": "string",
@@ -616,31 +571,15 @@ Source: `tools/note.js`; flags: safe
       },
       "additionalProperties": {
         "description": "Patch for the note whose title is this key: fields you set are merged in (nested objects merge field-by-field, arrays and scalars replace), a null field deletes that field, and a null patch deletes the whole note.",
-        "type": [
-          "object",
-          "null"
-        ],
         "properties": {
           "content": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The full note body."
+            "description": "The full note body as a string; null deletes this field."
           },
           "summary": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A one-line gist of the note."
+            "description": "A one-line gist as a string; null deletes this field."
           },
           "type": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "todo / active / done / info — pick the one that fits."
+            "description": "Use the string todo, active, done, or info; null deletes this field."
           }
         },
         "additionalProperties": true
@@ -662,8 +601,11 @@ Source: `tools/note.js`; flags: safe
       "description": "search: limit the search to one field (default: the title and all fields)."
     },
     "max": {
-      "type": "number",
-      "description": "search: maximum matches to return (default 20, cap 50)."
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 20,
+      "description": "search: maximum matches to return (1–50)."
     }
   },
   "required": [
@@ -674,7 +616,7 @@ Source: `tools/note.js`; flags: safe
 
 ### `question`
 
-Ask structured user questions with selectable options and custom answers.
+Ask the user to resolve a decision or provide missing information. Send 1–4 clear questions with distinct options; users can also give custom answers.
 
 Source: `tools/question.js`; flags: safe, sandbox
 
@@ -719,37 +661,29 @@ Source: `tools/question.js`; flags: safe, sandbox
                   "description": "What this option means or what happens if chosen."
                 },
                 "preview": {
-                  "description": "Optional focused preview: a plain string, or typed text/code with optional title and language.",
-                  "oneOf": [
-                    {
-                      "type": "string"
+                  "description": "Optional focused preview: a plain string, or an object with type (text/code) and content. Add title or language when useful.",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "text",
+                        "code"
+                      ],
+                      "description": "Display the preview as plain text or code."
                     },
-                    {
-                      "type": "object",
-                      "properties": {
-                        "type": {
-                          "type": "string",
-                          "enum": [
-                            "text",
-                            "code"
-                          ]
-                        },
-                        "content": {
-                          "type": "string"
-                        },
-                        "language": {
-                          "type": "string"
-                        },
-                        "title": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "type",
-                        "content"
-                      ]
+                    "content": {
+                      "type": "string",
+                      "description": "Preview text or code to show for this option."
+                    },
+                    "language": {
+                      "type": "string",
+                      "description": "Code language for syntax highlighting; omit for plain text."
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "Short title for the preview."
                     }
-                  ]
+                  }
                 }
               },
               "required": [
@@ -775,7 +709,7 @@ Source: `tools/question.js`; flags: safe, sandbox
 
 ### `read`
 
-Read files (cat/head/tail), list/filter folders (ls/find), or search literal text OR regex with context. Ignore rules are opt-in; direct files always bypass them. Negative range indexes count from end. Bounded execution reports skips/incompleteness separately.
+Read project files, list folders, or search their contents. Use ranges for excerpts, glob/exclude to filter files, and search for literal text or regex matches. Set recursive for subfolders. Check skip and incomplete-result notices before assuming coverage.
 
 Source: `tools/read.js`; flags: safe
 
@@ -786,841 +720,169 @@ Source: `tools/read.js`; flags: safe
   "required": [
     "path"
   ],
-  "description": "Read query. Null/empty/wrong-type scalar fillers are absent; meaningful booleans, zero offsets/limits and negative range indexes are preserved. Unknown fields fail.",
+  "description": "Select a file or folder, then add filters, ranges, or search. Omit options you do not need.",
   "properties": {
     "path": {
       "type": "string",
       "maxLength": 4096,
-      "description": "Relative file/folder path within the project. Empty string means current folder. Explicit files bypass ignore rules."
+      "description": "File or folder relative to the working folder. Use . for the current folder."
     },
     "recursive": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Descend into subfolders for listings/searches. Default false; valid true/false are preserved."
+      "type": "boolean",
+      "default": false,
+      "description": "Include subfolders in listings and searches."
     },
     "ignore": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Opt into .gitignore then .ignore and system-file exclusions; never disables security guards. Git exclusion is not a relevance verdict. Default false; valid true/false are preserved."
+      "type": "boolean",
+      "default": false,
+      "description": "Apply .gitignore, .ignore, and system-file exclusions to folder scans. Explicit file paths bypass these filters."
     },
     "glob": {
-      "anyOf": [
-        {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 4096
-            },
-            {
-              "type": "array",
-              "maxItems": 128,
-              "items": {
-                "type": "string",
-                "maxLength": 4096
-              }
-            }
-          ]
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Include filenames/relative paths matching any glob, e.g. *.md or src/**/*.js. Slashless patterns match basenames. Filters files, not traversal directories."
+      "minLength": 1,
+      "maxLength": 4096,
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "description": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames."
     },
     "exclude": {
-      "anyOf": [
-        {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 4096
-            },
-            {
-              "type": "array",
-              "maxItems": 128,
-              "items": {
-                "type": "string",
-                "maxLength": 4096
-              }
-            }
-          ]
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Exclude matching paths/subtrees; exclusions win over glob. Supports *, ?, ** and {a,b}."
+      "minLength": 1,
+      "maxLength": 4096,
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "description": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}."
     },
     "lines": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "First line; negative indexes count from end (-1 is last)."
-            },
-            "to": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Last line, inclusive; negative indexes count from end."
-            },
-            "last": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Select last N lines (tail); excludes from/to. Zero selects nothing."
-            }
-          }
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
           "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
+          "description": "Start line (1-based); negative indexes count from the end (-1 is last)."
+        },
+        "to": {
+          "type": "integer",
+          "description": "End line, inclusive; negative indexes count from the end."
+        },
+        "last": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Read the last N lines instead of from/to. Use 0 for no lines."
         }
-      ],
-      "description": "File lines: positive indexes are 1-based inclusive; zero is absent. Negative indexes count from end. Applies before characters/search."
+      },
+      "description": "Select file lines before character slicing or search. Use from/to or last, not both."
     },
     "characters": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "First character; negative indexes count from end (-1 is last)."
-            },
-            "to": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Last character offset, exclusive; negative indexes count from end."
-            }
-          }
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
           "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
+          "description": "Start character offset (0-based); negative indexes count from the end (-1 is last)."
+        },
+        "to": {
+          "type": "integer",
+          "description": "End character, exclusive; negative indexes count from the end."
         }
-      ],
-      "description": "Unicode code-point slice within selected lines: 0-based, exclusive to. Zero is meaningful."
+      },
+      "description": "Slice Unicode characters within the selected lines. Use 0-based offsets and an exclusive end; do not combine with binary."
     },
     "bytes": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "First byte; negative indexes count from end (-1 is last)."
-            },
-            "to": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Last byte offset, exclusive; negative indexes count from end."
-            }
-          }
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
           "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
+          "description": "Start byte offset (0-based); negative indexes count from the end (-1 is last)."
+        },
+        "to": {
+          "type": "integer",
+          "description": "End byte, exclusive; negative indexes count from the end."
         }
-      ],
-      "description": "Positioned byte slice with binary:true: 0-based, exclusive to. Zero is meaningful."
+      },
+      "description": "Read a byte range with binary: true. Use 0-based offsets and an exclusive end."
     },
     "search": {
-      "anyOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "text": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 4096
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Literal substring, ORed with regex if both supplied. Empty is absent."
-            },
-            "regex": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 4096
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "JavaScript global multiline regular expression; isolated execution has a hard time budget."
-            },
-            "ignoreCase": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Case-insensitive literal and regex matching. Default false; valid true/false are preserved."
-            },
-            "invert": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Select lines matched by neither condition. Default false; valid true/false are preserved."
-            },
-            "before": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 1000
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Context lines before selected lines, 0–1000; overlapping context merges."
-            },
-            "after": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 1000
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Context lines after selected lines, 0–1000; overlapping context merges."
-            }
-          }
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
           "type": "string",
-          "const": ""
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Match this literal substring. With regex, select lines matching either expression."
         },
-        {
-          "type": "array",
-          "maxItems": 0
+        "regex": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Match a JavaScript regular expression with global and multiline behavior; omit / delimiters."
         },
-        {
+        "ignoreCase": {
+          "type": "boolean",
+          "default": false,
+          "description": "Match text and regex without case sensitivity."
+        },
+        "invert": {
+          "type": "boolean",
+          "default": false,
+          "description": "Select lines matching neither text nor regex."
+        },
+        "before": {
           "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 0,
+          "description": "Include this many lines before each match; overlapping context is merged."
+        },
+        "after": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 0,
+          "description": "Include this many lines after each match; overlapping context is merged."
         }
-      ],
-      "description": "Search selected text or raw bytes (binary:true); OR conditions select unique source lines. No effective expression means no search."
+      },
+      "description": "Search selected text, or raw bytes with binary: true. Supply text, regex, or both."
     },
     "limit": {
-      "anyOf": [
-        {
-          "type": "integer",
-          "minimum": 0
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Maximum listing entries/selected search lines (matching paths in info), default 100. Context is additional but budgeted. Zero intentionally selects nothing; -1 is absent."
+      "type": "integer",
+      "minimum": 0,
+      "default": 100,
+      "description": "Return at most this many listing entries or matching lines (matching paths with info). Context lines are additional. Use 0 for none."
     },
     "offset": {
-      "anyOf": [
-        {
-          "type": "integer",
-          "minimum": 0
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Skip listing entries/selected search lines (matching paths in info), default 0. Zero is meaningful; -1 is absent."
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Skip this many listing entries or matching lines (matching paths with info)."
     },
     "info": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Return contextual metadata/counts: file totals, listing counts, or matching paths and per-file selected-line counts. Scans are bounded; incomplete counts are labeled. Default false; valid true/false are preserved."
+      "type": "boolean",
+      "default": false,
+      "description": "Return file metadata, listing counts, or matching paths with per-file match counts. Check incomplete-scan notices before treating counts as totals."
     },
     "annotate": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Decorate payload with MIME/ranges/locations/sizes. False returns plain selected text or newline-separated paths. Execution status stays separate. Default true; valid true/false are preserved."
+      "type": "boolean",
+      "default": true,
+      "description": "Include MIME types, ranges, and locations. Set false for plain text or newline-separated paths."
     },
     "binary": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Select raw bytes using bytes; without search return binary content, with search return a text report. Default false; valid true/false are preserved."
+      "type": "boolean",
+      "default": false,
+      "description": "Read raw bytes; use bytes instead of lines/characters. With search, return a text report of matches."
     },
     "base64": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "string",
-          "const": ""
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        },
-        {
-          "type": "integer",
-          "enum": [
-            0,
-            -1
-          ]
-        }
-      ],
-      "description": "Encode selected payload as base64 text, including when saved by write.read. Excludes info. Default false; valid true/false are preserved."
+      "type": "boolean",
+      "default": false,
+      "description": "Encode selected data as base64 text. Do not combine with info."
     }
   }
 }
@@ -1628,27 +890,21 @@ Source: `tools/read.js`; flags: safe
 
 ### `skill`
 
-List skills or atomically activate named skills. Already active skills succeed without reloading; disk edits apply next session.
+Load relevant skills before starting a task and follow their instructions. Omit names to list available skills; pass an array of catalog names to load them.
 
 Source: `tools/skill.js`; flags: safe
 
 ```json
 {
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "names": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      ],
-      "description": "One skill name or an array; trim surrounding whitespace, preserve internal spaces, deduplicate. Omit/empty lists the catalog."
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Skill names to load, e.g. [\"api-design\"]. Omit to list the catalog."
     }
   }
 }
@@ -1656,7 +912,7 @@ Source: `tools/skill.js`; flags: safe
 
 ### `skill-resource`
 
-List available skill resources when only name is given; supply path to read a resource (last matching layer wins), or target to save its exact bytes to a new project file. No activation/execution. Safe mode refuses saving.
+Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new project file. In read-only mode, omit target.
 
 Source: `tools/skill-resource.js`; flags: safe, trusted
 
@@ -1666,11 +922,11 @@ Source: `tools/skill-resource.js`; flags: safe, trusted
   "properties": {
     "name": {
       "type": "string",
-      "description": "Skill name; surrounding whitespace is trimmed."
+      "description": "Skill name from the skill catalog."
     },
     "path": {
       "type": "string",
-      "description": "Optional skill-relative forward-slash filename, such as examples/build.js. Omit to list available resource identifiers. Unlisted resources can still be read. No traversal or symlinks."
+      "description": "Resource filename relative to the skill, e.g. examples/build.js. Omit to list resources. Do not use parent traversal or symlinks."
     },
     "target": {
       "type": "string",
@@ -1685,7 +941,7 @@ Source: `tools/skill-resource.js`; flags: safe, trusted
 
 ### `web-fetch`
 
-Fetch one HTTP(S) URL as bounded Markdown, text, or JSON text.
+Read one HTTP(S) page or API response as Markdown, text, or JSON text. Supply the direct URL; check truncation notices before assuming the response is complete.
 
 Source: `tools/web.js`; flags: safe, trusted
 
@@ -1706,7 +962,7 @@ Source: `tools/web.js`; flags: safe, trusted
 
 ### `web-search`
 
-Search the internet and return bounded Markdown results.
+Search the internet for relevant pages. Use a focused query and limit the number of results; use web-fetch to read a result's full page.
 
 Source: `tools/web.js`; flags: safe, trusted
 
@@ -1720,7 +976,10 @@ Source: `tools/web.js`; flags: safe, trusted
     },
     "limit": {
       "type": "integer",
-      "description": "Result count; default/max 40, zero means 40, negatives use absolute value"
+      "minimum": 1,
+      "maximum": 40,
+      "default": 40,
+      "description": "Maximum number of results to return (1–40)."
     }
   },
   "required": [
@@ -1731,7 +990,7 @@ Source: `tools/web.js`; flags: safe, trusted
 
 ### `worker-close`
 
-Close named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
+Closes named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
 
 Source: `tools/worker-close.js`; flags: trusted
 
@@ -1779,6 +1038,7 @@ Source: `tools/worker-create.js`; flags: trusted
     "workers": {
       "type": "array",
       "minItems": 1,
+      "description": "Workers to create. Give each a unique name and any model, role, or scope options it needs.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -1814,6 +1074,9 @@ Source: `tools/worker-create.js`; flags: trusted
           "safe": {
             "type": "boolean",
             "description": "Restrict worker to read-only tools."
+          },
+          "subfolder": {
+            "description": "Existing subfolder path relative to the project root; restrict the worker's working folder and sandbox to it. Omit or use \"\", \".\", \"/\", \"./\", false, or null for the project root (\"/\" never means the filesystem root). Other absolute paths, parent traversal, and symlinks outside the project are forbidden."
           }
         }
       }
@@ -1824,7 +1087,7 @@ Source: `tools/worker-create.js`; flags: trusted
 
 ### `worker-message`
 
-Send one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Sends one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
 
 Source: `tools/worker-message.js`; flags: trusted
 
@@ -1857,7 +1120,7 @@ Source: `tools/worker-message.js`; flags: trusted
 
 ### `worker-status`
 
-Show workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
+Shows workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -1868,11 +1131,11 @@ Source: `tools/worker-status.js`; flags: safe, trusted
   "properties": {
     "workers": {
       "type": "boolean",
-      "description": "Include workers and their models, grouped by busy/idle."
+      "description": "Includes workers and their models, grouped by busy/idle."
     },
     "models": {
       "type": "boolean",
-      "description": "Include models and available capacity for new work."
+      "description": "Includes models and available capacity for new work."
     }
   }
 }
@@ -1880,7 +1143,7 @@ Source: `tools/worker-status.js`; flags: safe, trusted
 
 ### `write`
 
-Create or overwrite a project file atomically. Supply content OR read (shared read query), never both. read saves selected text/report or raw binary without a model round-trip; incomplete/budget-failed output leaves destination unchanged.
+Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.
 
 Source: `tools/write.js`; flags: trusted
 
@@ -1897,921 +1160,184 @@ Source: `tools/write.js`; flags: trusted
       "description": "Destination path relative to the working folder, inside the project."
     },
     "content": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "integer",
-          "enum": [
-            -1,
-            0
-          ]
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        }
-      ],
-      "description": "Text to save, including empty string. Exactly one effective content or read; wrong-type model fillers are absent."
+      "type": "string",
+      "description": "Writes text to file. Use an empty string to create an empty file or clear an existing file. Omit when using a source."
     },
-    "read": {
-      "anyOf": [
-        {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "description": "Writes directly from file system source. Use to copy files, or save folder listings and search results to a file. Binary reads save raw bytes unless base64 is true. Omit when writing text to file.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "File or folder relative to the working folder. Use . for the current folder."
+        },
+        "recursive": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include subfolders in listings and searches."
+        },
+        "ignore": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apply .gitignore, .ignore, and system-file exclusions to folder scans. Explicit file paths bypass these filters."
+        },
+        "glob": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "description": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames."
+        },
+        "exclude": {
+          "minLength": 1,
+          "maxLength": 4096,
+          "maxItems": 128,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "description": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}."
+        },
+        "lines": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "path"
-          ],
-          "description": "Read query. Null/empty/wrong-type scalar fillers are absent; meaningful booleans, zero offsets/limits and negative range indexes are preserved. Unknown fields fail.",
           "properties": {
-            "path": {
-              "type": "string",
-              "maxLength": 4096,
-              "description": "Relative file/folder path within the project. Empty string means current folder. Explicit files bypass ignore rules."
+            "from": {
+              "type": "integer",
+              "description": "Start line (1-based); negative indexes count from the end (-1 is last)."
             },
-            "recursive": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Descend into subfolders for listings/searches. Default false; valid true/false are preserved."
+            "to": {
+              "type": "integer",
+              "description": "End line, inclusive; negative indexes count from the end."
             },
-            "ignore": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Opt into .gitignore then .ignore and system-file exclusions; never disables security guards. Git exclusion is not a relevance verdict. Default false; valid true/false are preserved."
-            },
-            "glob": {
-              "anyOf": [
-                {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 4096
-                    },
-                    {
-                      "type": "array",
-                      "maxItems": 128,
-                      "items": {
-                        "type": "string",
-                        "maxLength": 4096
-                      }
-                    }
-                  ]
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Include filenames/relative paths matching any glob, e.g. *.md or src/**/*.js. Slashless patterns match basenames. Filters files, not traversal directories."
-            },
-            "exclude": {
-              "anyOf": [
-                {
-                  "anyOf": [
-                    {
-                      "type": "string",
-                      "maxLength": 4096
-                    },
-                    {
-                      "type": "array",
-                      "maxItems": 128,
-                      "items": {
-                        "type": "string",
-                        "maxLength": 4096
-                      }
-                    }
-                  ]
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Exclude matching paths/subtrees; exclusions win over glob. Supports *, ?, ** and {a,b}."
-            },
-            "lines": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "from": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "First line; negative indexes count from end (-1 is last)."
-                    },
-                    "to": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Last line, inclusive; negative indexes count from end."
-                    },
-                    "last": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Select last N lines (tail); excludes from/to. Zero selects nothing."
-                    }
-                  }
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "File lines: positive indexes are 1-based inclusive; zero is absent. Negative indexes count from end. Applies before characters/search."
-            },
-            "characters": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "from": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "First character; negative indexes count from end (-1 is last)."
-                    },
-                    "to": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Last character offset, exclusive; negative indexes count from end."
-                    }
-                  }
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Unicode code-point slice within selected lines: 0-based, exclusive to. Zero is meaningful."
-            },
-            "bytes": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "from": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "First byte; negative indexes count from end (-1 is last)."
-                    },
-                    "to": {
-                      "anyOf": [
-                        {
-                          "type": "integer"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Last byte offset, exclusive; negative indexes count from end."
-                    }
-                  }
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Positioned byte slice with binary:true: 0-based, exclusive to. Zero is meaningful."
-            },
-            "search": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "text": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "maxLength": 4096
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Literal substring, ORed with regex if both supplied. Empty is absent."
-                    },
-                    "regex": {
-                      "anyOf": [
-                        {
-                          "type": "string",
-                          "maxLength": 4096
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "JavaScript global multiline regular expression; isolated execution has a hard time budget."
-                    },
-                    "ignoreCase": {
-                      "anyOf": [
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Case-insensitive literal and regex matching. Default false; valid true/false are preserved."
-                    },
-                    "invert": {
-                      "anyOf": [
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Select lines matched by neither condition. Default false; valid true/false are preserved."
-                    },
-                    "before": {
-                      "anyOf": [
-                        {
-                          "type": "integer",
-                          "minimum": 0,
-                          "maximum": 1000
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Context lines before selected lines, 0–1000; overlapping context merges."
-                    },
-                    "after": {
-                      "anyOf": [
-                        {
-                          "type": "integer",
-                          "minimum": 0,
-                          "maximum": 1000
-                        },
-                        {
-                          "type": "null"
-                        },
-                        {
-                          "type": "boolean"
-                        },
-                        {
-                          "type": "string",
-                          "const": ""
-                        },
-                        {
-                          "type": "array",
-                          "maxItems": 0
-                        },
-                        {
-                          "type": "integer",
-                          "enum": [
-                            0,
-                            -1
-                          ]
-                        }
-                      ],
-                      "description": "Context lines after selected lines, 0–1000; overlapping context merges."
-                    }
-                  }
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Search selected text or raw bytes (binary:true); OR conditions select unique source lines. No effective expression means no search."
-            },
-            "limit": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Maximum listing entries/selected search lines (matching paths in info), default 100. Context is additional but budgeted. Zero intentionally selects nothing; -1 is absent."
-            },
-            "offset": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Skip listing entries/selected search lines (matching paths in info), default 0. Zero is meaningful; -1 is absent."
-            },
-            "info": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Return contextual metadata/counts: file totals, listing counts, or matching paths and per-file selected-line counts. Scans are bounded; incomplete counts are labeled. Default false; valid true/false are preserved."
-            },
-            "annotate": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Decorate payload with MIME/ranges/locations/sizes. False returns plain selected text or newline-separated paths. Execution status stays separate. Default true; valid true/false are preserved."
-            },
-            "binary": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Select raw bytes using bytes; without search return binary content, with search return a text report. Default false; valid true/false are preserved."
-            },
-            "base64": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string",
-                  "const": ""
-                },
-                {
-                  "type": "array",
-                  "maxItems": 0
-                },
-                {
-                  "type": "integer",
-                  "enum": [
-                    0,
-                    -1
-                  ]
-                }
-              ],
-              "description": "Encode selected payload as base64 text, including when saved by write.read. Excludes info. Default false; valid true/false are preserved."
+            "last": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Read the last N lines instead of from/to. Use 0 for no lines."
             }
-          }
+          },
+          "description": "Select file lines before character slicing or search. Use from/to or last, not both."
         },
-        {
-          "type": "null"
+        "characters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "integer",
+              "description": "Start character offset (0-based); negative indexes count from the end (-1 is last)."
+            },
+            "to": {
+              "type": "integer",
+              "description": "End character, exclusive; negative indexes count from the end."
+            }
+          },
+          "description": "Slice Unicode characters within the selected lines. Use 0-based offsets and an exclusive end; do not combine with binary."
         },
-        {
-          "type": "boolean"
+        "bytes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "integer",
+              "description": "Start byte offset (0-based); negative indexes count from the end (-1 is last)."
+            },
+            "to": {
+              "type": "integer",
+              "description": "End byte, exclusive; negative indexes count from the end."
+            }
+          },
+          "description": "Read a byte range with binary: true. Use 0-based offsets and an exclusive end."
         },
-        {
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Match this literal substring. With regex, select lines matching either expression."
+            },
+            "regex": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Match a JavaScript regular expression with global and multiline behavior; omit / delimiters."
+            },
+            "ignoreCase": {
+              "type": "boolean",
+              "default": false,
+              "description": "Match text and regex without case sensitivity."
+            },
+            "invert": {
+              "type": "boolean",
+              "default": false,
+              "description": "Select lines matching neither text nor regex."
+            },
+            "before": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000,
+              "default": 0,
+              "description": "Include this many lines before each match; overlapping context is merged."
+            },
+            "after": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000,
+              "default": 0,
+              "description": "Include this many lines after each match; overlapping context is merged."
+            }
+          },
+          "description": "Search selected text, or raw bytes with binary: true. Supply text, regex, or both."
+        },
+        "limit": {
           "type": "integer",
-          "enum": [
-            -1,
-            0
-          ]
+          "minimum": 0,
+          "default": 100,
+          "description": "Return at most this many listing entries or matching lines (matching paths with info). Context lines are additional. Use 0 for none."
         },
-        {
-          "type": "array",
-          "maxItems": 0
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Skip this many listing entries or matching lines (matching paths with info)."
         },
-        {
-          "type": "string",
-          "const": ""
+        "info": {
+          "type": "boolean",
+          "default": false,
+          "description": "Return file metadata, listing counts, or matching paths with per-file match counts. Check incomplete-scan notices before treating counts as totals."
+        },
+        "annotate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include MIME types, ranges, and locations. Set false for plain text or newline-separated paths."
+        },
+        "binary": {
+          "type": "boolean",
+          "default": false,
+          "description": "Read raw bytes; use bytes instead of lines/characters. With search, return a text report of matches."
+        },
+        "base64": {
+          "type": "boolean",
+          "default": false,
+          "description": "Encode selected data as base64 text. Do not combine with info."
         }
-      ],
-      "description": "Shared read query. Without an effective search, annotate is forced false even if supplied true; searches honor annotate (default true). Save payload, not status/preview blocks. Binary saves bytes; base64 saves encoded text. Explicit selection limits are honored; execution-incomplete output is refused."
+      }
     },
     "ask": {
-      "anyOf": [
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        },
-        {
-          "type": "integer",
-          "enum": [
-            -1,
-            0
-          ]
-        },
-        {
-          "type": "array",
-          "maxItems": 0
-        }
-      ],
-      "description": "Request permission when saved text references an existing path outside the project. Wrong-type model fillers are absent."
+      "type": "boolean",
+      "description": "Ask permission if saved text references an existing path outside the project; without permission, the write is refused."
     }
   }
 }
@@ -2879,7 +1405,7 @@ untouched) when the model's turn returns no usable summary text.
 
 Returns `Promise<{ok: boolean, before: number, summaryText?: string}>`
 
-### `Agent.constructor({ env, model, url, timeout, settings, context, tools, parent, name, description, contextId, contextSave = true, createIO, toolCall, safe, spawnPermission, question, ...options } = {…})`
+### `Agent.constructor({ env, model, url, timeout, settings, context, tools, parent, name, description, folder, contextId, contextSave = true, createIO, toolCall, safe, spawnPermission, question, ...options } = {…})`
 
 Build an agent over an environment; wires the session store (a
 named file session, a resumed one, an injected store, or none) and
@@ -2897,6 +1423,7 @@ starts with the seeded system prompt as its FIRST message(s).
 - `[options.parent]` (Agent) — creating Agent, or unset for non-Agents
 - `[options.name]` (string) — display name (default: `agent-<counter>`)
 - `[options.description]` (string) — display description (empty allowed)
+- `[options.folder]` (string) — existing env.cwd-relative or absolute working folder; validated before the agent is registered (omitted uses env.cwd)
 - `[options.spawnPermission]` (*) — generic permission for delegation tools to create another Agent: false denies, true allows, and any other value asks through the tool's own user-interaction policy
 - `[options.safe]` (boolean) — SAFE MODE: publish and execute ONLY read-only tools (schemas with `safe: true`) — exploration and planning without mutation. Unsafe calls are refused with a tool-result error, never executed (defense in depth: the filtered catalog alone is not the enforcement). FORCED on when no supported OS sandbox is available (Sandbox.osAvailable()) — there is no opt-out: mutation tools run only under an active OS sandbox
 - `[options.contextId]` (string|false) — names the context: an existing id (in env.settings.sessions) is resumed; an absent id creates it. `false` (or omitted, or an anonymous spelling "0"/"false"/"anon") gives a memory-only context that is not logged — (agent.context.save = true) starts logging it at any time.
@@ -3035,6 +1562,17 @@ Returns `void` — Read folder afterwards for the resolved root.
 ### `Agent.get folder()`
 
 The agent-local root used for file tools and their OS sandbox.
+
+### `Agent.folderResolve(env, folder)`
+
+Resolve an existing working folder within an environment's project root.
+Side-effect-free; callers should validate again at construction/use if the
+filesystem can change after this check.
+
+- `env` (Env) — environment owning the project root
+- `folder` (string|undefined|null) — absolute or env.cwd-relative
+
+Returns `string` — Validated working folder
 
 ### `Agent.IO`
 

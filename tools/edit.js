@@ -307,7 +307,7 @@ export function toolDescription() {
           edits: {
             type: "array",
             description:
-              "The replacements to make. Match each oldText against the file " +
+              "The replacements to make; required unless using rollback. Match each oldText against the file " +
               "as it is now, not against earlier edits in the same call. Never " +
               "send overlapping or nested edits; merge them into one edit.",
             items: {
@@ -337,16 +337,13 @@ export function toolDescription() {
             type: "string",
             description:
               "Reverse a recent edit by passing the edit id returned after it " +
-              "succeeded. Pass the same path the edit targeted. The file " +
+              "succeeded. Omit edits when using rollback. Pass the same path the edit targeted. The file " +
               "must still hold the replacement text at the edited positions; " +
               "if it does not, read the file and make a new targeted edit " +
               "instead.",
           },
         },
-        anyOf: [
-          { required: ["path", "edits"] },
-          { required: ["path", "rollback"] }
-        ]
+        required: ["path"]
       },
     },
   };

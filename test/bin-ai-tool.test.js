@@ -142,14 +142,14 @@ export function toolDescription() {
     expect(readFileSync(`${root}/saved.js`, "utf8")).toBe("exact example\n");
   });
 
-  test("nested read queries and write.read execute through the real CLI", async () => {
+  test("nested read queries and write.source execute through the real CLI", async () => {
     const root = mkdtempSync("./ai-tmp/read-query-cli-");
     writeFileSync(`${root}/source.txt`, "one\nTODO\nthree");
     const query = { path: `${root}/source.txt`, lines: { from: -2 }, annotate: false };
     const selected = await run(["read", JSON.stringify(query)]);
     expect(selected.exit).toBe(0);
     expect(selected.stdout.trim()).toBe("TODO\nthree");
-    const saved = await run(["write", JSON.stringify({ path: `${root}/out.txt`, read: { ...query, annotate: true } })]);
+    const saved = await run(["write", JSON.stringify({ path: `${root}/out.txt`, source: { ...query, annotate: true } })]);
     expect(saved.exit).toBe(0);
     expect(readFileSync(`${root}/out.txt`, "utf8")).toBe("TODO\nthree");
   });

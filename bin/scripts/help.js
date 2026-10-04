@@ -80,7 +80,10 @@ stdin:   interactive lines, one user message per line (piped) or one
          cursor (tui.mouse setting: true = managed everywhere, false =
          off, unset = overlays inline / managed in alt; with mouse
          reporting on, hold Shift to scroll/select
-         natively); Ctrl-C cancels a running response; with no agent
+         natively; inline "overlays" reports clicks only while an
+         overlay, a completion list, or the ↓-focused status toolbar
+         shows, so status chips ignore clicks while you type — press
+         ↓ first, or use alt mode or tui.mouse=true); Ctrl-C cancels a running response; with no agent
          running it clears the input, and on an empty input shows
          "Press ^C again to exit" (a second ^C exits; any other key
          dismisses the notice — the agent never sees any of this)
@@ -132,10 +135,11 @@ options:
                        interactive TUI (the line editor, pager, menu) as
                        if typed on a terminal — for programs driving
                        ${PROGRAM}; the stream's end exits like Ctrl-D
-  --screen <name>      the screen mode (default: settings tui.alt ? alt :
-                       inline — native terminal scrollback; alt = the
+  --screen <name>      the screen mode (default: alt; settings tui.alt=false
+                       selects inline; piped input uses line) — inline =
+                       native terminal scrollback; alt = the
                        alternate-screen TUI; line = the piped cooked-mode
-                       loop)
+                       loop
   --max-turns <n>      FALLBACK runaway guard (for when the context window
                        is unknown): provider requests per turn (32)
   --max-tool-calls <n> same fallback: tool executions per turn (64)

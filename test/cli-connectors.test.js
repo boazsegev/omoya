@@ -12,6 +12,14 @@ describe("ai IO modes: inline/alt/line", () => {
     for (const mode of IO_MODES) expect(resolveIoMode(mode)).toBe(mode);
   });
 
+  test("an interactive terminal defaults to alt; settings tui.alt=false selects inline", () => {
+    expect(resolveIoMode(undefined)).toBe("alt");
+    expect(resolveIoMode(undefined, { alt: undefined })).toBe("alt");
+    expect(resolveIoMode(undefined, { alt: false })).toBe("inline");
+    expect(resolveIoMode(undefined, { interactive: false, alt: false })).toBe("line");
+    expect(resolveIoMode("alt", { alt: false })).toBe("alt");
+  });
+
   test("an unknown mode rejects and lists the available names", () => {
     expect(() => resolveIoMode("bogus")).toThrow(/unknown io mode "bogus"/);
     expect(() => resolveIoMode("bogus")).toThrow(/inline, alt, line/);

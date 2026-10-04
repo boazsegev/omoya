@@ -17,7 +17,7 @@ export async function worker_close(args = {}, context = {}) {
 export function toolDescription() {
   return { "worker-close": {
     fn: worker_close, trusted: true,
-    description: "Close named workers, /regex/ matches, or all with [\"*\"]. Busy workers receive /handoff first and finish queued work before closing.",
+    description: "Closes named workers, /regex/ matches, or all with [\"*\"]. Busy workers receive /handoff first and finish queued work before closing.",
     inputSchema: { type: "object", additionalProperties: false, required: ["workers"], properties: { workers: targetsSchema } },
   } };
 }

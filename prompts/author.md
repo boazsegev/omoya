@@ -1,36 +1,46 @@
 ---
 name: author
-description: Author a fact-checked document; brief, sourced sections, independent critique.
+description: Author a fact-checked document from a brief, with sourced sections and independent critique.
 ---
 
 # Author the Document
 
-Author the document described at the end of this prompt. Own the result: plan, assign, merge, reconcile critique, and accept. If purpose, audience, or scope is unclear, ask before researching.
+Author the document requested below. Own its brief, drafting, integration, critique decisions, verification, and acceptance. Ask before researching if purpose, audience, or scope is unclear.
 
-## Store
+## Store the Artifacts
 
-Store the final document at the requested destination, else in the project's domain research folder. Keep its brief, sources, section drafts, and reviews in a companion folder beside it, and retain them after acceptance. Follow project naming conventions. Track progress in the task ledger, not the companion folder.
+Use the requested destination, otherwise the project's research folder. Retain the brief, sources, section drafts, reviews, and assembly/calculation scripts in a companion folder beside the document. Track progress in the project's task ledger.
 
-## Brief
+## Write the Brief
 
-Write the brief first: purpose, audience, thesis or questions, form, evidence standard, scope limits (dates, jurisdiction), and an outline listing the claims each section must support. Research only what the outline needs.
+Write the brief first: purpose, audience, thesis or questions, form, citation format, evidence standard, scope limits (dates, jurisdiction), and an outline of claims each section must support. Record noncritical assumptions. Research what the outline needs.
 
-## Draft Sections
+## Draft the Sections
 
-Draft each section in its own file. Assign one owner per section to research and write it, recording a source for every load-bearing claim. Prefer primary sources; record contradictions instead of resolving them silently. Draft a small document alone as one section, without workers.
+Draft each section in its own file with one owner. Give each owner the brief, its outline claims, and section/source paths; require source support, contradictions, and unresolved gaps with the draft. Draft small documents alone as one section.
 
-## Critique
+Cite a source for each load-bearing claim in the section text. Retain source locators, supporting material, and access dates separately. Prefer primary sources; disclose contradictions.
 
-Run a critique gate on each section before merging, then on the merged document (one gate for a single-section document). At each gate, create at least two critics with clean context: one on your own model and at least one from a different provider when available. Give them the brief, the draft under review, and its sources, never the author's reasoning. Require each critic to write findings to a review file: severity, location, problem, evidence, and proposed fix, covering factual support (supported, contradicted, unsupported, stale) and prose. The document gate also covers argument, structure, consistency, and transitions.
+## Check the Facts
 
-Reconcile findings across critics. Return accepted findings to the section owner and review the repair. After two failed repair rounds, ask before changing the brief or acceptance criteria. If critics cannot be created, report that critique was not independent.
+Delegate fact checking when appropriate, making sure sources are correct, links work, and quotes are accurate and exact verbatim quotes.
 
-## Merge
+## Critique the Drafts
 
-Treat section files as the source of truth. Assemble the document by script, concatenating section files in order; never retype or hand-copy text. Make harmonization and document-gate repairs in the section files, then reassemble. Recalculate figures by script.
+Review each section before merging, then the merged document. For a single-section document, run one gate with the full document-level scope.
 
-## Accept
+At each gate, require at least two clean-context critics: one on your model and one from another provider when available. Give them only the brief, draft, and sources. Require findings in review files: severity, location, problem, evidence, and proposed fix. Check factual support (supported, contradicted, unsupported, stale) and prose; document-level review also checks argument, structure, consistency, and transitions. Require critics to verify load-bearing claims against the cited sources themselves and mark inaccessible evidence unverified.
 
-Accept only when every load-bearing claim is sourced and independently checked, contradictions are disclosed, fact, inference, and opinion are distinguishable, and no blocking finding remains. Close your settled workers. Report the document path, evidence, and limitations.
+Record which findings you accept or reject and why. Return accepted findings to the section owner, inspect repairs, and obtain independent rechecks of repaired load-bearing claims. After two failed repair rounds, ask before changing the brief or acceptance criteria.
 
-## Document
+## Assemble the Document
+
+Treat section files as the source of truth. Concatenate them in order by script. Make harmonization and review repairs in section files, then reassemble. Compute derived numbers by script.
+
+## Verify and Report
+
+Accept only when required critique gates are complete, every load-bearing claim is sourced and independently checked, contradictions are disclosed, fact/inference/opinion are distinguishable, and no blocking finding remains.
+
+Close settled workers. Report the document path, verification evidence, and limitations. If acceptance is unmet, label the document incomplete, list unmet criteria or blockers, and give the next action.
+
+## Document to Author / Rewrite

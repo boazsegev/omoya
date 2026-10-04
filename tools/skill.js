@@ -42,11 +42,11 @@ export async function skill({ names } = {}, context) {
 export function toolDescription() {
   return { skill: {
     safe: true,
-    description: "List skills or atomically activate named skills. Already active skills succeed without reloading; disk edits apply next session.",
-    inputSchema: { type: "object", properties: {
+    description: "Load relevant skills before starting a task and follow their instructions. Omit names to list available skills; pass an array of catalog names to load them.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {
       names: {
-        anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-        description: "One skill name or an array; trim surrounding whitespace, preserve internal spaces, deduplicate. Omit/empty lists the catalog.",
+        type: "array", items: { type: "string" },
+        description: "Skill names to load, e.g. [\"api-design\"]. Omit to list the catalog.",
       },
     } },
   } };

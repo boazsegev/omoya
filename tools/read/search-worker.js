@@ -20,7 +20,19 @@ function mark(starts, selected, positions, index, length) {
   }
 }
 
+function expressions(search) {
+  const flags = `g${search.ignoreCase ? "i" : ""}`;
+  const patterns = [];
+  if (search.text !== undefined) patterns.push(new RegExp(search.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags));
+  if (search.regex !== undefined) patterns.push(new RegExp(search.regex, `${flags}m`));
+  return patterns;
+}
+
 function matching(text, search) {
+  const patterns = expressions(search);
+  // Find initial occurrences before allocating/indexing lines; reuse them rather than scan twice.
+  const firstMatches = text.length ? patterns.map((pattern) => pattern.exec(text)) : [];
+  if (!text.length || (!search.invert && !firstMatches.some(Boolean))) return { indexes: [], positions: [], lineCount: 0 };
   const starts = [0];
   for (let i = 0; i < text.length; i++) {
     if (text[i] === "\n") starts.push(i + 1);
@@ -29,28 +41,18 @@ function matching(text, search) {
   const selected = new Uint8Array(text === "" ? 0 : starts.length);
   const positions = new Map();
   let steps = 0;
-  if (search.text !== undefined) {
-    // Escaping the literal uses the same Unicode case-folding semantics as regex, without metacharacters.
-    const escaped = search.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(escaped, `g${search.ignoreCase ? "i" : ""}`);
-    let match;
-    while ((match = re.exec(text)) !== null) {
-      if (++steps > 1000000) throw new Error("Search occurrence budget exhausted");
-      mark(starts, selected, positions, match.index, match[0].length);
-    }
-  }
-  if (search.regex !== undefined && text !== "") {
-    const re = new RegExp(search.regex, `gm${search.ignoreCase ? "i" : ""}`);
-    let match;
-    while ((match = re.exec(text)) !== null) {
+  for (const [index, re] of patterns.entries()) {
+    let match = firstMatches[index];
+    while (match !== null) {
       if (++steps > 1000000) throw new Error("Search occurrence budget exhausted");
       mark(starts, selected, positions, match.index, match[0].length);
       if (!match[0].length) re.lastIndex++;
+      match = re.exec(text);
     }
   }
   const indexes = [];
   for (let i = 0; i < selected.length; i++) if (Boolean(selected[i]) !== search.invert) indexes.push(i);
-  return { indexes, positions: [...positions] };
+  return { indexes, positions: [...positions], lineCount: starts.length - Number(text.endsWith("\n")) };
 }
 
 parentPort?.on("message", ({ text, search }) => {

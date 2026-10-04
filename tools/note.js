@@ -496,11 +496,10 @@ export { note };
 
 const PATCH = {
   description: "Patch for the note whose title is this key: fields you set are merged in (nested objects merge field-by-field, arrays and scalars replace), a null field deletes that field, and a null patch deletes the whole note.",
-  type: ["object", "null"],
   properties: {
-    content: { type: ["string", "null"], description: "The full note body." },
-    summary: { type: ["string", "null"], description: "A one-line gist of the note." },
-    type: { type: ["string", "null"], description: "todo / active / done / info — pick the one that fits." },
+    content: { description: "The full note body as a string; null deletes this field." },
+    summary: { description: "A one-line gist as a string; null deletes this field." },
+    type: { description: "Use the string todo, active, done, or info; null deletes this field." },
   },
   additionalProperties: true,
 };
@@ -513,7 +512,7 @@ export function toolDescription() {
       // before any new note call occurs; the detector is harness-only.
       storage: "note",
       detect: ({ agent }) => notesFrom(agent, agent.toolStorage("note")),
-      description: "Manage scratchpad notes (short-term memory). Actions: `set` creates or updates notes ({notes: {title: patch}} — missing notes are created; set a patch to null to delete its note), `get` reads notes ({notes: [title, ...]}; use [\"*\"] for every note and `only` to return specific fields), `list` shows open notes (done notes are omitted), `remove` deletes notes ({notes: [title, ...]}; [\"*\"] deletes all), `search` regex-searches titles and fields (case-insensitive; use `field` to search one field and `max` to cap matches). Pass `notes` as an array of titles for get/remove or as a title → patch map for set. Note fields are free JSON — content/summary/type are the convention; add any other fields you need.",
+      description: "Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use [\"*\"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.",
       inputSchema: {
         type: "object",
         properties: {
@@ -523,7 +522,6 @@ export function toolDescription() {
             description: "The operation to perform.",
           },
           notes: {
-            type: ["array", "object"],
             description: "set: a map of title → patch object. get/remove: an array of titles ([\"*\"] = every note).",
             items: { type: "string", description: "A note title; applies when `notes` is an array." },
             additionalProperties: PATCH,
@@ -535,7 +533,7 @@ export function toolDescription() {
           },
           pattern: { type: "string", description: "search: a regular expression (case-insensitive)." },
           field: { type: "string", description: "search: limit the search to one field (default: the title and all fields)." },
-          max: { type: "number", description: "search: maximum matches to return (default 20, cap 50)." },
+          max: { type: "integer", minimum: 1, maximum: MAX_MATCHES, default: 20, description: "search: maximum matches to return (1–50)." },
         },
         required: ["action"],
       },

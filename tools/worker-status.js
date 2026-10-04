@@ -21,10 +21,10 @@ export function worker_status(args = {}, context = {}) {
 export function toolDescription() {
   return { "worker-status": {
     fn: worker_status, trusted: true, safe: true,
-    description: "Show workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.",
+    description: "Shows workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
-      workers: { type: "boolean", description: "Include workers and their models, grouped by busy/idle." },
-      models: { type: "boolean", description: "Include models and available capacity for new work." },
+      workers: { type: "boolean", description: "Includes workers and their models, grouped by busy/idle." },
+      models: { type: "boolean", description: "Includes models and available capacity for new work." },
     } },
   } };
 }

@@ -1,15 +1,16 @@
+---
+name: handoff
+description: Stabilize work and save a concise, resumable project handoff.
+---
+
 # Prepare for Handoff
 
-The token budget is low. Please stabilize the work and prepare a usable handoff now:
+The token budget is low. Stabilize the work and save a usable handoff now. Prioritize the handoff over further task work.
 
-1. Assess each active task. Complete only work that can be finished and verified safely within the remaining budget; otherwise stop at the next clean boundary. Defer broad, risky, or irreversible work.
+1. Assess active tasks and delegated work. Finish only what can be completed and verified within the remaining budget; otherwise stop at a clean boundary. Preserve existing work, keep edits coherent, and run fast, relevant checks.
 
-2. Maintain a healthy project state: preserve all existing work, leave each edit coherent, and run only fast, relevant verification.
+2. Update the project's task, memory, history, and handoff/in-flight records as applicable. Record the objective, key constraints and decisions, completed work, artifact paths, current state (including unfinished changes and delegated work), checks performed and omitted, blockers, and the exact next action. Keep each fact in its owning record and reference it from the handoff. Create a missing handoff record using project conventions.
 
-3. If this is a Git project, inspect the working tree. Commit your completed, verified changes while protecting unrelated user changes and leaving them uncommitted.
+3. In a Git project, commit your completed, verified changes where permitted. Stage your own paths or hunks while preserving unrelated working-tree and staged changes. Leave inseparable changes uncommitted. Record the commit result or uncommitted state in the handoff.
 
-4. Update the project’s established task, memory, history, and handoff/in-flight records as applicable. Record completed work, changed artifacts, verification performed and omitted, current task state, blockers, and the single recommended next action.
-
-5. Store the concise handoff summary in those project brain records—especially the active handoff/in-flight record when work remains—so the next agent can resume without relying on this conversation. Treat the stored record as the handoff; any chat response is only a brief confirmation.
-
-Thank you.
+Treat the saved record as the handoff. Confirm its path briefly in chat, then stop. If saving is unavailable, provide the handoff in chat and identify it as unsaved.

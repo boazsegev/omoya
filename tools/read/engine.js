@@ -4,11 +4,11 @@ const revision = toolRevision();
 import { lstat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 const { normalizeReadQuery } = await import(`./query.js?revision=${revision}`);
-const { createReadState, guardedPath, openReadFile, readChunk, directoryEntries, charge, checkReadState, relativeReadPath, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
+const { createReadState, guardedPath, openReadFile, readChunk, directoryEntries, charge, checkReadState, relativeReadPath, readError, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
 const { matchesGlob } = await import(`./glob.js?revision=${revision}`);
 const { ancestorIgnores, loadIgnore, isIgnored, isSystemFile } = await import(`./ignore.js?revision=${revision}`);
 const { loadText, selectText, sourceLines, rangeBounds } = await import(`./text.js?revision=${revision}`);
-const { matchSearch } = await import(`./search.js?revision=${revision}`);
+const { matchSearch, closeSearch } = await import(`./search.js?revision=${revision}`);
 const { mimeDetect } = await import(`./mime-detection.js?revision=${revision}`);
 
 function accepts(path, query) {
@@ -29,17 +29,22 @@ async function* walk(abs, query, state, skips, stack) {
     const target = join(abs, entry.name);
     const path = relative(state.root, target).split(sep).join("/");
     const projectPath = relative(state.scope.boundary, target).split(sep).join("/");
+    if (entry.isSymbolicLink()) { skips.symlink++; continue; }
+    const dir = entry.isDirectory();
+    if (!dir && !entry.isFile()) { skips.special++; continue; }
+    if (query.ignore && (isSystemFile(projectPath) || isIgnored(ignores, `${projectPath}${dir ? "/" : ""}`, state))) { skips.ignored++; continue; }
+    if (dir && excludedDirectory(path, query)) continue;
+    // Dirents decide relevance before metadata I/O; directories are guarded when opened.
+    if (!dir && !accepts(path, query)) continue;
     let metadata;
-    try { metadata = await lstat(target); }
+    try { metadata = dir ? entry : await lstat(target); }
     catch (error) {
       if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) { skips.unreadable++; continue; }
       throw error;
     }
     if (metadata.isSymbolicLink()) { skips.symlink++; continue; }
     if (!metadata.isFile() && !metadata.isDirectory()) { skips.special++; continue; }
-    const dir = metadata.isDirectory();
-    if (query.ignore && (isSystemFile(projectPath) || isIgnored(ignores, `${projectPath}${dir ? "/" : ""}`, state))) { skips.ignored++; continue; }
-    if (dir && excludedDirectory(path, query)) continue;
+
     if (dir) {
       if (!query.glob.length && !query.search) yield { abs: target, path: `${path}/`, metadata };
       if (query.recursive) {
@@ -49,7 +54,7 @@ async function* walk(abs, query, state, skips, stack) {
           else throw error;
         }
       }
-    } else if (accepts(path, query)) yield { abs: target, path, metadata };
+    } else yield { abs: target, path, metadata };
   }
 }
 
@@ -64,13 +69,22 @@ function rootHint(state, path) {
 
 /** Normalize and execute within finite host budgets. Result payload and completeness/status are separate. */
 export async function executeReadQuery(args, context, { artifact = false } = {}) {
-  const query = normalizeReadQuery(args);
   const state = createReadState(context, artifact);
+  try {
+    try { return await executeQuery(normalizeReadQuery(args), state); }
+    finally { await closeSearch(state); }
+  } catch (error) { throw readError(error, state); }
+}
+
+async function executeQuery(query, state) {
   let inspected;
   try { inspected = await guardedPath(query.path, state); }
   catch (error) {
-    if (error.code === "ENOENT") error.message = `ENOENT: no such file or directory, '${query.path}'${rootHint(state, ".") ? ` ${rootHint(state, ".")}` : ""}`;
-    throw error;
+    if (error.code !== "ENOENT") throw error;
+    const safe = readError(error, state);
+    safe.message = `ENOENT: no such file or directory, '${query.path}'${rootHint(state, ".") ? ` ${rootHint(state, ".")}` : ""}`;
+    safe.stack = `Error: ${safe.message}`;
+    throw safe;
   }
   const result = { query, source: inspected.abs, metadata: inspected.metadata, kind: inspected.metadata.isDirectory() ? "folder" : "file",
     records: [], payload: "", binary: false, complete: true, selectionComplete: true, status: [], skips: skipped(),
@@ -101,7 +115,8 @@ async function fileQuery(result, state) {
     result.metadata = opened.metadata;
     if (query.binary && !query.search) return await byteQuery(result, opened, state);
     const loaded = await loadText(opened, query, state);
-    const selection = selectText(loaded, query);
+    const selection = query.search && !query.info && !query.lines && !query.characters && !query.bytes
+      ? { text: loaded.text, lineOffset: 1 } : selectText(loaded, query);
     result.totals = selection.totals;
     result.descriptions = selection.descriptions;
     result.mime = mimeDetect({ path: result.source });
@@ -187,9 +202,11 @@ function addRecord(result, record, state) {
 async function searchFile(result, selection, state) {
   const { query } = result;
   const matched = await matchSearch(selection.text, query.search, state);
-  const lines = sourceLines(selection.text);
+  if (!matched.indexes.length) return;
+  const lines = query.info ? null : sourceLines(selection.text);
+  const lineCount = matched.lineCount;
   // A trailing newline does not manufacture an extra source line.
-  const indexes = matched.indexes.filter((index) => index < lines.length);
+  const indexes = matched.indexes.filter((index) => index < lineCount);
   const base = result.selected;
   result.selected += indexes.length;
   if (indexes.length && query.info) {
@@ -202,7 +219,7 @@ async function searchFile(result, selection, state) {
   const chosen = indexes.filter((_, index) => base + index >= query.offset && base + index < query.offset + query.limit);
   const print = new Map();
   for (const index of chosen) {
-    for (let i = Math.max(0, index - query.search.before); i <= Math.min(lines.length - 1, index + query.search.after); i++) {
+    for (let i = Math.max(0, index - query.search.before); i <= Math.min(lineCount - 1, index + query.search.after); i++) {
       if (!print.has(i)) print.set(i, true);
     }
     print.set(index, false);

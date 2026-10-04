@@ -42,8 +42,8 @@ describe("read security regressions", () => {
     const ctx = setup();
     writeFileSync(`${ROOT}/project/a.txt`, "unchanged");
     linkSync(`${ROOT}/project/a.txt`, `${ROOT}/project/b.txt`);
-    await expect(write({ path: "b.txt", read: { path: "a.txt" } }, ctx)).rejects.toThrow(/must differ/);
-    await expect(write({ path: "b.txt", read: { path: "missing" } }, ctx)).rejects.toThrow(/ENOENT/);
+    await expect(write({ path: "b.txt", source: { path: "a.txt" } }, ctx)).rejects.toThrow(/must differ/);
+    await expect(write({ path: "b.txt", source: { path: "missing" } }, ctx)).rejects.toThrow(/ENOENT/);
     expect(readFileSync(`${ROOT}/project/b.txt`, "utf8")).toBe("unchanged");
     expect(readdirSync(`${ROOT}/project`).some((path) => path.endsWith(".tmp"))).toBe(false);
   });

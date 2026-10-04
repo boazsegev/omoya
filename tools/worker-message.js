@@ -15,7 +15,7 @@ export async function worker_message(args = {}, context = {}) {
 export function toolDescription() {
   return { "worker-message": {
     fn: worker_message, trusted: true,
-    description: "Send one prompt to named workers, /regex/ matches, or all with [\"*\"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.",
+    description: "Sends one prompt to named workers, /regex/ matches, or all with [\"*\"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.",
     inputSchema: { type: "object", additionalProperties: false, required: ["workers", "prompt"], properties: {
       workers: targetsSchema,
       prompt: { type: "string", minLength: 1, description: "Message sent unchanged to every selected worker; /handoff requests a handoff." },

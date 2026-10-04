@@ -52,6 +52,33 @@ export function relativeReadPath(abs, state) {
   return relative(state.scope.cwd, abs).split(sep).join("/") || ".";
 }
 
+const safeErrors = new WeakSet();
+
+function errorPath(error, state) {
+  if (typeof error?.path !== "string") return undefined;
+  const abs = resolve(state.scope.cwd, error.path);
+  const projectPath = relative(state.scope.boundary, abs);
+  return projectPath === ".." || projectPath.startsWith(`..${sep}`) ? "[outside project]" : relativeReadPath(abs, state);
+}
+
+/** Rebuild filesystem failures without native messages, causes or absolute stack locations. */
+export function readError(error, state) {
+  if (error && typeof error === "object" && safeErrors.has(error)) return error;
+  const code = typeof error?.code === "string" && /^[A-Z0-9_]+$/.test(error.code) ? error.code : undefined;
+  const path = errorPath(error, state);
+  const syscall = typeof error?.syscall === "string" && /^[a-zA-Z]+$/.test(error.syscall) ? error.syscall : undefined;
+  const message = code ? `${code}: ${syscall ?? "filesystem operation"} failed${path ? `, ${JSON.stringify(path)}` : ""}` : String(error?.message ?? "read failed");
+  const ErrorType = error instanceof TypeError ? TypeError : Error;
+  const safe = new ErrorType(message.replaceAll(state.scope.cwd, ".").replaceAll(state.scope.boundary, "."));
+  safe.name = error instanceof TypeError ? "TypeError" : error instanceof ReadBudgetError ? "ReadBudgetError" : "Error";
+  if (code) safe.code = code;
+  if (path) safe.path = path;
+  if (syscall) safe.syscall = syscall;
+  safe.stack = `${safe.name}: ${safe.message}`;
+  safeErrors.add(safe);
+  return safe;
+}
+
 export async function guardedPath(path, state) {
   checkReadState(state);
   const abs = resolveCwdPath(path, state.scope);
@@ -95,7 +122,7 @@ export async function readChunk(handle, position, length, state) {
 /** Directory memory is bounded by the entries budget; order is locale-independent. */
 export async function directoryEntries(abs, state) {
   await guardedPath(relativeReadPath(abs, state), state);
-  const folder = await opendir(abs);
+  const folder = await opendir(abs, { bufferSize: Math.min(256, state.budgets.entries) });
   const entries = [];
   try {
     for await (const entry of folder) { charge(state, "entries", 1); entries.push(entry); }

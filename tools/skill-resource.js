@@ -68,10 +68,10 @@ export function toolDescription() {
     safe: true,
     readOnly: (args) => args.target === undefined,
     trusted: true,
-    description: "List available skill resources when only name is given; supply path to read a resource (last matching layer wins), or target to save its exact bytes to a new project file. No activation/execution. Safe mode refuses saving.",
+    description: "Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new project file. In read-only mode, omit target.",
     inputSchema: { type: "object", properties: {
-      name: { type: "string", description: "Skill name; surrounding whitespace is trimmed." },
-      path: { type: "string", description: "Optional skill-relative forward-slash filename, such as examples/build.js. Omit to list available resource identifiers. Unlisted resources can still be read. No traversal or symlinks." },
+      name: { type: "string", description: "Skill name from the skill catalog." },
+      path: { type: "string", description: "Resource filename relative to the skill, e.g. examples/build.js. Omit to list resources. Do not use parent traversal or symlinks." },
       target: { type: "string", description: "Optional project filename/path to save exact bytes (up to 16 MiB); creates parents, refuses existing files. Omit to read UTF-8 text up to 128 KiB." },
     }, required: ["name"] },
   } };

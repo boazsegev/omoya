@@ -128,7 +128,7 @@ export function toolDescription() {
     question: {
       safe: true, // read-only: asking the user mutates nothing
       sandbox: true, // fd-3/fd-4 JSONL question bridge inside the OS sandbox
-      description: "Ask structured user questions with selectable options and custom answers.",
+      description: "Ask the user to resolve a decision or provide missing information. Send 1–4 clear questions with distinct options; users can also give custom answers.",
       inputSchema: {
         type: "object",
         properties: {
@@ -169,20 +169,13 @@ export function toolDescription() {
                         description: "What this option means or what happens if chosen.",
                       },
                       preview: {
-                        description: "Optional focused preview: a plain string, or typed text/code with optional title and language.",
-                        oneOf: [
-                          { type: "string" },
-                          {
-                            type: "object",
-                            properties: {
-                              type: { type: "string", enum: ["text", "code"] },
-                              content: { type: "string" },
-                              language: { type: "string" },
-                              title: { type: "string" },
-                            },
-                            required: ["type", "content"],
-                          },
-                        ],
+                        description: "Optional focused preview: a plain string, or an object with type (text/code) and content. Add title or language when useful.",
+                        properties: {
+                          type: { type: "string", enum: ["text", "code"], description: "Display the preview as plain text or code." },
+                          content: { type: "string", description: "Preview text or code to show for this option." },
+                          language: { type: "string", description: "Code language for syntax highlighting; omit for plain text." },
+                          title: { type: "string", description: "Short title for the preview." },
+                        },
                       },
                     },
                     required: ["label", "description"],

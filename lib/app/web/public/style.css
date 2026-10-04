@@ -227,7 +227,7 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
   padding: .6rem .9rem; border-radius: 16px 16px 4px 16px;
   background: var(--user-bg, var(--raise-2)); color: var(--user-fg, var(--fg));
 }
-.user-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.user-text { overflow-wrap: anywhere; }
 .msg-assistant { color: var(--assistant-fg, var(--fg)); }
 .caret { display: inline-block; width: .5em; height: 1.1em; margin-left: 2px; vertical-align: text-bottom; border-radius: 2px; background: var(--cursor, var(--accent)); animation: blink 1s steps(2) infinite; }
 
