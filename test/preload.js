@@ -33,30 +33,11 @@ import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { NAMES } from "../lib/namespace.js";
+import { scrubAmbientKeys } from "./child-isolation.js";
 
-const original = globalThis.fetch;
-globalThis.fetch = (url, ...args) => {
-  const target = String(url?.url ?? url);
-  if (target.includes(":11434") || target.includes(":1234")) {
-    throw new Error(`live model server fetch forbidden in tests: ${target}`);
-  }
-  // the models.dev context-window registry (lib/env/model-windows.js):
-  // hosts start its download at launch; tests stub it explicitly
-  if (target.includes("models.dev")) return Promise.reject(new Error(`registry fetch forbidden in tests: ${target}`));
-  return original(url, ...args);
-};
-
-// the ambient keys the protocol classes' detectEndpoints read
-// (providers/openai.js, providers/kimi.js, providers/anthropic.js): a shell-set key must
-// never configure an endpoint in a test
-for (const key of [
-  "OPENAI_API_KEY", "OPENAI_BASE_URL",
-  "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL", "XAI_API_KEY",
-  "MOONSHOT_API_KEY", "MOONSHOT_BASE_URL", "KIMI_API_KEY",
-  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-]) {
-  delete process.env[key];
-}
+// Ambient keys never configure endpoints; tests that exercise key detection
+// set their own fake keys after this preload runs.
+scrubAmbientKeys(process.env);
 
 // point 2 — resolved NOW: the cwd at preload is the project root; a
 // test that chdir'd must not move the target
@@ -86,6 +67,8 @@ const countFailure = (fn) => async (...args) => {
 const require = createRequire(import.meta.url);
 const bunTest = require("bun:test");
 const originalAfterAll = bunTest.afterAll;
+const originalBeforeEach = bunTest.beforeEach;
+const originalAfterEach = bunTest.afterEach;
 for (const key of ["test", "it", "beforeAll", "beforeEach", "afterAll", "afterEach"]) {
   const original = bunTest[key];
   if (typeof original !== "function") continue;
@@ -101,6 +84,15 @@ for (const key of ["test", "it", "beforeAll", "beforeEach", "afterAll", "afterEa
     bunTest[key] = wrapped; // ESM test-file imports see the same object
   } catch { /* a frozen module object skips the count, never the run */ }
 }
+// One open Env per folder (Env.envs): an Env a test created and left open
+// closes after that test, so the next test may open the same folder.
+// Envs created by beforeAll/describe scope persist across their tests.
+const { Env } = await import("../lib/env.js");
+let envsBefore = new Set();
+originalBeforeEach(() => { envsBefore = new Set(Object.values(Env.envs)); });
+originalAfterEach(() => {
+  for (const env of Object.values(Env.envs)) if (!envsBefore.has(env)) env.close();
+});
 originalAfterAll(() => {
   if (failedTests > 0) return; // a failing run keeps its artifacts
   try {
@@ -108,4 +100,4 @@ originalAfterAll(() => {
       rmSync(join(TEST_TMP, entry), { recursive: true, force: true });
     }
   } catch { /* a missing folder or a locked file never fails the run */ }
-});
+}, 120_000); // many fixture folders on a synced disk can take longer than the default hook timeout

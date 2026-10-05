@@ -10,9 +10,9 @@ import { binName, cli } from "./bin-names.js";
 
 mkdirSync("./ai-tmp", { recursive: true });
 
-async function run(args, { tools, env = {} } = {}) {
+async function run(args, { tools, env = {}, mcpSettings } = {}) {
   const settingsDir = mkdtempSync("./ai-tmp/ai-tool-cli-");
-  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: { folders: [tools] } }));
+  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: { folders: [tools] }, ...(mcpSettings ? { mcp: mcpSettings } : {}) }));
   const proc = Bun.spawn(["bun", cli.tool, ...args], {
     stdout: "pipe", stderr: "pipe",
     env: { ...process.env, [NAMES.settingsEnv]: settingsDir, ...env },
@@ -51,23 +51,45 @@ export function toolDescription() {
     expect(stdout).toContain("- explicit — explicit Env import probe");
   });
 
-  test("closes tool-owned resources after successful and failed calls", async () => {
+  test("closes real MCP servers after successful and failed tool calls", async () => {
     const tools = mkdtempSync("./ai-tmp/ai-tool-cleanup-");
-    for (const fails of [false, true]) {
-      const marker = `${tools}/closed-${fails}`;
-      writeFileSync(`${tools}/cleanup.js`, `
+    const marker = `${tools}/closed`;
+    const server = `${tools}/server.js`;
+    writeFileSync(server, `
 import { writeFileSync } from "node:fs";
-export function cleanup(_args, context) {
-  // a pooled MCP connection stand-in: env.close() stops it on exit
-  context.env._mcpPool.set("probe", { close: () => writeFileSync(${JSON.stringify(marker)}, "closed") });
-  if (${fails}) throw new Error("expected failure");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.method === "initialize") process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+      result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "probe", version: "1" } } }) + "\\n");
+    else if (message.method === "server/discover") process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+      error: { code: -32601, message: "legacy" } }) + "\\n");
+    else if (message.id !== undefined) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+      result: { content: [{ type: "text", text: "ok" }] } }) + "\\n");
+  }
+});
+process.stdin.on("end", () => writeFileSync(${JSON.stringify(marker)}, "closed"));
+`);
+    writeFileSync(`${tools}/cleanup.js`, `
+export async function cleanup(args, context) {
+  await context.env.toolCall("mcp", { action: "servers" });
+  await context.env.toolCall("mcp", { action: "call", server: "probe", tool: "echo" });
+  if (args.fails) throw new Error("expected failure");
   return "ok";
 }
 export function toolDescription() {
-  return { cleanup: { description: "cleanup probe", inputSchema: { type: "object", properties: {} } } };
+  return { cleanup: { description: "cleanup probe", inputSchema: { type: "object", properties: { fails: { type: "boolean" } } } } };
 }
 `);
-      const result = await run(["cleanup"], { tools });
+    for (const fails of [false, true]) {
+      const result = await run(["cleanup", JSON.stringify({ fails })], {
+        tools, mcpSettings: { probe: { command: process.execPath, args: [server] } },
+      });
       expect(result.exit).toBe(fails ? 2 : 0);
       expect(existsSync(marker)).toBe(true);
     }
@@ -142,14 +164,14 @@ export function toolDescription() {
     expect(readFileSync(`${root}/saved.js`, "utf8")).toBe("exact example\n");
   });
 
-  test("nested read queries and write.source execute through the real CLI", async () => {
+  test("nested read queries and read.target execute through the real CLI", async () => {
     const root = mkdtempSync("./ai-tmp/read-query-cli-");
     writeFileSync(`${root}/source.txt`, "one\nTODO\nthree");
     const query = { path: `${root}/source.txt`, lines: { from: -2 }, annotate: false };
     const selected = await run(["read", JSON.stringify(query)]);
     expect(selected.exit).toBe(0);
     expect(selected.stdout.trim()).toBe("TODO\nthree");
-    const saved = await run(["write", JSON.stringify({ path: `${root}/out.txt`, source: { ...query, annotate: true } })]);
+    const saved = await run(["read", JSON.stringify({ ...query, annotate: true, target: `${root}/out.txt` })]);
     expect(saved.exit).toBe(0);
     expect(readFileSync(`${root}/out.txt`, "utf8")).toBe("TODO\nthree");
   });

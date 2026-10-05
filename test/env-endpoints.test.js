@@ -338,6 +338,7 @@ describe("endpointModels / refreshModels (startup model-cache renewal)", () => {
     expect(settingsOf(env, "cloud").models["keep-1"]).toBeNull(); // the cache refreshed in memory (dynamic: no file)
     expect(existsSync(join(dir, "auth-cloud.json"))).toBe(false);
     // the placeholder alone still resolves NOTHING (it is not an endpoint)
+    env.close();
     const bare = new Env({ dir, cwd: dir, settings: { providers: { cloud: { filter: "^keep" } } } });
     expect(endpointOf(bare, "cloud")).toEqual({ filter: "^keep" });
     expect(namesOf(bare)).toEqual([]);

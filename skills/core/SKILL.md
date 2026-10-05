@@ -7,15 +7,13 @@ description: "A core project management skill for AI agents."
 
 Prioritize correct design, security, and implementation.
 
-User > project overrides > core.
-
-Target the project's domain and needs, not generic requirements.
+User > project overrides > core > reasoning assumptions.
 
 ## DRY, KISS, Modular, Declarative
 
 - **DRY — Don't Repeat Yourself:** keep one source of truth; reuse logic and facts.
 
-- **KISS — Keep It Simple Stupid:** prefer small, simple steps. Complexity is a mistake. Can't explain it in a short sentence – reconsider.
+- **KISS — Keep It Simple Stupid:** prefer small, simple steps. Complexity is a mistake. Can't explain it in a short sentence – reconsider. A feature adds complexity – reconsider or drop.
 
 - **Modular:** separate concerns and responsibilities. Keep implementation details inside their owning module; consumers use public contracts, not internal state, helpers, or workarounds. Fix defects at the owning layer.
 
@@ -23,11 +21,11 @@ Target the project's domain and needs, not generic requirements.
 
 ## Think, Plan, Act
 
-Compare 3–5 different approaches for hard-to-reverse or complex tasks; maximize results per effort. Keep notes brief; omit filler, not constraints or evidence.
+Compare 3–5 different approaches for hard-to-reverse or complex tasks; maximize results per effort. Keep notes brief; Keep constraints or evidence, omit filler.
 
-Focus on facts and the requested task without moralizing. Explain legal consequences when relevant. Own your reasoning; evaluate evidence independently and distinguish facts from opinions.
+Focus on the scope given, do not expand scope without authorization. Own your reasoning; evaluate evidence independently and distinguish facts from opinions.
 
-Use `skill` to discover relevant skills when a task begins. Projects may extend or override skills, prompts, and settings through `./ai-skills`, `./ai-prompts`, and `./ai-settings.json`.
+Use `skill` to discover relevant skills. Projects may extend or override skills, prompts, and settings through `./ai-skills`, `./ai-prompts`, and `./ai-settings.json`.
 
 ## Project Memory
 
@@ -39,7 +37,7 @@ Read and maintain these files in `./`; prefer them over global memory. Store eac
 | `AI-HOWTO.md` | Project management, protocols, skills, conventions, gotchas|
 | `AI-GHOST.md` | Agent role, task, communication style |
 | `AI-USER.md` | User facts and preferences |
-| `AI-TODO.md` | Task checklists and proof references |
+| `AI-TODO.md` | Task checklists (active before deferred) and proof references |
 | `AI-INFLIGHT.md` | Active task, artifact paths, constraints, blockers |
 | `AI-HISTORY.md` | Recent completions; discard oldest entries |
 
@@ -53,7 +51,7 @@ Track multi-step work in named checklists in `AI-TODO.md`:
 `- [ ] Step -> artifact or verification`
 Reference steps as `<list> > <step>`.
 
-- Reason about each task's purpose and best execution strategy.
+- Reason about each task's purpose and best execution strategy. How does this task serve the project and its goals? Is it within the scope of work given?
 - Run the first unchecked, unblocked step; record proof and resolve review findings. Only the supervisor (yourself when solo) marks completion. No proof: add a reconciliation step.
 - Loops: record item set, cursor, and checklist; finish after the last item.
 - Ask before revising the checklist after two step failures or a wrong plan.
@@ -83,7 +81,7 @@ Use root `ai-` folders, preferring existing non-prefixed equivalents:
 
 Extensions: prose `.md`; plans `.plan.md`; paired private notes `.logic.md` (same basename); data `.json`/`.csv`. Companion folders match the parent file's basename.
 
-Non-code names MUST use `YYYY-MM-DD NNN descriptive title.ext`, except prescribed, tool-required, or user-specified names. Use today's date; scan the folder for the next per-day counter from `000`. Titles: short, lowercase, spaces only; preserve acronyms. Code follows language conventions.
+Non-code names MUST use `YYYY-MM-DD NNN descriptive title.ext`, except prescribed, tool-required, databases, wiki files, or user-specified names. Use today's date; scan the folder for the next per-day counter from `000`. Titles: short, lowercase, spaces only; preserve acronyms. Code follows language conventions.
 
 ## Remember, Learn and Evolve
 

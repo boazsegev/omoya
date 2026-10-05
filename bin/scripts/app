@@ -9,7 +9,7 @@ const { CLI, App, NAMES } = AI;
 // `bun bin/scripts/app` has none, so the app's own command — the bare
 // prefix — fills in (never a stale literal).
 const program = basename(process.argv[1] ?? "") || NAMES.cliPrefix;
-const valueFlags = ["model", "url", "token", "timeout", "tools", "tool-timeout", "session", "resume", "max-turns", "max-tool-calls", "input", "logout", "screen", "port", "host"];
+const valueFlags = ["model", "url", "token", "timeout", "tools", "tool-timeout", "session", "resume", "max-turns", "max-tool-calls", "input", "logout", "mcp-login", "screen", "port", "host"];
 const booleanFlags = ["no-tool-fork", "tool-async", "safe", "login", "init", "force", "serve", "list"];
 
 function sessionState(args) {
@@ -42,8 +42,10 @@ function launchState(args) {
 }
 
 async function administrativeCommand(args) {
-  const command = args.login
-    ? { type: "login" }
+  const command = args["mcp-login"]
+    ? { type: "mcpLogin", endpoint: args["mcp-login"] }
+    : args.login
+      ? { type: "login" }
     : args.logout
       ? { type: "logout", endpoint: args.logout }
       : args.init
@@ -54,6 +56,7 @@ async function administrativeCommand(args) {
   if (!command) return false;
   const result = await CLI.execute(command);
   if (result.type === "login") process.stderr.write(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})\n`);
+  if (result.type === "mcpLogin") process.stderr.write(`MCP signed in: ${result.name}\n`);
   if (result.type === "logout") process.stderr.write(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}\n`);
   if (result.type === "initialize") process.stderr.write(`wrote ${result.file}\n`);
   if (result.type === "listModels") {

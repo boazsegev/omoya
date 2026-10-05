@@ -141,7 +141,9 @@ describe("the scanning layers (package → settings folder → namespaced projec
     writeFileSync(join(pkg, "themes", "package.json"), JSON.stringify({ tui: { themes: { package: { color: "blue" } } } }));
     writeFileSync(join(user, "themes", "user.json"), JSON.stringify({ tui: { themes: { user: { color: "green" } } } }));
 
-    expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg }).settings.tui.themes).toEqual({});
+    const withoutThemes = new Env({ dir: pkg, settingsDir: user, cwd: pkg });
+    expect(withoutThemes.settings.tui.themes).toEqual({});
+    withoutThemes.close();
     expect(new Env({ dir: pkg, settingsDir: user, cwd: pkg, themes: true }).settings.tui.themes).toMatchObject({
       package: { color: "blue" },
       user: { color: "green" },

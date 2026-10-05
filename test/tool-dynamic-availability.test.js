@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 import { test, expect } from "bun:test";
 import Env from "../lib/env.js";
 import IO from "../lib/io.js";

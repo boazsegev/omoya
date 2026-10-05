@@ -43,12 +43,10 @@ describe("read query normalization and shared JavaScript schemas", () => {
     expect(() => normalizeReadQuery({ path: "a", offset: -5 })).toThrow();
     expect(() => normalizeReadQuery({})).toThrow(TypeError);
   });
-  test("publishes the same described schema for read and write.source", () => {
+  test("publishes the read schema with target; write has no query input", () => {
     expect(readDescription().safe).toBe(true);
     expect(readDescription().inputSchema).toEqual(readQuerySchema());
-    const sourceSchema = toolDescription().write.inputSchema.properties.source;
-    expect({ ...sourceSchema, description: readQuerySchema().description }).toEqual(readQuerySchema());
-    expect(toolDescription().write.inputSchema.properties.read).toBeUndefined();
+    expect(toolDescription().write.inputSchema.properties.source).toBeUndefined();
     expect(toolDescription().write.safe).toBeUndefined();
     expect(readQuerySchema().additionalProperties).toBe(false);
     expect(readSettingsSchema().read.default.scanBytes).toBeGreaterThan(0);
@@ -157,7 +155,7 @@ describe("read guarded auxiliary access and bounded execution", () => {
     expect(await plain({ path: "a.txt", ignore: true, search: { text: "TODO" } }, ctx)).toBe("TODO");
     await expect(read({ path: ".", ignore: true }, ctx)).rejects.toThrow(/symbolic/);
     await expect(read({ path: ".." }, ctx)).rejects.toThrow(/boundary/);
-    await expect(read({ path: "/etc/passwd" }, ctx)).rejects.toThrow(/absolute/);
+    await expect(read({ path: ["", "etc", "passwd"].join("/") }, ctx)).rejects.toThrow(/boundary/);
   });
   test("guards .gitignore and ancestor auxiliary paths too", async () => {
     const ctx = setup({ "sub/a.txt": "TODO", "rules.txt": "a.txt" });
@@ -171,6 +169,11 @@ describe("read guarded auxiliary access and bounded execution", () => {
     expect(texts(await read({ path: "." }, ctx))).toContain("use `../`");
     await expect(read({ path: "missing" }, ctx)).rejects.toThrow(/Hint:/);
     await expect(read({ path: "../../outside" }, ctx)).rejects.toThrow(/boundary/);
+    setup({ "separate/own.txt": "own" });
+    const separate = { env: { cwd: `${ROOT}/project` }, agent: { folder: `${ROOT}/separate` } };
+    expect(await plain({ path: "own.txt" }, separate)).toBe("own");
+    expect(await plain({ path: "../project/a.txt" }, separate)).toBe("a");
+    await expect(read({ path: "../outside" }, separate)).rejects.toThrow(/boundary/);
   });
   test("positioned byte reads and positive head/tail queries don't load huge files", async () => {
     const ctx = setup({ "big.txt": "first\n" + "middle\n".repeat(200000) + "last", "big.bin": Buffer.alloc(2000000, 1) });
@@ -210,13 +213,13 @@ describe("read guarded auxiliary access and bounded execution", () => {
   });
 });
 
-describe("write.source shared payload and atomic failure guarantees", () => {
-  test("Agent runs read as safe and write.source as a mutating sequential barrier", async () => {
+describe("read.target shared payload and atomic failure guarantees", () => {
+  test("Agent runs read as safe and read.target as a mutating sequential barrier", async () => {
     setup({ "a.txt": "hello" });
     const env = new Env({ cwd: ROOT, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
     await toolsLoad(env);
     const io = scriptedIO([
-      [...TOOLCALL(0, "save", "write", { path: "out.txt", source: { path: "a.txt", annotate: true } }),
+      [...TOOLCALL(0, "save", "read", { path: "a.txt", annotate: true, target: "out.txt" }),
         ...TOOLCALL(1, "readback", "read", { path: "out.txt", annotate: false }), { type: "done" }],
       [...TEXT(0, "done"), { type: "done" }],
     ]);
@@ -231,36 +234,36 @@ describe("write.source shared payload and atomic failure guarantees", () => {
   test("saves plain text, listings and reports without agent payload round-trip", async () => {
     const ctx = setup({ "a.txt": "one\nTODO\nthree" });
     const query = { path: "a.txt", lines: { from: 2, to: 2 }, annotate: false };
-    await write({ path: "out.txt", source: query }, ctx);
+    await read({ ...query, target: "out.txt" }, ctx);
     expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("TODO\n");
     const report = { path: "a.txt", search: { text: "TODO" } };
     const expected = serializeReadResult(await executeReadQuery(report, ctx, { artifact: true }));
-    await write({ path: "report.txt", source: report }, ctx);
+    await read({ ...report, target: "report.txt" }, ctx);
     expect(readFileSync(join(ROOT, "report.txt"))).toEqual(expected);
-    await write({ path: "list.txt", source: { path: ".", glob: "*.txt", annotate: false } }, ctx);
+    await read({ path: ".", glob: "*.txt", annotate: false, target: "list.txt" }, ctx);
     expect(readFileSync(join(ROOT, "list.txt"), "utf8")).toContain("a.txt");
   });
   test("forces annotations off for non-search file/range/listing/base64 saves", async () => {
     const ctx = setup({ "source.txt": "one\ntwo\nthree" });
     for (const annotate of [undefined, true, false]) {
       const query = { path: "source.txt", annotate, lines: { from: 2, to: 2 } };
-      await write({ path: "out.txt", source: query }, ctx);
+      await read({ ...query, target: "out.txt" }, ctx);
       expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("two\n");
       expect(query.annotate).toBe(annotate); // Caller query is not mutated.
     }
-    await write({ path: "list.txt", source: { path: ".", glob: "source.txt", annotate: true } }, ctx);
+    await read({ path: ".", glob: "source.txt", annotate: true, target: "list.txt" }, ctx);
     expect(readFileSync(join(ROOT, "list.txt"), "utf8")).toBe("source.txt");
-    await write({ path: "base64.txt", source: { path: "source.txt", base64: true, annotate: true } }, ctx);
+    await read({ path: "source.txt", base64: true, annotate: true, target: "base64.txt" }, ctx);
     expect(Buffer.from(readFileSync(join(ROOT, "base64.txt"), "utf8"), "base64").toString("utf8")).toBe("one\ntwo\nthree");
     expect(texts(await read({ path: "source.txt" }, ctx))).toStartWith("[text/plain]\n");
   });
   test("normalizes empty/filler searches before deciding annotation policy", async () => {
     const ctx = setup({ "source.txt": "source" });
     for (const search of [undefined, null, false, true, [], {}, { text: "", regex: null }, { ignoreCase: true, before: 2 }]) {
-      await write({ path: "out.txt", source: { path: "source.txt", search, annotate: true } }, ctx);
+      await read({ path: "source.txt", search, annotate: true, target: "out.txt" }, ctx);
       expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("source");
     }
-    await expect(write({ path: "out.txt", source: { path: "source.txt", annotate: "invalid" } }, ctx)).rejects.toThrow(/boolean/);
+    await expect(read({ path: "source.txt", annotate: "invalid", target: "out.txt" }, ctx)).rejects.toThrow(/boolean/);
   });
   test("effective searches retain default/true annotations and honor explicit false", async () => {
     const ctx = setup({ "source.txt": "one\nTODO\nthree" });
@@ -268,31 +271,33 @@ describe("write.source shared payload and atomic failure guarantees", () => {
       for (const annotate of [undefined, true, false]) {
         const query = { path: "source.txt", search, annotate };
         const expected = serializeReadResult(await executeReadQuery(query, ctx, { artifact: true }));
-        await write({ path: "out.txt", source: query }, ctx);
+        await read({ ...query, target: "out.txt" }, ctx);
         expect(readFileSync(join(ROOT, "out.txt"))).toEqual(expected);
         if (annotate !== false) expect(expected.toString("utf8")).toContain("2: TODO");
         else expect(expected.toString("utf8")).toBe("TODO");
       }
     }
-    await write({ path: "info.txt", source: { path: "source.txt", info: true } }, ctx);
+    await read({ path: "source.txt", info: true, target: "info.txt" }, ctx);
     expect(readFileSync(join(ROOT, "info.txt"), "utf8")).toContain("lines: 3");
   });
   test("preserves bytes and base64 without binary decoration or status", async () => {
     const ctx = setup({ "a.bin": Buffer.from([0, 255, 3, 4]) });
-    await write({ path: "b.bin", source: { path: "a.bin", binary: true, bytes: { from: -2 } } }, ctx);
+    await read({ path: "a.bin", binary: true, bytes: { from: -2 }, target: "b.bin" }, ctx);
     expect(readFileSync(join(ROOT, "b.bin"))).toEqual(Buffer.from([3, 4]));
-    await write({ path: "b64.txt", source: { path: "a.bin", binary: true, base64: true } }, ctx);
+    await read({ path: "a.bin", binary: true, base64: true, target: "b64.txt" }, ctx);
     expect(readFileSync(join(ROOT, "b64.txt"), "utf8")).toBe("AP8DBA==");
   });
-  test("rejects both/neither, safe mode, source identity and incomplete saves", async () => {
+  test("rejects missing content, unknown fields, safe mode, source identity and incomplete saves", async () => {
     const ctx = setup({ "a.txt": "a".repeat(1000), "dest.txt": "unchanged" });
-    await expect(write({ path: "x", content: "", source: { path: "a.txt" } }, ctx)).rejects.toThrow(/exactly one/);
-    await expect(write({ path: "x" }, ctx)).rejects.toThrow(/exactly one/);
-    await expect(write({ path: "x", read: { path: "a.txt" } }, ctx)).rejects.toThrow(/Unknown write field: read/);
+    await expect(write({ path: "x" }, ctx)).rejects.toThrow(/content must be a string/);
+    await expect(write({ path: "x", content: "", source: { path: "a.txt" } }, ctx)).rejects.toThrow(/Unknown write field: source/);
+    await expect(read({ path: "a.txt", target: "x" }, { ...ctx, safe: true })).rejects.toThrow(/safe mode/);
+    await expect(read({ path: "a.txt", target: 5 }, ctx)).rejects.toThrow(/path string/);
+    expect(texts(await read({ path: "a.txt", lines: { last: 0 }, target: "" }, ctx))).not.toContain("Successfully");
     await expect(write({ path: "x", content: "a" }, { ...ctx, safe: true })).rejects.toThrow(/safe mode/);
-    await expect(write({ path: "a.txt", source: { path: "a.txt" } }, ctx)).rejects.toThrow(/must differ/);
+    await expect(read({ path: "a.txt", target: "a.txt" }, ctx)).rejects.toThrow(/must differ/);
     ctx.env.settings.read = { artifactBytes: 100 };
-    await expect(write({ path: "dest.txt", source: { path: "a.txt" } }, ctx)).rejects.toThrow(/incomplete/);
+    await expect(read({ path: "a.txt", target: "dest.txt" }, ctx)).rejects.toThrow(/incomplete/);
     expect(readFileSync(join(ROOT, "dest.txt"), "utf8")).toBe("unchanged");
     const controller = new AbortController(); controller.abort(new Error("cancelled"));
     await expect(write({ path: "dest.txt", content: "new" }, { ...ctx, signal: controller.signal })).rejects.toThrow(/cancelled/);
@@ -301,11 +306,11 @@ describe("write.source shared payload and atomic failure guarantees", () => {
   test("explicit limit is intentional, larger artifact budget differs from preview, empty content valid", async () => {
     const ctx = setup({ "a.txt": "one\ntwo\nthree", "large.txt": "x".repeat(1000) });
     ctx.env.settings.read = { outputBytes: 100, artifactBytes: 2000 };
-    await write({ path: "out.txt", source: { path: "a.txt", search: { regex: ".+" }, limit: 1, annotate: false } }, ctx);
+    await read({ path: "a.txt", search: { regex: ".+" }, limit: 1, annotate: false, target: "out.txt" }, ctx);
     expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("one");
-    await write({ path: "large-out.txt", source: { path: "large.txt", annotate: false } }, ctx);
+    await read({ path: "large.txt", annotate: false, target: "large-out.txt" }, ctx);
     expect(readFileSync(join(ROOT, "large-out.txt")).length).toBe(1000);
-    await write({ path: "empty.txt", content: "", source: null }, ctx);
+    await write({ path: "empty.txt", content: "" }, ctx);
     expect(readFileSync(join(ROOT, "empty.txt")).length).toBe(0);
   });
   test("publishes read safe/write unsafe through Env and calls the shared query", async () => {
@@ -315,9 +320,13 @@ describe("write.source shared payload and atomic failure guarantees", () => {
       await toolsLoad(env);
       const tools = await env.tools(true);
       expect(tools.has("read")).toBe(true); expect(tools.has("write")).toBe(false);
+      // Scanned tools keep their readOnly classifier (read.target and skill-resource target serialize).
+      expect(tools.get("read").readOnly({ path: "a", target: "b" })).toBe(false);
+      expect(tools.get("skill-resource").readOnly({ name: "a", target: "b" })).toBe(false);
       const ctx = { env };
       expect(await env.toolCall("read", { path: "a.txt", annotate: false }, ctx)).toBe("hello");
-      await env.toolCall("write", { path: "out.txt", source: { path: "a.txt" } }, ctx);
+      await env.toolCall("read", { path: "a.txt", target: "out.txt" }, ctx);
+      await expect(env.toolCall("read", { path: "a.txt", target: "safe.txt" }, { env, safe: true })).rejects.toThrow(/safe mode/);
       expect(readFileSync(join(ROOT, "out.txt"), "utf8")).toBe("hello");
     } finally { await env.close(); }
   });

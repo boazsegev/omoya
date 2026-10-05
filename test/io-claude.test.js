@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { providerClass } from "./fakes.js";
 import { oauthPasteOnly } from "../lib/cli.js";
@@ -15,7 +16,7 @@ const user = [{ type: 2, content: [{ type: "text", text: "hello" }] }];
 
 describe("Claude subscription provider", () => {
   test("package scan registers Claude independently and publishes its OAuth preset", async () => {
-    const env = new Env({ settingsDir: null, settings: { providers: {} } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { providers: {} } });
     await providersLoad(env, { detect: false });
     expect(providerNamesOf(env)).toContain("claude");
     expect(env.loginPresets().find((entry) => entry.name === "claude")?.provider).toBe("claude");

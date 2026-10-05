@@ -1,37 +1,23 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { contextEntries, viewerWhere, canEditViewerBlock } from "../lib/app/web/public/app/logic/viewer.js";
 import Agent from "../lib/agent.js";
 import { serve } from "../lib/app/web/server.js";
 import { parseClientMessage } from "../lib/app/web/protocol.js";
 import { testEnv, USER } from "./fakes.js";
 import { toolCatalogText } from "../lib/app/shared/tool-catalog.js";
 
-const source = readFileSync("lib/app/web/public/app.js", "utf8");
-function extract(name) {
-  const start = source.indexOf(`function ${name}(`);
-  return source.slice(start, source.indexOf("\n/**", start));
-}
-function element(tag, className, text) {
-  return { tag, className, text, children: [], append(...children) { this.children.push(...children); }, setAttribute() {}, addEventListener() {} };
-}
-
 test("Web viewer prepends a virtual system catalog and offers copy but no mutations", () => {
   const stored = [{ messageIndex: 0, content: [{ messageIndex: 0, blockIndex: 0, viewerType: "system", text: "real system" }] }];
   const tools = { messageIndex: -1, blockIndex: 0, virtual: true, viewerType: "system", name: "Tools", text: "schema" };
-  const entries = new Function("contextBlocks", "contextTools", `${extract("contextEntries")}; return contextEntries();`)(stored, tools);
+  const entries = contextEntries(stored, tools);
   expect(entries.map((block) => block.source)).toEqual(["schema", "real system"]);
   expect(entries[1].messageIndex).toBe(0);
-  const where = new Function(`${extract("viewerWhere")}; return viewerWhere;`)();
-  expect(where(entries[0], entries)).toBe("virtual system block");
-  expect(where(entries[1], entries)).toBe("message 1");
-  const button = (_className, _text, _action, options) => ({ tag: "button", title: options?.title });
-  const card = new Function("el", "button", "contextView", "markdownNode", `${extract("contextCard")}; return contextCard;`)(element, button, { selected: new Set() }, element);
-  const virtual = card(entries[0], true);
-  expect(virtual.children[0].children[1].children.map((item) => item.title)).toEqual(["Copy"]);
-  expect(JSON.stringify(virtual)).not.toContain("checkbox");
-  expect(JSON.stringify(virtual)).not.toContain("textarea");
-  const real = card(entries[1], false);
-  expect(real.children[0].children[2].children.map((item) => item.title)).toEqual(["Copy", "Edit", "Roll back to here (drop this and later messages)", "Delete message"]);
+  expect(viewerWhere(entries[0], entries)).toBe("virtual system block");
+  expect(viewerWhere(entries[1], entries)).toBe("message 1");
+  expect(canEditViewerBlock(entries[0])).toBe(false);
+  expect(canEditViewerBlock(entries[1])).toBe(true);
+  expect(canEditViewerBlock({ ...entries[1], viewerType: "tool display" })).toBe(false);
   for (const type of ["context.rollback", "context.delete", "context.edit-text"]) {
     const packet = type === "context.delete" ? { type, messageIndexes: [-1] } : { type, messageIndex: -1, blockIndex: 0, text: "x" };
     expect(() => parseClientMessage(JSON.stringify(packet))).toThrow();
@@ -39,7 +25,7 @@ test("Web viewer prepends a virtual system catalog and offers copy but no mutati
 });
 
 test("Web async catalog results cannot overwrite a newer request or a switched Agent", async () => {
-  const server = readFileSync("lib/app/web/server.js", "utf8");
+  const server = readFileSync("lib/app/web/workspace.js", "utf8");
   const start = server.indexOf("  async function sendContext(");
   const code = server.slice(start, server.indexOf("\n  /**", start));
   const sent = [];

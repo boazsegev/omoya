@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import Agent from "../lib/agent.js";
 import Env from "../lib/env.js";
 
@@ -30,5 +30,6 @@ describe("Agent.sendFile", () => {
     const agent = new Agent({ env: new Env({ cwd: dir, dir, settings: {} }) });
     await expect(agent.pathInfo("../outside")).rejects.toThrow(/path traversal refused/);
     expect(await agent.pathInfo("photo.webp")).toEqual({ path: "./photo.webp", isFolder: false, mimetype: "image/webp" });
+    expect(await agent.pathInfo(resolve(dir, "photo.webp"))).toEqual({ path: "./photo.webp", isFolder: false, mimetype: "image/webp" });
   });
 });

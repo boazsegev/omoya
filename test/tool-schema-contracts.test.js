@@ -65,7 +65,12 @@ describe("intended model-facing tool inputs", () => {
       expect(schema.properties[name].description).toMatch(/glob.*array/);
     }
     expect(schema.properties.lines.properties.from.type).toBe("integer");
-    expect(schema.properties.lines.properties.from.description).toContain("1-based");
+    expect(schema.properties.lines.description).toContain("1-based");
+    expect(schema.properties.target.type).toBe("string");
+    expect(schema.properties.target.description).toMatch(/only if `write` is available/);
+    expect(readDescription().readOnly({ path: "a" })).toBe(true);
+    expect(readDescription().readOnly({ path: "a", target: "" })).toBe(true);
+    expect(readDescription().readOnly({ path: "a", target: "b" })).toBe(false);
     expect(schema.properties.lines.properties.last.minimum).toBe(0);
     expect(schema.properties.characters.properties.from.type).toBe("integer");
     expect(schema.properties.search.properties.text.type).toBe("string");
@@ -74,19 +79,16 @@ describe("intended model-facing tool inputs", () => {
     expect(schema.properties.offset.minimum).toBe(0);
   });
 
-  test("write describes its payload choice without conditional schema keywords", () => {
+  test("write takes text only; copying belongs to read.target", () => {
     const { description, inputSchema } = writeDescription().write;
     expect(description).not.toMatch(/round.trip|budget|effective/i);
+    expect(description).toMatch(/read with target/);
     expectOperativeSchema(inputSchema);
-    expect(inputSchema.required).toEqual(["path"]);
-    expect(inputSchema.oneOf).toBeUndefined();
-    expect(description).toMatch(/never both/);
+    expect(inputSchema.required).toEqual(["path", "content"]);
+    expect(Object.keys(inputSchema.properties)).toEqual(["path", "content", "ask"]);
     expect(inputSchema.properties.content.type).toBe("string");
     expect(inputSchema.properties.content.minLength).toBeUndefined();
     expect(inputSchema.properties.ask.type).toBe("boolean");
-    expect(inputSchema.properties.source.type).toBe("object");
-    expect(inputSchema.properties.source.properties).toEqual(readQuerySchema().properties);
-    expect(inputSchema.properties.source.required).toEqual(["path"]);
   });
 
   test("remaining tools describe caller choices without exposing recovery or registry internals", () => {

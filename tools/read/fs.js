@@ -25,12 +25,21 @@ export function readBudgets(context) {
 
 export function readScope(context) {
   const cwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
-  return { cwd: resolve(cwd), boundary: resolve(context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd) };
+  const project = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
+  return { cwd: resolve(cwd), project: resolve(project), boundary: resolve(cwd) };
+}
+
+/** Reads may use either the Agent tree or the Env project tree, never a third tree. */
+export function selectReadBoundary(path, scope) {
+  const target = resolve(scope.cwd, path);
+  const inside = (root) => target === root || target.startsWith(`${root}${sep}`);
+  scope.boundary = inside(scope.cwd) ? scope.cwd : scope.project;
+  if (!inside(scope.boundary)) throw new Error("path traversal refused: read path escapes the agent and project boundary");
 }
 
 export function createReadState(context, artifact = false) {
   const budgets = readBudgets(context);
-  return { budgets, scope: readScope(context), signal: context?.signal,
+  return { budgets, artifact, scope: readScope(context), signal: context?.signal,
     deadline: Math.min(context?.deadline ?? Infinity, Date.now() + budgets.timeoutMs),
     scanned: 0, files: 0, entries: 0, output: 0,
     outputLimit: artifact ? budgets.artifactBytes : budgets.outputBytes };
@@ -58,7 +67,7 @@ function errorPath(error, state) {
   if (typeof error?.path !== "string") return undefined;
   const abs = resolve(state.scope.cwd, error.path);
   const projectPath = relative(state.scope.boundary, abs);
-  return projectPath === ".." || projectPath.startsWith(`..${sep}`) ? "[outside project]" : relativeReadPath(abs, state);
+  return projectPath === ".." || projectPath.startsWith(`..${sep}`) ? "[outside allowed folders]" : relativeReadPath(abs, state);
 }
 
 /** Rebuild filesystem failures without native messages, causes or absolute stack locations. */

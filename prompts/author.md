@@ -11,13 +11,15 @@ Author the document requested below. Own its brief, drafting, integration, criti
 
 Use the requested destination, otherwise the project's research folder. Retain the brief, sources, section drafts, reviews, and assembly/calculation scripts in a companion folder beside the document. Track progress in the project's task ledger.
 
+If deeper research is required, orchestrate research workers, have them save research and sources to files and provide you with coverage updates and short summaries.
+
 ## Write the Brief
 
 Write the brief first: purpose, audience, thesis or questions, form, citation format, evidence standard, scope limits (dates, jurisdiction), and an outline of claims each section must support. Record noncritical assumptions. Research what the outline needs.
 
 ## Draft the Sections
 
-Draft each section in its own file with one owner. Give each owner the brief, its outline claims, and section/source paths; require source support, contradictions, and unresolved gaps with the draft. Draft small documents alone as one section.
+Draft each section in its own file with one owner. Give each owner the brief, its outline claims, and section/source paths; require source support, contradictions, and unresolved gaps with the draft. Draft simpler / smaller documents alone as one section and delegate to workers for longer / complex documents.
 
 Cite a source for each load-bearing claim in the section text. Retain source locators, supporting material, and access dates separately. Prefer primary sources; disclose contradictions.
 

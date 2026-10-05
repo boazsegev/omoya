@@ -29,7 +29,7 @@ function env(settings = {}) {
   };
   // each endpoint section's catalog, merged under the test's own section
   const section = (name, model) => ({ ...(settings[name] ?? {}), models: { [model]: {}, ...(settings[name]?.models ?? {}) } });
-  return new Env({ dir, settingsDir: dir, providers: { kimi: KimiProvider, anthropic: AnthropicProvider, openai: OpenAIProvider },
+  return new Env({ cwd: dir, dir, settingsDir: dir, providers: { kimi: KimiProvider, anthropic: AnthropicProvider, openai: OpenAIProvider },
     settings: { ...settings, providers: { ...endpoints, ...(settings.providers ?? {}) },
       "kimi-coding": section("kimi-coding", "kimi-for-coding"), test: section("test", "m"), codex: section("codex", "gpt-6-sol") } });
 }
@@ -92,7 +92,7 @@ describe("conventional web dispatch", () => {
     class WebProvider {}
     WebProvider.provider = { capabilities: { tools: { "web-search": { function: async ({ args }) => `provider answered ${args.query}` } } } };
     const dir = mkdtempSync("./ai-tmp/web-dispatch-");
-    const e = new Env({ dir, settingsDir: dir, providers: { web: WebProvider },
+    const e = new Env({ cwd: dir, dir, settingsDir: dir, providers: { web: WebProvider },
       settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://local.test/" }], engines: [], cacheSeconds: 0 } },
         providers: { w: { provider: "web", url: "https://w.test/" } }, w: { models: { m: {} } } } });
     e.toolAdd("web-search", webSearch, SEARCH);
@@ -118,7 +118,7 @@ describe("conventional web dispatch", () => {
         class WebProvider {}
         WebProvider.provider = { capabilities: { tools: { "web-search": { function: fn } } } };
         const dir = mkdtempSync("./ai-tmp/web-dispatch-");
-        const e = new Env({ dir, settingsDir: dir, providers: { web: WebProvider },
+        const e = new Env({ cwd: dir, dir, settingsDir: dir, providers: { web: WebProvider },
           settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://fallback.test/search" }], engines: [], cacheSeconds: 0 } },
             providers: { w: { provider: "web", url: "https://w.test/" } }, w: { models: { m: {} } } } });
         e.toolAdd("web-search", webSearch, SEARCH);

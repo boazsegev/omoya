@@ -39,7 +39,6 @@ for (const name of ["lstat", "open", "opendir"]) {
 try {
   const { read } = await import("../tools/read/read.js");
   const { executeReadQuery } = await import("../tools/read/engine.js");
-  const { write } = await import("../tools/write.js");
   const ctx = { env: { cwd: root, settings: {} } };
   if (["count", "bulk-count"].includes(mode)) {
     await executeReadQuery(mode === "count" ? { path: "", recursive: true, glob: ["**/README.md"], info: true }
@@ -48,8 +47,7 @@ try {
   } else {
     try {
       const query = mode !== "auxiliary" && ["open", "read"].includes(operation) ? { path: "sub/README.md" } : { path: "", recursive: true, glob: "**/README.md", info: true, ignore: mode === "auxiliary" };
-      if (mode.startsWith("write-")) await write({ path: "saved.txt", source: query }, ctx);
-      else await read(query, ctx);
+      await read(mode.startsWith("write-") ? { ...query, target: "saved.txt" } : query, ctx);
       throw new Error("injected failure did not occur");
     } catch (error) {
       console.log(JSON.stringify({ leaked: JSON.stringify(Object.fromEntries(Object.getOwnPropertyNames(error).map((key) => [key, error[key]]))).includes(resolve(root)),

@@ -14,7 +14,7 @@ import { NAMES } from "../lib/namespace.js";
 import { wrapperNames } from "../bin/scripts/index.js";
 
 const ROOT = resolve(".");
-const SKIP_TREE = new Set([".git", "ai-tmp"]); // generated/ignored state is not source
+const SKIP_TREE = new Set([".git", "ai-tmp", "ai-tasks"]); // generated/ignored task state is not source
 
 /** Every tree entry, recursively, excluding generated/ignored state. */
 function entries(dir = ".") {

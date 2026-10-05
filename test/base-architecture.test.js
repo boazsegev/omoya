@@ -249,6 +249,34 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     expect(offenders).toEqual([]);
   });
 
+  // Browser SPA layering (web client option B): leaves < state/logic < views
+  // < orchestrators < app.js root. Views meet only in app.js's intent table.
+  test("web client: views, orchestrators, and transport import only downward", () => {
+    const root = join("lib", "app", "web", "public");
+    const app = join(root, "app") + "/";
+    const views = join(app, "views") + "/";
+    const orchestrators = join(app, "orchestrators") + "/";
+    const logic = join(app, "logic") + "/";
+    const offenders = [];
+    for (const file of filesRecursive(root).filter((f) => f.endsWith(".js"))) {
+      const source = readFileSync(file, "utf8");
+      if (/\bactions\.[A-Za-z]|new Proxy\(/.test(source)) offenders.push(`${file}: late-bound registry or Proxy`);
+      for (const spec of specifiers(file).filter((s) => s.startsWith("."))) {
+        const target = join(dirname(file), spec);
+        const ownView = file.startsWith(views) ? file.slice(0, views.length) + file.slice(views.length).split("/")[0] + "/" : null;
+        const bad =
+          (target.startsWith(views) && file !== join(root, "app.js") && !(ownView && target.startsWith(ownView))) ||
+          (ownView && (target.startsWith(orchestrators) || /app\/(wire|render|dispatch)\.js$/.test(target))) ||
+          (file.startsWith(orchestrators) && (/app\/wire\.js$/.test(target) ||
+            (target.startsWith(orchestrators) && !/turn/.test(file) ))) ||
+          (file.startsWith(logic) && (target.startsWith(views) || target.startsWith(orchestrators) || /app\/(state|wire|render)\.js$/.test(target))) ||
+          (file === join(app, "wire.js"));
+        if (bad) offenders.push(`${file} -> ${spec}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   test("executables import public modules only (never lib/<module>/ privates)", () => {
     const offenders = [];
     // ai-tools are development instrumentation: they may inspect private

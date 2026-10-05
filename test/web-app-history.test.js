@@ -1,69 +1,38 @@
-// Web composer history recall (lib/app/web/public/app.js): drafts must never
-// be replaced or lost while moving through history with Up/Down. The logic is
-// extracted from app.js verbatim and driven against a fake textarea, so the
-// test fails if the shipped code drifts.
-
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { historyEntries, historyRecall, onEdgeRow, editHistoryDraft } from "../lib/app/web/public/app/logic/history.js";
 
-const source = readFileSync(join(import.meta.dir, "..", "lib", "app", "web", "public", "app.js"), "utf8");
-
-function section(name, next) {
-  const start = source.indexOf(`function ${name}(`);
-  if (start < 0) throw new Error(`app.js no longer defines ${name}`);
-  const end = source.indexOf(`\nfunction ${next ?? ""}`, start);
-  if (end < 0) throw new Error(`cannot bound ${name}`);
-  return source.slice(start, end);
-}
-
-// Build a tiny harness with the same globals app.js uses.
 const WRAP = 20;
 function makeSession(userTexts) {
-  const textarea = {
-    value: "", selectionStart: 0, selectionEnd: 0, style: {},
-    dispatchEvent() { session.input(); }, // app.js used to rely on this
-  };
+  const textarea = { value: "", selectionStart: 0, selectionEnd: 0 };
   const session = {
     agent: { id: "a1" },
     blocks: userTexts.map((text) => ({ kind: "user", text })),
-    composerByAgent: new Map(),
-    textareaEl: textarea,
-    hideAutocompleteCalls: 0,
-    caretRowTops: (ta, index) => {
-      const row = (at) => { const lines = ta.value.slice(0, at).split("\n"); return lines.slice(0, -1).reduce((sum, line) => sum + Math.floor(line.length / WRAP) + 1, 0) + Math.floor(lines.at(-1).length / WRAP); };
-      return { start: 0, caret: row(index), end: row(ta.value.length) };
-    },
-    input() {
-      // The composer input handler, mirrored 1:1 from app.js.
-      session.noteComposerInput();
+    draft: { text: "", attachments: [], submitted: [], historyIndex: null, historyDraft: null },
+    textarea,
+    composerDraft() { return this.draft; },
+    messageHistory() { return historyEntries(this.blocks, this.draft.submitted); },
+    noteComposerInput() { editHistoryDraft(this.draft, textarea.value); },
+    recallHistory(direction) {
+      const entries = this.messageHistory();
+      if (!entries.length || (direction > 0 && this.draft.historyIndex === null)) return false;
+      const caret = direction < 0 ? textarea.selectionStart : textarea.selectionEnd;
+      const row = (at) => {
+        const lines = textarea.value.slice(0, at).split("\n");
+        return lines.slice(0, -1).reduce((sum, line) => sum + Math.floor(line.length / WRAP) + 1, 0) + Math.floor(lines.at(-1).length / WRAP);
+      };
+      const tops = { start: 0, caret: row(caret), end: row(textarea.value.length) };
+      const result = historyRecall({ value: textarea.value, caret, direction, entries, draft: this.draft, tops });
+      if (!result) return false;
+      if (direction < 0 && this.draft.historyIndex === 0) return true;
+      this.draft.historyIndex = result.index;
+      this.draft.historyDraft = result.historyDraft;
+      textarea.value = result.value;
+      return true;
     },
   };
-  const body = [
-    "const { agent, blocks, composerByAgent } = session;",
-    "let { textareaEl } = session;",
-    "const nodes = []; const scrollEl = null;",
-    "const hideAutocomplete = () => { session.hideAutocompleteCalls++; };",
-    // The DOM mirror measurement, faked: a newline-free line soft-wraps every
-    // WRAP characters, each visual row 1 unit tall.
-    "const caretRowTops = session.caretRowTops;",
-    section("autofit", "noteComposerInput"),
-    section("noteComposerInput", "recallHistory"),
-    section("composerDraft", "saveComposerDraft"),
-    section("messageHistory", "recallHistory"),
-    section("recallHistory", "toolLabel"),
-    "session.noteComposerInput = noteComposerInput;",
-    "session.api = { composerDraft, messageHistory, recallHistory, noteComposerInput };",
-  ].join("\n");
-  new Function("session", body)(session);
-  return { ...session.api, textarea, session };
+  return { ...session, composerDraft: session.composerDraft.bind(session), messageHistory: session.messageHistory.bind(session), recallHistory: session.recallHistory.bind(session) };
 }
-
-const type = (s, text) => {
-  s.textarea.value = text;
-  s.textarea.selectionStart = s.textarea.selectionEnd = text.length;
-  s.textarea.dispatchEvent();
-};
+const type = (s, text) => { s.textarea.value = text; s.textarea.selectionStart = s.textarea.selectionEnd = text.length; s.noteComposerInput(); };
 const caret = (s, index) => { s.textarea.selectionStart = s.textarea.selectionEnd = index; };
 const up = (s) => s.recallHistory(-1);
 const down = (s) => s.recallHistory(1);

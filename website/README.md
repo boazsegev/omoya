@@ -26,6 +26,17 @@ Preview locally: `bun ai-tools/serve-site.js` → http://localhost:4173/
 
 Verify a build with `bun ai-tools/ai-website-check.js` (static checks: search anchors resolve, search re-scrolls to the hash, API cross-links are emitted, builtins never link).
 
+## MCP OAuth client identity
+
+`static/oauth/client.json` is copied verbatim to `/oauth/client.json` and must deploy at
+`https://omoya.ai/oauth/client.json` before CIMD sign-in is offered. The client uses
+`http://localhost:8765/oauth/callback`: a fixed loopback port/path is necessary
+because CIMD redirect URIs are matched exactly by authorization servers. Unlike
+native-app pre-registration (RFC 8252), a dynamic port cannot be expressed in a
+static CIMD `redirect_uris` list. If port 8765 is occupied, sign-in fails with an
+actionable error; Omoya does not silently choose another port. The loopback
+listener binds `127.0.0.1` only; browsers resolve `localhost` to loopback.
+
 ## LLM documentation
 
 The build automatically generates these deployment-root files from the current source/docs:

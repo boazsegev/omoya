@@ -4,7 +4,8 @@
 // own process (exit 1) can never crush the Agent; timeout kills stuck
 // calls; async dispatches one message's calls concurrently.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { Env } from "../lib/env.js";
@@ -278,20 +279,49 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     expect(pid).not.toBe(process.pid); // ran in the worker, not in-process
   });
 
-  test("a forked write tool retains the agent cwd and may write a project sibling", async () => {
+  test("a forked write tool restricts mutations to the agent folder", async () => {
     const project = mkdtempSync("./ai-tmp/sandbox-project-");
     const folder = `${project}/agent`;
     mkdirSync(folder);
     const env = new Env({ dir: project, cwd: project, settings: {} });
     await toolsLoad(env);
-    const agent = new Agent({ env });
-    (agent.folder = "agent");
-    const result = await callToolSandboxed({
-      env, name: "write", file: fileOf(env, "write"), args: { path: "../sibling.txt", content: "sibling" },
-      sandbox: true, cwd: agent.folder,
-    });
-    expect(result).toEqual({ ok: true, value: "Successfully wrote 7 bytes to ../sibling.txt" });
-    expect(readFileSync(`${project}/sibling.txt`, "utf8")).toBe("sibling");
+    const agent = new Agent({ env, folder: "agent" });
+    const write = (path) => callToolSandboxed({ env, name: "write", file: fileOf(env, "write"),
+      args: { path, content: "agent" }, sandbox: true, cwd: agent.folder });
+    expect((await write("../sibling.txt")).ok).toBe(false);
+    expect(await write("own.txt")).toEqual({ ok: true, value: "Successfully wrote 5 bytes to own.txt" });
+    expect(readFileSync(`${folder}/own.txt`, "utf8")).toBe("agent");
+    expect(existsSync(`${project}/sibling.txt`)).toBe(false);
+    if (![null, "delegated"].includes(osSandboxKind())) {
+      const bash = await callToolSandboxed({ env, name: "bash", file: fileOf(env, "bash"),
+        args: { command: "printf x > ../sibling.txt" }, sandbox: true, cwd: agent.folder });
+      expect(bash.ok && !existsSync(`${project}/sibling.txt`)).toBe(true);
+    }
+  });
+
+  test("disjoint embedded Agent reads Env and own trees but writes only its own tree", async () => {
+    const project = mkdtempSync("./ai-tmp/sandbox-env-");
+    const folder = mkdtempSync("./ai-tmp/sandbox-agent-");
+    const env = new Env({ dir: project, cwd: project, settings: {} });
+    await toolsLoad(env);
+    const agent = new Agent({ env, folder: resolve(folder) });
+    const call = (name, args) => callToolSandboxed({ env, name, file: fileOf(env, name),
+      args, sandbox: true, cwd: agent.folder });
+    const relativeProject = relative(folder, project);
+    writeFileSync(`${project}/project.txt`, "project");
+    expect((await call("write", { path: `${relativeProject}/denied.txt`, content: "x" })).ok).toBe(false);
+    expect(await call("write", { path: "own.txt", content: "own" })).toEqual({ ok: true, value: "Successfully wrote 3 bytes to own.txt" });
+    expect((await call("read", { path: `${relativeProject}/project.txt`, annotate: false })).value).toBe("project");
+    expect((await call("read", { path: "own.txt", annotate: false })).value).toBe("own");
+    expect((await call("read", { path: `${relativeProject}/project.txt`, target: "copy.txt" })).ok).toBe(true);
+    expect((await call("read", { path: "own.txt", target: `${relativeProject}/denied-copy.txt` })).ok).toBe(false);
+    expect(readFileSync(`${folder}/copy.txt`, "utf8")).toBe("project");
+    if (![null, "delegated"].includes(osSandboxKind())) {
+      const bash = await call("bash", { command: `printf x > ${relativeProject}/shell-denied.txt` });
+      expect(bash.ok).toBe(true);
+      expect(existsSync(`${project}/shell-denied.txt`)).toBe(false);
+    }
+    expect(existsSync(`${project}/denied.txt`)).toBe(false);
   });
 
   test("the kernel denies every unsafe untrusted tool's outside write", async () => {
@@ -328,11 +358,13 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
       queueMicrotask(() => child.emit("close", 1)); // no result line: ordinary failure
       return child;
     };
-    const result = await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, spawnImpl });
+    const root = `${env.cwd}/narrow`;
+    mkdirSync(root);
+    const result = await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, cwd: root, spawnImpl });
     expect(result.ok).toBe(false); // the fake child produced no result
     const [call] = spawned;
     expect(call.options.detached).toBe(true);
-    await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, detached: false, spawnImpl });
+    await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, cwd: root, detached: false, spawnImpl });
     expect(spawned[1].options.detached).toBe(true); // dispatch teardown requires a process group
     expect(call.options.stdio).toEqual(["pipe", "pipe", "pipe", "pipe", "pipe"]);
     expect(call.options).toHaveProperty("detached");
@@ -342,6 +374,7 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     } else {
       expect(call.file).not.toBe(process.execPath); // the sandbox wrapper leads
       expect(call.argv).toContain(process.execPath); // ...with the worker program inside
+      expect(call.argv.join(" ")).toContain(root); // the narrower folder, not env.cwd, is writable
       if (process.platform !== "win32") expect(call.options.detached).toBe(true); // group kill reaches the jailed child
     }
   });

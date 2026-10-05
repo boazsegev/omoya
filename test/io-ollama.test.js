@@ -83,7 +83,8 @@ describe("Ollama metadata surface", () => {
     const models = await ollama.models({ url: "http://localhost:11434", settings: {} });
     expect(mock.calls[0][0]).toBe("http://localhost:11434/api/tags");
     expect(Object.keys(models)).toEqual(["qwen3:8b", "llama3.1:8b"]);
-    expect(models["qwen3:8b"]).toMatchObject({ input: ["text"], family: "qwen3" });
+    expect(models["qwen3:8b"]).toMatchObject({ family: "qwen3" });
+    expect(models["qwen3:8b"].input).toBeUndefined(); // /api/tags does not report modalities
   });
 
   test("models() probes /api/show for each model's context window (best-effort metadata)", async () => {
@@ -92,6 +93,7 @@ describe("Ollama metadata surface", () => {
         const model = JSON.parse(init.body).model;
         return new Response(JSON.stringify({
           model_info: model === "qwen3:8b" ? { "qwen3.context_length": 40960 } : {},
+          capabilities: model === "qwen3:8b" ? ["completion", "vision"] : ["completion"],
         }));
       }
       return new Response(JSON.stringify({
@@ -103,6 +105,8 @@ describe("Ollama metadata surface", () => {
     };
     const map = await ollama.models({ url: "http://localhost:11434", settings: {} });
     expect(map["qwen3:8b"].contextWindow).toBe(40960);
+    expect(map["qwen3:8b"].input).toEqual(["text", "image"]);
+    expect(map["mystery:1b"].input).toEqual(["text"]);
     expect(map["mystery:1b"].contextWindow).toBeUndefined(); // unknown stays absent
   });
 
@@ -151,7 +155,7 @@ describe("Ollama context2msg (outgoing shape)", () => {
     expect(body.messages[0]).toEqual({ role: "assistant", content: "answer" });
   });
 
-  test("image and binary blocks ride Ollama's sole images channel (user + tool result)", () => {
+  test("user images stay native; tool binaries follow tool results in a user message", () => {
     const [, body] = ollama.context2msg(
       [
         { type: 2, content: [
@@ -168,9 +172,11 @@ describe("Ollama context2msg (outgoing shape)", () => {
     );
     expect(body.messages[0]).toEqual({ role: "user", content: "what is this?", images: ["aW1n"] });
     expect(body.messages[1]).toEqual({
-      role: "tool", name: "file-read",
-      content: "[bytes 0–3 of 4 total, image/png]\n[attachment]",
-      images: ["Ymlu", "emlw"], // generic binary payloads use Ollama's sole binary channel
+      role: "tool", name: "file-read", content: "[bytes 0–3 of 4 total, image/png]",
+    });
+    expect(body.messages[2]).toEqual({
+      role: "user", content: "Image or file from file-read (c1):\n[attachment]",
+      images: ["Ymlu", "emlw"],
     });
   });
 

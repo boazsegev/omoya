@@ -12,6 +12,7 @@ const MAX_CACHE_ENTRIES = 256;
 const MAX_REDIRECTS = 8;
 const MAX_OUTPUT_CHARS = 50_000;
 const RRF_K = 60;
+const CHALLENGE_COOLDOWN_MS = 5 * 60_000;
 
 const TRACKING_PARAMS = new Set([
   "fbclid", "gclid", "gbraid", "wbraid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid", "igshid",
@@ -26,9 +27,11 @@ const DEFAULT_ENGINES = Object.freeze([
 ]);
 
 const cache = new Map();
+const challengeCooldown = new Map();
 
 export function __resetPackageSearchForTest() {
   cache.clear();
+  challengeCooldown.clear();
   __resetWebRateForTests();
 }
 
@@ -268,8 +271,7 @@ async function searchSearxng(backend, query, fetchImpl, signal, deadline) {
   const text = await response.text();
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   if (type.includes("json") || looksJson(text)) return parseSearxJson(text);
-  if (isChallenge(text)) throw new Error("recognized challenge page");
-  return parseSearxHtml(text);
+  return parseSearchHtml(text, parseSearxHtml);
 }
 
 async function searchEngine(engine, index, query, fetchImpl, signal, packageDeadline) {
@@ -281,13 +283,23 @@ async function searchEngine(engine, index, query, fetchImpl, signal, packageDead
 }
 
 async function searchHtmlEngine(engine, query, fetchImpl, signal, deadline, parser) {
+  const key = `${engine.type}:${engine.url}`;
+  if ((challengeCooldown.get(key) ?? 0) > Date.now()) throw new Error("challenge cooldown");
+  challengeCooldown.delete(key);
   const url = new URL(engine.url);
   url.searchParams.set("q", query);
-  const response = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: new URL(engine.url).origin });
+  const response = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: url.origin });
   const text = await response.text();
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  if (isChallenge(text)) throw new Error("recognized challenge page");
-  return parser(text);
+  if (!response.ok) {
+    if (response.status === 429 || response.status === 403) challengeCooldown.set(key, Date.now() + CHALLENGE_COOLDOWN_MS);
+    throw new Error(`HTTP ${response.status}`);
+  }
+  try {
+    return parseSearchHtml(text, parser);
+  } catch (error) {
+    if (error.message === "recognized challenge page") challengeCooldown.set(key, Date.now() + CHALLENGE_COOLDOWN_MS);
+    throw error;
+  }
 }
 
 async function searchSwisscows(engine, query, fetchImpl, signal, deadline) {
@@ -439,6 +451,18 @@ function parseJson(text, message) {
 
 function looksJson(text) {
   return /^[\s\n\r]*[\[{]/.test(text);
+}
+
+function parseSearchHtml(text, parser) {
+  // A result snippet can discuss CAPTCHA or verification without being a challenge page.
+  try {
+    const results = parser(text);
+    if (results.length > 0) return results;
+    if (!isChallenge(text)) return results;
+  } catch (error) {
+    if (!isChallenge(text)) throw error;
+  }
+  throw new Error("recognized challenge page");
 }
 
 function isChallenge(text) {

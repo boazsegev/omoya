@@ -24,7 +24,7 @@ import Agent from "../../lib/agent.js";
 import CLI from "../../lib/cli.js";
 const { Env, IO, NAMES } = Agent;
 const { ProviderError } = IO;
-const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, logoutEndpoint, selectEndpointModel } = CLI;
+const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, runMcpLogin, logoutEndpoint, selectEndpointModel } = CLI;
 
 // The invoked name, like the TUI's: argv[1] holds the wrapper's file
 // name; a bare `bun bin/scripts/io` has none, so the namespace-derived
@@ -53,6 +53,7 @@ options:
                      Hung-connection (connectTimeout 30s) and stuck-model
                      (stuckTimeout 120s) timeouts are separate settings
   --login            configure an endpoint with the interactive wizard, then exit
+  --mcp-login <name> sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
   --help             show this text and exit
 
@@ -65,7 +66,7 @@ async function main() {
   let args;
   try {
     args = parseFlags(process.argv.slice(2), {
-      flags: ["model", "url", "token", "timeout", "logout"],
+      flags: ["model", "url", "token", "timeout", "logout", "mcp-login"],
       bools: ["login"],
     });
   } catch (err) {
@@ -82,6 +83,14 @@ async function main() {
 
   // Env.create() resolves only after the runtime registries are ready.
   const env = await Env.create();
+  if (args["mcp-login"]) {
+    try {
+      const name = args["mcp-login"];
+      await runMcpLogin(env, name);
+      log(`MCP signed in: ${name}`);
+      return;
+    } catch (err) { log(`MCP login failed: ${err.message}`); process.exitCode = EXIT.usage; return; }
+  }
   if (args.login) {
     try {
       const result = await runLoginWizard(env);

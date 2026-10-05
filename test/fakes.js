@@ -103,7 +103,7 @@ function vacuumStaleTempDirs() {
     }
   } catch { /* no ai-tmp yet */ }
 }
-export async function testEnv(settings = {}) {
+export async function testEnv(settings = {}, { cwd } = {}) {
   const { mkdtempSync } = await import("node:fs");
   const { Env } = await import("../lib/env.js");
   vacuumStaleTempDirs();
@@ -118,7 +118,7 @@ export async function testEnv(settings = {}) {
   const providers = Object.fromEntries(
     ["capturing", "fake", "p", "p1", "p2", "test", "x"].map((name) => [name, { provider: "test", url: "test://script" }]),
   );
-  return new Env({ dir, cwd: dir, settings: { providers, ...settings }, settingsDir: dir });
+  return new Env({ dir, cwd: cwd ?? dir, settings: { providers, ...settings }, settingsDir: dir });
 }
 
 export const USER = (text) => ({ type: 2, content: [{ type: "text", text }] });

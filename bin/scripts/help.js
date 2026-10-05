@@ -146,6 +146,7 @@ options:
                        (the PRIMARY guard is context usage, settings.
                        context.cap/context.turn — 90%/40%)
   --login              configure an endpoint with the interactive wizard, then exit
+  --mcp-login <name>   sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
   --init               write a fresh ${NAMES.projectSettings} into the project
                        folder: every known setting, commented out

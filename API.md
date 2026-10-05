@@ -1,4 +1,4 @@
-# API (2026-10-05)
+# API (2026-10-08)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -65,7 +65,9 @@ Safe-mode Agents publish and execute ONLY safe tools. A missing
 `safe` key means false. Every tool receives the same harness context;
 interaction is not execution policy. A schema with `trusted: true` requests unrestricted host
 execution. It is honored only for tools loaded from the package
-root; other roots cannot grant themselves trust.
+root; other roots cannot grant themselves trust. A package-root
+`inProcess(args)` classifier can also opt individual calls out of the
+forked worker; it is never honored for tools from other roots or programmatic registrations.
 Trusted tools may still request the OS sandbox. A schema with `sandbox:
 true` marks an ordinary tool for the OS-LEVEL write sandbox (lib/sandbox/os.js — the seatbelt/
 bwrap kernel jail): the Agent runs its forked worker under the
@@ -98,12 +100,12 @@ Source: `tools/read.js`
 
 ```js
 /**
- * tools/read.js — the `read` tool: an independent, read-only,
- * cwd-rooted file access tool. Thin WRAPPER publishing the callable
+ * tools/read.js — the `read` tool: a cwd-rooted file access tool,
+ * read-only unless `target` saves the result. Thin WRAPPER publishing the callable
  * implemented under tools/read/. The tool scan is NOT recursive:
  * sub-folders are never scanned. read/ owns query normalization,
- * guarded execution and serialization; write.source consumes those explicit
- * shared contracts. No helper is independently published as a tool.
+ * guarded execution and serialization; `target` saves through write/save.js.
+ * Shared contracts stay explicit. No helper is independently published as a tool.
  *
  * One exception BY DESIGN: tools/guard/ is the shared guard layer
  * EVERY tool imports (read, write, edit, bash) — the deterministic
@@ -141,117 +143,40 @@ export function settingsSchema() {
 Source: `tools/write.js`
 
 ```js
-/** Mutating writer. Optional source query uses the shared read engine, never provider dispatch. */
-import { constants } from "node:fs";
-import { mkdir, open, rename, unlink, lstat } from "node:fs/promises";
-import { dirname, basename, join, relative } from "node:path";
-import { randomUUID } from "node:crypto";
+/** Mutating text writer. Saving read results lives in read.target; both share tools/write/save.js. */
 import { toolRevision } from "../lib/tool-runtime.js";
-const revision = toolRevision();
-const { rejectSymlinkPath, resolveCwdPath } = await import(`./guard/resolve.js?now=${revision}`);
-const { enforceContentPolicy } = await import(`./guard/paths.js?now=${revision}`);
-const { executeReadQuery } = await import(`./read/engine.js?revision=${revision}`);
-const { serializeReadResult } = await import(`./read/serialize.js?revision=${revision}`);
-const { readQuerySchema, normalizeReadQuery } = await import(`./read/query.js?revision=${revision}`);
-const { readScope } = await import(`./read/fs.js?revision=${revision}`);
+const { saveTarget, savePayload } = await import(`./write/save.js?revision=${toolRevision()}`);
 
-function absent(value) {
-  return value === undefined || value === null || value === -1 || value === 0 || typeof value === "boolean" || (Array.isArray(value) && !value.length);
-}
-
-function checkWrite(context) {
-  context?.signal?.throwIfAborted();
-  if (context?.deadline !== undefined && Date.now() >= context.deadline) throw new Error("write deadline exhausted");
-}
-
-async function destination(path, scope) {
-  const resolved = await rejectSymlinkPath(resolveCwdPath(path, scope), { cwd: scope.boundary });
-  try {
-    const metadata = await lstat(resolved);
-    if (!metadata.isFile()) throw new Error("write destination must be a regular file");
-  } catch (error) { if (error.code !== "ENOENT") throw error; }
-  return resolved;
-}
-
-function sameFile(result, metadata) {
-  return metadata && result.metadata.isFile() && metadata.dev === result.metadata.dev && metadata.ino === result.metadata.ino;
-}
-
-async function queryPayload(query, resolved, context) {
-  const normalized = normalizeReadQuery(query);
-  // Saving source data must not insert display decoration; searches retain useful locations.
-  if (!normalized.search) normalized.annotate = false;
-  const result = await executeReadQuery(normalized, context, { artifact: true });
-  let metadata;
-  try { metadata = await lstat(resolved); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  if (result.source === resolved || sameFile(result, metadata)) throw new Error("write source and destination must differ");
-  const payload = serializeReadResult(result);
-  if (!result.selectionComplete) throw new Error(`write source query refused incomplete output: ${result.status.join("; ")}`);
-  const skipped = Object.entries(result.skips).filter(([, count]) => count).map(([name, count]) => `${count} ${name} skipped`);
-  return { payload, binary: result.binary && !result.query.base64, status: [...result.status, ...skipped] };
-}
-
-async function atomicWrite(resolved, payload, context, scope) {
-  checkWrite(context);
-  await mkdir(dirname(resolved), { recursive: true });
-  await rejectSymlinkPath(resolved, { cwd: scope.boundary });
-  const temporary = join(dirname(resolved), `.${basename(resolved)}.${randomUUID()}.tmp`);
-  let handle;
-  let previous;
-  try { previous = await lstat(resolved); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  try {
-    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
-    await handle.writeFile(payload);
-    if (previous?.isFile()) await handle.chmod(previous.mode & 0o777);
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    checkWrite(context);
-    await destination(relativeDestination(resolved, scope), scope);
-    await rename(temporary, resolved);
-  } finally {
-    await handle?.close();
-    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
-  }
-}
-
-function relativeDestination(resolved, scope) {
-  // resolveCwdPath requires a relative spelling; never expose the host path.
-  return relative(scope.cwd, resolved) || ".";
-}
-
-/** Exactly one effective content/source; destination changes only after guarded successful serialization. */
+/** Atomically create or overwrite a text file; the destination changes only after guarded checks pass. */
 export async function write(args = {}, context) {
   if (context?.safe === true) throw new Error("write is unavailable in safe mode");
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new TypeError("write arguments must be an object");
-  for (const key of Object.keys(args)) if (!["path", "content", "source", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
-  const hasContent = !absent(args.content);
-  const hasSource = !absent(args.source) && args.source !== "";
-  if (hasContent === hasSource) throw new TypeError("write requires exactly one effective content or source");
-  if (hasContent && typeof args.content !== "string") throw new TypeError("write.content must be a string");
-  if (!absent(args.ask) && typeof args.ask !== "boolean") throw new TypeError("write.ask must be a boolean");
-  checkWrite(context);
-  const scope = readScope(context);
-  const resolved = await destination(args.path, scope);
-  const data = hasSource ? await queryPayload(args.source, resolved, context) : { payload: Buffer.from(args.content), binary: false, status: [] };
-  if (!data.binary) await enforceContentPolicy({ path: args.path, content: data.payload.toString("utf8"),
-    ask: args.ask === true || typeof context?.question?.ask === "function", context, askable: true, cwd: scope.boundary, lax: true });
-  await atomicWrite(resolved, data.payload, context, scope);
-  return `Successfully wrote ${data.payload.length} bytes to ${args.path}${data.status.length ? ` (${data.status.join("; ")})` : ""}`;
+  for (const key of Object.keys(args)) if (!["path", "content", "ask"].includes(key)) throw new Error(`Unknown write field: ${key}`);
+  if (typeof args.content !== "string") throw new TypeError("write.content must be a string");
+  if (![undefined, null, "", 0, -1].includes(args.ask) && typeof args.ask !== "boolean") throw new TypeError("write.ask must be a boolean");
+  const target = await saveTarget(args.path, context);
+  return savePayload(target, { payload: Buffer.from(args.content) }, context, { ask: args.ask === true });
 }
 
 export function toolDescription() {
   return { write: { trusted: true,
-    description: "Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: {
-      path: { type: "string", description: "Destination path relative to the working folder, inside the project." },
-      content: { type: "string", description: "Writes text to file. Use an empty string to create an empty file or clear an existing file. Omit when using a source." },
-      source: { ...readQuerySchema(), description: "Writes directly from file system source. Use to copy files, or save folder listings and search results to a file. Binary reads save raw bytes unless base64 is true. Omit when writing text to file." },
-      ask: { type: "boolean", description: "Ask permission if saved text references an existing path outside the project; without permission, the write is refused." },
+    description: "Create or overwrite a text file in the Agent folder. Use edit for targeted changes; use read with target to copy files or save read results.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["path", "content"], properties: {
+      path: { type: "string", description: "Destination path inside the Agent folder, relative to it or an absolute contained path." },
+      content: { type: "string", description: "Full file text; an empty string creates or clears the file." },
+      ask: { type: "boolean", description: "Ask permission if the text references an existing outside path or an existing absolute project path; without permission, the write is refused." },
     } },
   } };
 }
 ```
+
+### PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop)
+
+Source: `tools/process.js`
+
+async process({ action, id, from } = {…}, context): Inspect or stop a process started by this Agent's background bash.
+
+toolDescription(): 
 
 ### PUBLISHES — Agent's current filtered model-facing descriptors
 
@@ -390,7 +315,7 @@ Source: `tools/bash.js`; flags: sandbox
   "properties": {
     "command": {
       "type": "string",
-      "description": "The bash command line to run (no cd or ln; every visible path argument must stay inside the working folder)"
+      "description": "The Bash command to run (no cd or ln). Visible paths may read the agent and project folders; the OS jail restricts writes to the agent folder."
     },
     "timeout": {
       "type": "integer",
@@ -399,6 +324,10 @@ Source: `tools/bash.js`; flags: sandbox
     "env": {
       "type": "object",
       "description": "Extra environment variables for the command."
+    },
+    "background": {
+      "type": "boolean",
+      "description": "Start under this Agent and return a process id after a short output grace period; inspect or stop it with process."
     }
   },
   "required": [
@@ -419,7 +348,7 @@ Source: `tools/edit.js`; flags: trusted
   "properties": {
     "path": {
       "type": "string",
-      "description": "Path to the file to edit (relative to the working folder)"
+      "description": "File inside the Agent folder; use a relative or contained absolute path."
     },
     "edits": {
       "type": "array",
@@ -444,7 +373,7 @@ Source: `tools/edit.js`; flags: trusted
     },
     "ask": {
       "type": "boolean",
-      "description": "Ask the user for permission, showing the offending lines, when a newText names a path outside the working folder. Omit it to refuse such edits outright."
+      "description": "Ask the user for permission, showing the offending lines, when a newText names an existing outside path or an existing absolute project path. Omit it to refuse such edits outright."
     },
     "matchAll": {
       "type": "boolean",
@@ -614,6 +543,41 @@ Source: `tools/note.js`; flags: safe
 }
 ```
 
+### `process`
+
+List, read buffered output from, or stop this Agent's background Bash processes. Stop is unavailable in safe mode.
+
+Source: `tools/process.js`; flags: safe
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "list",
+        "output",
+        "stop"
+      ],
+      "description": "List processes, read output, or stop a process group."
+    },
+    "id": {
+      "type": "string",
+      "description": "Process id returned by background Bash; required for output and stop."
+    },
+    "from": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Byte offset for output (default 0); pass the returned next offset on subsequent calls."
+    }
+  },
+  "required": [
+    "action"
+  ]
+}
+```
+
 ### `question`
 
 Ask the user to resolve a decision or provide missing information. Send 1–4 clear questions with distinct options; users can also give custom answers.
@@ -709,7 +673,7 @@ Source: `tools/question.js`; flags: safe, sandbox
 
 ### `read`
 
-Read project files, list folders, or search their contents. Use ranges for excerpts, glob/exclude to filter files, and search for literal text or regex matches. Set recursive for subfolders. Check skip and incomplete-result notices before assuming coverage.
+Read files, list folders, or search contents. Heed skip and incomplete notices before assuming full coverage.
 
 Source: `tools/read.js`; flags: safe
 
@@ -720,22 +684,21 @@ Source: `tools/read.js`; flags: safe
   "required": [
     "path"
   ],
-  "description": "Select a file or folder, then add filters, ranges, or search. Omit options you do not need.",
   "properties": {
     "path": {
       "type": "string",
       "maxLength": 4096,
-      "description": "File or folder relative to the working folder. Use . for the current folder."
+      "description": "File or folder, relative to the Agent folder or absolute inside the project. . is the current folder; ../ reaches project siblings."
     },
     "recursive": {
       "type": "boolean",
       "default": false,
-      "description": "Include subfolders in listings and searches."
+      "description": "Include subfolders."
     },
     "ignore": {
       "type": "boolean",
       "default": false,
-      "description": "Apply .gitignore, .ignore, and system-file exclusions to folder scans. Explicit file paths bypass these filters."
+      "description": "Skip .gitignore/.ignore matches and system files in folder scans."
     },
     "glob": {
       "minLength": 1,
@@ -746,7 +709,7 @@ Source: `tools/read.js`; flags: safe
         "minLength": 1,
         "maxLength": 4096
       },
-      "description": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames."
+      "description": "Only files matching a glob string or array, e.g. *.md, src/**/*.js, {a,b}. Slashless patterns match filenames."
     },
     "exclude": {
       "minLength": 1,
@@ -757,7 +720,7 @@ Source: `tools/read.js`; flags: safe
         "minLength": 1,
         "maxLength": 4096
       },
-      "description": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}."
+      "description": "Skip files or subtrees matching a glob string or array; overrides glob."
     },
     "lines": {
       "type": "object",
@@ -765,19 +728,19 @@ Source: `tools/read.js`; flags: safe
       "properties": {
         "from": {
           "type": "integer",
-          "description": "Start line (1-based); negative indexes count from the end (-1 is last)."
+          "description": "Start."
         },
         "to": {
           "type": "integer",
-          "description": "End line, inclusive; negative indexes count from the end."
+          "description": "End."
         },
         "last": {
           "type": "integer",
           "minimum": 0,
-          "description": "Read the last N lines instead of from/to. Use 0 for no lines."
+          "description": "Last N lines instead of from/to."
         }
       },
-      "description": "Select file lines before character slicing or search. Use from/to or last, not both."
+      "description": "1-based inclusive line range; negative counts from the end (-1 is last)."
     },
     "characters": {
       "type": "object",
@@ -785,14 +748,14 @@ Source: `tools/read.js`; flags: safe
       "properties": {
         "from": {
           "type": "integer",
-          "description": "Start character offset (0-based); negative indexes count from the end (-1 is last)."
+          "description": "Start."
         },
         "to": {
           "type": "integer",
-          "description": "End character, exclusive; negative indexes count from the end."
+          "description": "End."
         }
       },
-      "description": "Slice Unicode characters within the selected lines. Use 0-based offsets and an exclusive end; do not combine with binary."
+      "description": "0-based, end-exclusive character slice of the selected lines; negative counts from the end."
     },
     "bytes": {
       "type": "object",
@@ -800,14 +763,14 @@ Source: `tools/read.js`; flags: safe
       "properties": {
         "from": {
           "type": "integer",
-          "description": "Start byte offset (0-based); negative indexes count from the end (-1 is last)."
+          "description": "Start."
         },
         "to": {
           "type": "integer",
-          "description": "End byte, exclusive; negative indexes count from the end."
+          "description": "End."
         }
       },
-      "description": "Read a byte range with binary: true. Use 0-based offsets and an exclusive end."
+      "description": "0-based, end-exclusive byte slice; negative counts from the end. Requires binary."
     },
     "search": {
       "type": "object",
@@ -817,72 +780,76 @@ Source: `tools/read.js`; flags: safe
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "description": "Match this literal substring. With regex, select lines matching either expression."
+          "description": "Literal substring."
         },
         "regex": {
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "description": "Match a JavaScript regular expression with global and multiline behavior; omit / delimiters."
+          "description": "JavaScript regex, without / delimiters."
         },
         "ignoreCase": {
           "type": "boolean",
           "default": false,
-          "description": "Match text and regex without case sensitivity."
+          "description": "Case-insensitive."
         },
         "invert": {
           "type": "boolean",
           "default": false,
-          "description": "Select lines matching neither text nor regex."
+          "description": "Select non-matching lines."
         },
         "before": {
           "type": "integer",
           "minimum": 0,
           "maximum": 1000,
           "default": 0,
-          "description": "Include this many lines before each match; overlapping context is merged."
+          "description": "Context lines before each match."
         },
         "after": {
           "type": "integer",
           "minimum": 0,
           "maximum": 1000,
           "default": 0,
-          "description": "Include this many lines after each match; overlapping context is merged."
+          "description": "Context lines after each match."
         }
       },
-      "description": "Search selected text, or raw bytes with binary: true. Supply text, regex, or both."
+      "description": "Select lines matching text or regex (either)."
     },
     "limit": {
       "type": "integer",
       "minimum": 0,
       "default": 100,
-      "description": "Return at most this many listing entries or matching lines (matching paths with info). Context lines are additional. Use 0 for none."
+      "description": "Maximum listing entries or matching lines (matching paths with info); context lines are extra. Omit with target to save all results within host budgets."
     },
     "offset": {
       "type": "integer",
       "minimum": 0,
       "default": 0,
-      "description": "Skip this many listing entries or matching lines (matching paths with info)."
+      "description": "Skip this many entries or matches."
     },
     "info": {
       "type": "boolean",
       "default": false,
-      "description": "Return file metadata, listing counts, or matching paths with per-file match counts. Check incomplete-scan notices before treating counts as totals."
+      "description": "Return metadata, counts, or matching paths with per-file match counts instead of content."
     },
     "annotate": {
       "type": "boolean",
       "default": true,
-      "description": "Include MIME types, ranges, and locations. Set false for plain text or newline-separated paths."
+      "description": "Include MIME types, ranges, and locations; false gives plain text or paths."
     },
     "binary": {
       "type": "boolean",
       "default": false,
-      "description": "Read raw bytes; use bytes instead of lines/characters. With search, return a text report of matches."
+      "description": "Read raw bytes; search then returns a match report."
     },
     "base64": {
       "type": "boolean",
       "default": false,
-      "description": "Encode selected data as base64 text. Do not combine with info."
+      "description": "Base64-encode the selected data. Not with info."
+    },
+    "target": {
+      "type": "string",
+      "description": "Save the complete selected result to this project file instead of returning it; refuse incomplete output. Available only if `write` is available."
     }
   }
 }
@@ -912,7 +879,7 @@ Source: `tools/skill.js`; flags: safe
 
 ### `skill-resource`
 
-Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new project file. In read-only mode, omit target.
+Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new file inside the Agent folder. Saving is available only if `write` is available.
 
 Source: `tools/skill-resource.js`; flags: safe, trusted
 
@@ -1017,7 +984,7 @@ Source: `tools/worker-close.js`; flags: trusted
 
 ### `worker-create`
 
-Create named workers and send the same self-contained first prompt to each. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
 
 Source: `tools/worker-create.js`; flags: trusted
 
@@ -1026,14 +993,12 @@ Source: `tools/worker-create.js`; flags: trusted
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "prompt",
     "workers"
   ],
   "properties": {
     "prompt": {
       "type": "string",
-      "minLength": 1,
-      "description": "Self-contained first prompt sent unchanged to each worker."
+      "description": "Self-contained first prompt sent unchanged to each worker; omit or use an empty string to create idle workers."
     },
     "workers": {
       "type": "array",
@@ -1076,7 +1041,7 @@ Source: `tools/worker-create.js`; flags: trusted
             "description": "Restrict worker to read-only tools."
           },
           "subfolder": {
-            "description": "Existing subfolder path relative to the project root; restrict the worker's working folder and sandbox to it. Omit or use \"\", \".\", \"/\", \"./\", false, or null for the project root (\"/\" never means the filesystem root). Other absolute paths, parent traversal, and symlinks outside the project are forbidden."
+            "description": "Existing project subfolder inside the leader folder; sets the worker write root. Reads may still access the project. Omit or use \"\", \".\", \"/\", \"./\", false, or null to inherit the leader folder (\"/\" never means the filesystem root). Absolute paths, parent traversal, and escaping symlinks are forbidden."
           }
         }
       }
@@ -1120,7 +1085,7 @@ Source: `tools/worker-message.js`; flags: trusted
 
 ### `worker-status`
 
-Shows workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
+Shows workers grouped by busy/idle, available models, and the commands a worker accepts at the start of a message (/compact, /<prompt>). Omit flags for all; request sections with workers, models, or commands.
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -1136,6 +1101,10 @@ Source: `tools/worker-status.js`; flags: safe, trusted
     "models": {
       "type": "boolean",
       "description": "Includes models and available capacity for new work."
+    },
+    "commands": {
+      "type": "boolean",
+      "description": "Includes /compact and the prompt commands workers expand."
     }
   }
 }
@@ -1143,7 +1112,7 @@ Source: `tools/worker-status.js`; flags: safe, trusted
 
 ### `write`
 
-Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.
+Create or overwrite a text file in the Agent folder. Use edit for targeted changes; use read with target to copy files or save read results.
 
 Source: `tools/write.js`; flags: trusted
 
@@ -1152,192 +1121,21 @@ Source: `tools/write.js`; flags: trusted
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "path"
+    "path",
+    "content"
   ],
   "properties": {
     "path": {
       "type": "string",
-      "description": "Destination path relative to the working folder, inside the project."
+      "description": "Destination path inside the Agent folder, relative to it or an absolute contained path."
     },
     "content": {
       "type": "string",
-      "description": "Writes text to file. Use an empty string to create an empty file or clear an existing file. Omit when using a source."
-    },
-    "source": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "path"
-      ],
-      "description": "Writes directly from file system source. Use to copy files, or save folder listings and search results to a file. Binary reads save raw bytes unless base64 is true. Omit when writing text to file.",
-      "properties": {
-        "path": {
-          "type": "string",
-          "maxLength": 4096,
-          "description": "File or folder relative to the working folder. Use . for the current folder."
-        },
-        "recursive": {
-          "type": "boolean",
-          "default": false,
-          "description": "Include subfolders in listings and searches."
-        },
-        "ignore": {
-          "type": "boolean",
-          "default": false,
-          "description": "Apply .gitignore, .ignore, and system-file exclusions to folder scans. Explicit file paths bypass these filters."
-        },
-        "glob": {
-          "minLength": 1,
-          "maxLength": 4096,
-          "maxItems": 128,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          },
-          "description": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames."
-        },
-        "exclude": {
-          "minLength": 1,
-          "maxLength": 4096,
-          "maxItems": 128,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4096
-          },
-          "description": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}."
-        },
-        "lines": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "type": "integer",
-              "description": "Start line (1-based); negative indexes count from the end (-1 is last)."
-            },
-            "to": {
-              "type": "integer",
-              "description": "End line, inclusive; negative indexes count from the end."
-            },
-            "last": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Read the last N lines instead of from/to. Use 0 for no lines."
-            }
-          },
-          "description": "Select file lines before character slicing or search. Use from/to or last, not both."
-        },
-        "characters": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "type": "integer",
-              "description": "Start character offset (0-based); negative indexes count from the end (-1 is last)."
-            },
-            "to": {
-              "type": "integer",
-              "description": "End character, exclusive; negative indexes count from the end."
-            }
-          },
-          "description": "Slice Unicode characters within the selected lines. Use 0-based offsets and an exclusive end; do not combine with binary."
-        },
-        "bytes": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "from": {
-              "type": "integer",
-              "description": "Start byte offset (0-based); negative indexes count from the end (-1 is last)."
-            },
-            "to": {
-              "type": "integer",
-              "description": "End byte, exclusive; negative indexes count from the end."
-            }
-          },
-          "description": "Read a byte range with binary: true. Use 0-based offsets and an exclusive end."
-        },
-        "search": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096,
-              "description": "Match this literal substring. With regex, select lines matching either expression."
-            },
-            "regex": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 4096,
-              "description": "Match a JavaScript regular expression with global and multiline behavior; omit / delimiters."
-            },
-            "ignoreCase": {
-              "type": "boolean",
-              "default": false,
-              "description": "Match text and regex without case sensitivity."
-            },
-            "invert": {
-              "type": "boolean",
-              "default": false,
-              "description": "Select lines matching neither text nor regex."
-            },
-            "before": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1000,
-              "default": 0,
-              "description": "Include this many lines before each match; overlapping context is merged."
-            },
-            "after": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1000,
-              "default": 0,
-              "description": "Include this many lines after each match; overlapping context is merged."
-            }
-          },
-          "description": "Search selected text, or raw bytes with binary: true. Supply text, regex, or both."
-        },
-        "limit": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 100,
-          "description": "Return at most this many listing entries or matching lines (matching paths with info). Context lines are additional. Use 0 for none."
-        },
-        "offset": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Skip this many listing entries or matching lines (matching paths with info)."
-        },
-        "info": {
-          "type": "boolean",
-          "default": false,
-          "description": "Return file metadata, listing counts, or matching paths with per-file match counts. Check incomplete-scan notices before treating counts as totals."
-        },
-        "annotate": {
-          "type": "boolean",
-          "default": true,
-          "description": "Include MIME types, ranges, and locations. Set false for plain text or newline-separated paths."
-        },
-        "binary": {
-          "type": "boolean",
-          "default": false,
-          "description": "Read raw bytes; use bytes instead of lines/characters. With search, return a text report of matches."
-        },
-        "base64": {
-          "type": "boolean",
-          "default": false,
-          "description": "Encode selected data as base64 text. Do not combine with info."
-        }
-      }
+      "description": "Full file text; an empty string creates or clears the file."
     },
     "ask": {
       "type": "boolean",
-      "description": "Ask permission if saved text references an existing path outside the project; without permission, the write is refused."
+      "description": "Ask permission if the text references an existing outside path or an existing absolute project path; without permission, the write is refused."
     }
   }
 }
@@ -1349,6 +1147,26 @@ Source: `tools/write.js`; flags: trusted
 The agent: the ordered context, the provider/model selection, the
 tool loop, the pending queue and the session persistence, behind one
 headless object.
+
+### `Agent.backgroundList()`
+
+List this Agent's retained process records.
+
+### `Agent.backgroundOutput(id, from)`
+
+Read buffered process output from a byte offset.
+
+### `Agent.backgroundStart(options)`
+
+Start an Agent-owned background command; command validation remains in bash.
+
+### `Agent.backgroundStop(id)`
+
+Stop an owned background process group.
+
+### `Agent.backgroundStopAll()`
+
+Stop all Agent-owned processes (also used by Env close).
 
 ### `Agent.get busy()`
 
@@ -1413,7 +1231,7 @@ takes ownership of the seed context — a NEW (non-resumed) context
 starts with the seeded system prompt as its FIRST message(s).
 
 - `[options]` (Object)
-- `[options.env]` (Env) — the sole registry surface
+- `[options.env]` (Env) — the sole registry surface (default: Env.envs[process.cwd()], else a new Env closed with its last Agent)
 - `[options.model]` (string) — default `<endpoint>/<model>` selector (per-request override via run options)
 - `[options.url]` (string)
 - `[options.timeout]` (number|string) — overall provider-request timeout
@@ -1421,12 +1239,12 @@ starts with the seeded system prompt as its FIRST message(s).
 - `[options.context]` (Array|Context) — seed messages (deep-copied into the owned Context), or a ready Context used as is (then no `session`) (the seeded system prompt lands AHEAD of it)
 - `[options.tools]` (string[]) — availability selection (omitted/["*"]=all, []=none)
 - `[options.parent]` (Agent) — creating Agent, or unset for non-Agents
-- `[options.name]` (string) — display name (default: `agent-<counter>`)
+- `[options.name]` (string) — display name (default: `agent-<counter>`); names that read as an address or a privileged identity are reserved (see `name`)
 - `[options.description]` (string) — display description (empty allowed)
 - `[options.folder]` (string) — existing env.cwd-relative or absolute working folder; validated before the agent is registered (omitted uses env.cwd)
 - `[options.spawnPermission]` (*) — generic permission for delegation tools to create another Agent: false denies, true allows, and any other value asks through the tool's own user-interaction policy
 - `[options.safe]` (boolean) — SAFE MODE: publish and execute ONLY read-only tools (schemas with `safe: true`) — exploration and planning without mutation. Unsafe calls are refused with a tool-result error, never executed (defense in depth: the filtered catalog alone is not the enforcement). FORCED on when no supported OS sandbox is available (Sandbox.osAvailable()) — there is no opt-out: mutation tools run only under an active OS sandbox
-- `[options.contextId]` (string|false) — names the context: an existing id (in env.settings.sessions) is resumed; an absent id creates it. `false` (or omitted, or an anonymous spelling "0"/"false"/"anon") gives a memory-only context that is not logged — (agent.context.save = true) starts logging it at any time.
+- `[options.contextId]` (string|false) — names the context: an existing id (in env.settings.sessions) is resumed — only a session recorded in env.cwd; an absent id creates it. `false` (or omitted, or an anonymous spelling "0"/"false"/"anon") gives a memory-only context that is not logged — (agent.context.save = true) starts logging it at any time.
 - `[options.contextSave=true]` (boolean) — whether a context named by `contextId` is logged to disk
 - `[options.createIO]` ((opts:object)=>object) — IO factory (tests inject fakes)
 
@@ -1469,11 +1287,12 @@ Returns `{id: string, file: string, save: boolean}`
 
 Resume a LOGGED context by id (from env.settings.sessions): it replaces the
 current one, which is closed (its flushed content stays on disk); its
-recorded settings and origin folder apply (lib/agent/context-lifecycle.js).
+recorded settings apply (lib/agent/context-lifecycle.js). Only a session
+of this project resumes: its recorded origin folder must be env.cwd.
 
 - `id` (string) — context id (Context.latest finds the newest)
 
-Returns `{id: string, file: string, cwd: string|undefined, originMissing: boolean}`
+Returns `{id: string, file: string}`
 
 ### `Agent.get contextUsage()`
 
@@ -1497,9 +1316,9 @@ Returns `void` — Assignment records the new description.
 
 ### `Agent.env`
 
-The shared live environment owned by the host.
+The shared live environment: the given one, else the process folder's (Env.envs), else one created for it and closed with its last Agent.
 
-Returns `Env` — The shared live environment owned by the host.
+Returns `Env` — The shared live environment: the given one, else the process folder's (Env.envs), else one created for it and closed with its last Agent.
 
 ### `Agent.Env`
 
@@ -1552,8 +1371,9 @@ Returns `() => void` — Idempotent function that removes these signal handlers 
 
 ### `Agent.set folder(folder)`
 
-Narrow this agent's tool working folder to an existing folder inside
-its environment project. `undefined` restores the environment root.
+Set this agent's tool working folder to an existing directory.
+`undefined` restores the parent folder for children, or Env.cwd for independent Agents.
+Embedded independent Agents may use another tree.
 
 - `folder` (string|undefined|null) — absolute or env.cwd-relative
 
@@ -1565,7 +1385,7 @@ The agent-local root used for file tools and their OS sandbox.
 
 ### `Agent.folderResolve(env, folder)`
 
-Resolve an existing working folder within an environment's project root.
+Resolve an existing working folder; embedded Agents may use a separate root.
 Side-effect-free; callers should validate again at construction/use if the
 filesystem can change after this check.
 
@@ -1609,6 +1429,10 @@ Human-friendly Agent name.
 ### `Agent.set name(value)`
 
 Rename the agent (recorded into a logged context's settings).
+Reserved (any case, look-alike letters and separators ignored): `new`,
+`all`, `everyone`, chat role names, the product name, and names containing
+`user`, `admin`, `group`, or another authority word (root, sudo, system,
+developer, owner, operator, supervisor, moderator, privilege, authority).
 
 - `value` (string)
 
@@ -2020,7 +1844,7 @@ verifies that folder exists, then changes `process.cwd()` before environment set
 - `[options={}]` (Object) — Resume selection and session lookup options.
 - `[options.resume]` (string) — The `--resume` value; values other than `"true"` and `"latest"` are treated as explicit session IDs.
 - `[options.anonymous=false]` (boolean) — Whether this is an anonymous session.
-- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to `new Env().settings.sessions` when omitted or nullish.
+- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to the configured sessions folder when omitted or nullish.
 
 Returns `string|null` — The origin folder after changing cwd, or `null` when no explicit origin should be adopted.
 
@@ -2059,6 +1883,27 @@ remains owned by the environment.
 
 Returns `string` — The provider's default URL, or an empty string if none is known.
 
+### `CLI.endpointPolicies(env)`
+
+List every endpoint the catalog knows (disabled ones included) with its
+configured policies and each visible model's configured maxActive.
+`effective` is the capacity the Agent plugin computed (absent without it).
+
+- `env` (object) — Env providing models(true) and settings
+
+Returns `Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>`
+
+### `CLI.endpointPolicySet(env, selector, change)`
+
+Set one endpoint policy. `selector` is `<endpoint>` or, for maxActive
+only, `<endpoint>/<model>`. `disabled: false` removes the key;
+`maxActive: undefined` removes the override (inherit).
+
+- `env` (object) — Env whose settings persist the change
+- `selector` (string) — `<endpoint>` or `<endpoint>/<model>`
+
+Returns `void`
+
 ### `CLI.execute(command)`
 
 Execute one normalized administrative command.
@@ -2066,7 +1911,7 @@ Argument parsing and flag names remain the executable's concern. This
 function creates an environment and closes it in a `finally` block, even if
 command handling fails.
 
-Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
+Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "mcpLogin", name: string} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
 
 ### `CLI.EXIT`
 
@@ -2196,7 +2041,8 @@ Returns `Promise<Array<object>>` — The parsed context/message array.
 
 ### `CLI.readLastCombo(env)`
 
-Return the published endpoint/model pair with the newest last-used timestamp.
+Return the published endpoint/model pair used last: the pinned project's
+newest pair first (`projectLastUsed`), else the global newest (`lastUsed`).
 
 - `env` (object) — Env whose model catalog is inspected.
 
@@ -2271,6 +2117,16 @@ its readline interface on completion or failure.
 - `[options.output=process.stderr]` (import("node:stream").Writable) — Wizard and OAuth output stream.
 
 Returns `Promise<*>` — Resolves with the result of the selected endpoint login.
+
+### `CLI.runMcpLogin(env, name, { input = process.stdin, output = process.stderr } = {…})`
+
+Start explicit MCP browser sign-in. Loopback callback wins without waiting
+for Enter; in a terminal, a full pasted redirect URL is a fallback.
+
+- `env` (object) — Environment with mcpLogin/mcpPaste methods.
+- `name` (string) — Configured MCP server name.
+
+Returns `Promise<{name: string}>` — Signed-in server identity.
 
 ### `CLI.runOAuthFlow(descriptor, options = {…})`
 
@@ -2349,7 +2205,7 @@ verifies that folder exists, then changes `process.cwd()` before environment set
 - `[options={}]` (Object) — Resume selection and session lookup options.
 - `[options.resume]` (string) — The `--resume` value; values other than `"true"` and `"latest"` are treated as explicit session IDs.
 - `[options.anonymous=false]` (boolean) — Whether this is an anonymous session.
-- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to `new Env().settings.sessions` when omitted or nullish.
+- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to the configured sessions folder when omitted or nullish.
 
 Returns `string|null` — The origin folder after changing cwd, or `null` when no explicit origin should be adopted.
 
@@ -2388,6 +2244,27 @@ remains owned by the environment.
 
 Returns `string` — The provider's default URL, or an empty string if none is known.
 
+### `CLI.endpointPolicies(env)`
+
+List every endpoint the catalog knows (disabled ones included) with its
+configured policies and each visible model's configured maxActive.
+`effective` is the capacity the Agent plugin computed (absent without it).
+
+- `env` (object) — Env providing models(true) and settings
+
+Returns `Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>`
+
+### `CLI.endpointPolicySet(env, selector, change)`
+
+Set one endpoint policy. `selector` is `<endpoint>` or, for maxActive
+only, `<endpoint>/<model>`. `disabled: false` removes the key;
+`maxActive: undefined` removes the override (inherit).
+
+- `env` (object) — Env whose settings persist the change
+- `selector` (string) — `<endpoint>` or `<endpoint>/<model>`
+
+Returns `void`
+
 ### `async CLI.execute(command)`
 
 Execute one normalized administrative command.
@@ -2395,7 +2272,7 @@ Argument parsing and flag names remain the executable's concern. This
 function creates an environment and closes it in a `finally` block, even if
 command handling fails.
 
-Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
+Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "mcpLogin", name: string} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
 
 ### `CLI.exitCodeFor(terminal)`
 
@@ -2521,7 +2398,8 @@ Returns `Promise<Array<object>>` — The parsed context/message array.
 
 ### `CLI.readLastCombo(env)`
 
-Return the published endpoint/model pair with the newest last-used timestamp.
+Return the published endpoint/model pair used last: the pinned project's
+newest pair first (`projectLastUsed`), else the global newest (`lastUsed`).
 
 - `env` (object) — Env whose model catalog is inspected.
 
@@ -2596,6 +2474,16 @@ its readline interface on completion or failure.
 - `[options.output=process.stderr]` (import("node:stream").Writable) — Wizard and OAuth output stream.
 
 Returns `Promise<*>` — Resolves with the result of the selected endpoint login.
+
+### `async CLI.runMcpLogin(env, name, { input = process.stdin, output = process.stderr } = {…})`
+
+Start explicit MCP browser sign-in. Loopback callback wins without waiting
+for Enter; in a terminal, a full pasted redirect URL is a fallback.
+
+- `env` (object) — Environment with mcpLogin/mcpPaste methods.
+- `name` (string) — Configured MCP server name.
+
+Returns `Promise<{name: string}>` — Signed-in server identity.
 
 ### `async CLI.runOAuthFlow(descriptor, options = {…})`
 
@@ -3211,9 +3099,9 @@ Returns `string` — Origin project folder recorded in metadata.
 ### `Context.originOf({ id, dir } = {…})`
 
 The ORIGIN FOLDER recorded in a session file's metadata line (the
-cwd the session ran in), or undefined (no such session). The
-resume-anywhere contract: an explicit --resume <id> makes this
-folder the process cwd.
+cwd the session ran in), or undefined (no such session). A
+session resumes only in an Env of this folder; an explicit
+--resume <id> makes it the process cwd before the Env is built.
 
 - `options` (Object)
 - `options.id` (string)
@@ -3801,6 +3689,18 @@ Returns `number` — number of whitespace-separated words
 The sole global environment object: settings, auth, providers,
 tools, and the titled folder surface.
 
+### `Env._attachHooks(agent)`
+
+Attach the loaded hooks to an Agent. @param {object} agent @returns {void}
+
+### `Env._detachHooks(agent)`
+
+Remove hook registrations on Agent close. @param {object} agent @returns {void}
+
+### `Env._hooksRefresh()`
+
+Load/reload trusted hook observers for this environment. @returns {Promise<void>}
+
 ### `Env.agentAdd(agent)`
 
 Register an active Agent (Agent construction owns this call); it
@@ -3839,7 +3739,14 @@ Returns `object[]`
 Release what this Env runs in the background: pending model-list
 retries stop, every MCP server it started is killed, and held
 settings writes reach disk. Idempotent; never throws. A closed Env
-stays readable (and an MCP call reconnects).
+leaves Env.envs (env.closed) but stays readable (and an MCP
+call reconnects); it creates no new agents.
+
+### `Env.get closed()`
+
+whether close() has run (the Env left Env.envs).
+
+Returns `boolean` — whether close() has run (the Env left Env.envs).
 
 ### `Env.connection(selector, { remember = true } = {…})`
 
@@ -3886,11 +3793,20 @@ pass. Short-lived hosts that never read models pass `models: false`.
 
 Returns `Promise<Env>`
 
-### `Env.cwd`
+### `Env.get cwd()`
 
-The current project folder; assigning changes the project-facing folder/read surface.
+The project folder: the absolute path this Env is registered under in Env.envs (fixed for its lifetime).
 
-Returns `string` — The current project folder; assigning changes the project-facing folder/read surface.
+Returns `string` — The project folder: the absolute path this Env is registered under in Env.envs (fixed for its lifetime).
+
+### `Env.get envs()`
+
+The open Envs of this process by project folder — at most one per
+absolute path (`Env.envs[path]`): the constructor registers an Env
+(a second open Env for the same folder throws), close() deregisters
+it. A fresh frozen snapshot per read, in creation order.
+
+Returns `Readonly<Object<string, Env>>` — absolute folder -> Env
 
 ### `Env.EVENT`
 
@@ -3951,6 +3867,28 @@ clears in memory only.
 
 Returns `{name: string, dynamic: boolean}`
 
+### `Env.mcpLogin(name, options)`
+
+Start explicit browser OAuth for a configured HTTP MCP server; never invoked by a tool call.
+
+- `name` (string) — Configured MCP server name.
+
+Returns `Promise<{name: string}>` — Signed-in server identity; rejects on discovery, registration, callback or token error.
+
+### `Env.mcpPaste(input)`
+
+Supply a complete loopback redirect URL to a pending MCP OAuth flow.
+
+- `input` (string) — Complete callback URL with code, state and optional issuer.
+
+Returns `boolean` — Whether a sign-in flow accepted the callback input.
+
+### `Env.mcpStatus()`
+
+List configured MCP server connection and sign-in states; exposes no credentials.
+
+Returns `Array<{name: string, state: string}>` — Live per-server state.
+
 ### `Env.models(secret = false)`
 
 The model catalog: every known endpoint/model pair with its state
@@ -3972,6 +3910,14 @@ including the lists of in-memory logins, fetched now on demand.
 Resolved at once when no collection runs.
 
 Returns `Promise<void>`
+
+### `Env.get name()`
+
+The project name: the shortest suffix of `cwd` no other open Env's
+folder shares (conflicts resolve on the first differing parent
+folders: `fiz/bar/foo`, `faz/bar/foo`); the root folder is `/`.
+
+Returns `string`
 
 ### `Env.offEvent(handle)`
 
@@ -4096,6 +4042,16 @@ global tool of the same name.
 - `[selector]` (string) — `<endpoint>/<model>`
 
 Returns `Promise<Map<string, object>>`
+
+### `Env.use(cwd, fn)`
+
+Run `fn` with the open Env of `cwd`, creating one when the folder has
+none; a created Env closes when `fn` settles unless agents joined it.
+
+- `cwd` (string) — The project folder.
+- `fn` ((env: Env) => T|Promise<T>)
+
+Returns `Promise<T>`
 
 ## GTUI
 
@@ -5437,6 +5393,26 @@ Returns `string` — rendered block output
 
 Sandbox façade for scoped child processes; dispatch owns teardown.
 
+### `Sandbox.backgroundList(agent)`
+
+List an Agent's retained commands.
+
+### `Sandbox.backgroundOutput(agent, id, from)`
+
+Read an Agent's command output.
+
+### `Sandbox.backgroundStart(agent, options)`
+
+Start a retained Agent-owned command.
+
+### `Sandbox.backgroundStop(agent, id)`
+
+Stop one command group.
+
+### `Sandbox.backgroundStopAll(agent)`
+
+Stop every retained command of one Agent.
+
 ### `Sandbox.osAvailable()`
 
 Is OS write-sandbox enforcement in effect (own mechanism or a
@@ -5459,7 +5435,7 @@ to spawn (unchanged when no mechanism applies).
 
 - `file` (string) — Program executable to run.
 - `[args=[]` (string[]) — ] - Arguments passed to the program.
-- `[cwd=process.cwd()]` (string) — Project folder whose writes are permitted.
+- `[cwd=process.cwd()]` (string) — Agent folder whose writes are permitted.
 - `[workingDirectory=cwd]` (string) — Working directory for the wrapped process.
 
 Returns `[string, string[]]` — Executable and argument vector to pass to spawn.

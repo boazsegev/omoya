@@ -29,12 +29,13 @@ describe("generated API documentation", () => {
       const documented = new Set(klass(name).members.map(({ name }) => name));
       const instance = name === "Context" ? new Core.Context({ save: false })
         : name === "Env" ? new Core.Env({ dir: "./providers", cwd: "./providers", settingsDir: null })
-        : name === "Agent" ? new Core.Agent({ env: new Core.Env({ dir: "./providers", cwd: "./providers", settingsDir: null, settings: { system: "docs" } }) })
+        : name === "Agent" ? new Core.Agent({ env: new Core.Env({ dir: "./providers", cwd: "./ai-tmp/api-docs-agent", settingsDir: null, settings: { system: "docs" } }) })
         : Object.create(Core.IO.prototype);
       const publicNames = [...Object.getOwnPropertyNames(Core[name]), ...Object.getOwnPropertyNames(Core[name].prototype), ...Object.keys(instance)]
         .filter((key) => !key.startsWith("_") && !["length", "name", "prototype", "caller", "arguments"].includes(key));
       expect(publicNames.filter((key) => !documented.has(key)), `${name} runtime coverage`).toEqual([]);
       await instance.close?.();
+      if (name === "Agent") instance.env.close();
     }
     expect(klass("Context").members.map(({ name }) => name)).toEqual(expect.arrayContaining(["id", "dir", "uuid", "file", "origin", "name", "created"]));
     const text = await generate();
@@ -105,7 +106,7 @@ describe("generated API documentation", () => {
       expect(section).toContain('"path');
       expect(section).not.toBe('"unknown"');
     }
-    expect(text).toContain('"glob?": "Include files matching a glob');
+    expect(text).toContain('"glob?": "Only files matching a glob');
     expect(text).toContain('"notes?": "set: a map');
     expect(text).toContain('"forms": "Task schedule: a string');
     expect(text).toContain('"forms": "Optional focused preview: a plain string');

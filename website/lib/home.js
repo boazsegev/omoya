@@ -64,8 +64,8 @@ const SURFACES = [
   },
   {
     kicker: "Browser",
-    title: "Serve it to a browser",
-    body: "A standalone chat SPA over HTTP and WebSocket, carrying the same Agent/Env events used everywhere else. The server owns the agent; closing the tab detaches the view while the agent keeps running. It binds to loopback and checks the WebSocket Origin header. There is no auth token: <strong>reaching the port means owning the agent</strong>.",
+    title: "Your terminal agent, in the browser",
+    body: "Use the terminal agent's engine from a browser: watch thinking, tool calls, and edit diffs as they arrive; inspect or edit context, use the command palette, and resume saved sessions. One server serves multiple projects, each with its own URL, plus an all-projects view. Closing a tab does not stop the agent. By default it listens on loopback, and it refuses requests from websites open in your browser (DNS-rebinding and origin checks). There is <strong>no login</strong>: any program on this machine, or anyone on your network with <code>--host 0.0.0.0</code>, can control the agent. Use <code>--host</code> only on trusted networks; for remote access, use an SSH tunnel.",
     code: "om --serve --port 9900",
   },
   {
@@ -77,7 +77,7 @@ const SURFACES = [
 ];
 
 const SECURITY = [
-  "File tools refuse absolute paths and parent traversal; <code>read</code> rejects symbolic links.",
+  "File tools accept absolute paths within the project, but refuse paths outside the agent's write boundary; <code>read</code> does not follow symbolic links.",
   "<code>bash</code> refuses <code>cd</code>, <code>ln</code>, and visible outside paths.",
   "Mutating tools fork under an OS write sandbox (macOS Seatbelt, Linux Bubblewrap). With no sandbox available, <strong>safe mode is forced</strong>: only read-only tools exist.",
   "Session logs live outside the project tree, so cwd-scoped tools cannot rewrite their own history.",

@@ -2,8 +2,8 @@
 // pi semantics (write creates parents and overwrites; edit matches
 // edits[] against the ORIGINAL, unique and non-overlapping) guarded
 // by the DETERMINISTIC path resolver (tools/guard/resolve.js — the
-// path argument, normalized and refused on a leading `..` or an
-// absolute form) and the fast-path content trip-wire
+// path argument, resolved and refused outside the Agent folder)
+// and the fast-path content trip-wire
 // (tools/guard/paths.js — persisted content scanned for
 // path-traversal strings; shebang-exempt; backslash escape sequences
 // like `\n` are text, not path separators). write runs under the OS
@@ -47,7 +47,7 @@ describe("write tool (pi semantics)", () => {
     expect(readFileSync(`${project}/nested/out.js`, "utf8")).toBe(source);
   });
 
-  test("uses a narrowed agent folder as cwd and permits writes to project siblings", async () => {
+  test("uses a narrowed agent folder as the write boundary", async () => {
     const project = `${ROOT}/project`;
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
@@ -55,9 +55,8 @@ describe("write tool (pi semantics)", () => {
     const context = { env: { cwd: project }, agent: { folder: agentFolder } };
     await write({ path: "out.js", content: source }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe(source);
-    await write({ path: "../shared/out.js", content: "sibling" }, context);
-    expect(readFileSync(`${project}/shared/out.js`, "utf8")).toBe("sibling");
-    await expect(write({ path: "../../outside.js", content: "x" }, context)).rejects.toThrow(/project boundary/);
+    await expect(write({ path: "../shared/out.js", content: "sibling" }, context)).rejects.toThrow(/boundary/);
+    await expect(write({ path: "../../outside.js", content: "x" }, context)).rejects.toThrow(/boundary/);
   });
 
   test("content paths resolve from the agent cwd, not the written file's parent", async () => {
@@ -81,12 +80,12 @@ describe("write tool (pi semantics)", () => {
     await expect(write({ path: rel("x.txt") })).rejects.toThrow(TypeError);
     await expect(write({})).rejects.toThrow();
     await expect(write({ path: "../outside.txt", content: "x" })).rejects.toThrow(/escapes the working folder/);
-    await expect(write({ path: "/etc/hostname", content: "x" })).rejects.toThrow(/absolute path/);
+    await expect(write({ path: "/etc/hostname", content: "x" })).rejects.toThrow(/project boundary/);
   });
 });
 
 describe("edit tool (pi semantics)", () => {
-  test("uses a narrowed agent folder for the target and env cwd for content", async () => {
+  test("edits target only the agent folder", async () => {
     const project = `${ROOT}/edit-project`;
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
@@ -99,13 +98,13 @@ describe("edit tool (pi semantics)", () => {
     const siblingFile = `${project}/shared/module.js`;
     mkdirSync(`${project}/shared`, { recursive: true });
     writeFileSync(siblingFile, "old sibling\n");
-    await edit({ path: sibling, edits: [{ oldText: "old sibling", newText: "new sibling" }] }, {
+    await expect(edit({ path: sibling, edits: [{ oldText: "old sibling", newText: "new sibling" }] }, {
       env: { cwd: project }, agent: { folder: agentFolder },
-    });
-    expect(readFileSync(siblingFile, "utf8")).toContain("new sibling");
+    })).rejects.toThrow(/boundary/);
+    expect(readFileSync(siblingFile, "utf8")).toContain("old sibling");
     await expect(edit({ path: "../../outside.txt", edits: [{ oldText: "x", newText: "y" }] }, {
       env: { cwd: project }, agent: { folder: agentFolder },
-    })).rejects.toThrow(/project boundary/);
+    })).rejects.toThrow(/boundary/);
   });
 
   test("edits match against the ORIGINAL; the result replaces all blocks", async () => {
@@ -313,7 +312,10 @@ describe("edit tool (pi semantics)", () => {
   test("a delayed permission re-reads current content before applying", async () => {
     seed("permission-race.txt", "alpha beta\n");
     let allow;
-    const blocked = edit({ path: rel("permission-race.txt"), ask: true, edits: [{ oldText: "alpha", newText: "cat " + "/" + "etc/passwd" }] }, { question: { ask: () => new Promise((resolve) => { allow = resolve; }) } });
+    let prompted;
+    const waitingForPrompt = new Promise((resolve) => { prompted = resolve; });
+    const blocked = edit({ path: rel("permission-race.txt"), ask: true, edits: [{ oldText: "alpha", newText: "cat " + "/" + "etc/passwd" }] }, { question: { ask: () => new Promise((resolve) => { allow = resolve; prompted(); }) } });
+    await waitingForPrompt;
     await edit({ path: rel("permission-race.txt"), edits: [{ oldText: "beta", newText: "BETA" }] });
     allow([{ labels: ["Allow write"] }]);
     await blocked;

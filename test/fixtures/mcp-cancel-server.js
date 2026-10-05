@@ -1,6 +1,8 @@
 // Cancellation fixture: protocol requests can hang at each phase.
 const phase = process.argv[2] ?? "tools/call";
 let buffer = "";
+let hung = false;
+const probePhase = phase === "server/discover";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -13,8 +15,19 @@ process.stdin.on("data", (chunk) => {
 });
 
 function handle({ id, method, params }) {
+  if (method === "notifications/cancelled") { process.stderr.write(`cancelled:${params?.requestId}\n`); return; }
   if (id === undefined) return;
-  if (method === phase && params?.name !== "echo") {
+  if (method === "server/discover" && probePhase && !hung) {
+    hung = true;
+    process.stderr.write(`pending:${process.pid}\n`);
+    return;
+  }
+  if (method === "server/discover") {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "legacy" } })}\n`);
+    return;
+  }
+  if (!hung && method === phase && params?.name !== "echo") {
+    hung = true;
     process.stderr.write(`pending:${process.pid}\n`);
     return;
   }

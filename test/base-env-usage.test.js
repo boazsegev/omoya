@@ -9,7 +9,7 @@ import { Env } from "../lib/env.js";
 import { contextWindow, toolStatus, toolStatusSet } from "./env-internals.js";
 
 const tempEnv = (settings) =>
-  new Env({ dir: mkdtempSync("./ai-tmp/env-usage-"), settings });
+  new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: mkdtempSync("./ai-tmp/env-usage-"), settings });
 
 describe("Env: contextWindow", () => {
   test("the cached model descriptor's contextWindow; null when unknown", () => {

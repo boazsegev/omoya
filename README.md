@@ -4,7 +4,7 @@
 
 **See what your agent sees.** A transparent agent harness for people, scripts, and the things you build next.
 
-One zero-dependency [Bun](https://bun.sh/) core, for anywhere you want to run an AI Agent: a terminal interface, a scriptable headless loop, and an embeddable library.
+One zero-dependency [Bun](https://bun.sh/) core for a terminal interface, a browser workspace, a scriptable headless loop, and an embeddable library. Run `om --serve` to work with your terminal agent in the browser.
 
 Filesystem boundaries are enforced by the OS, not by prompt instructions. Every shipped provider — and OpenAI-/Anthropic-compatible third-party endpoints — normalizes into one event model.
 
@@ -87,7 +87,7 @@ Install an extension npm package alongside Omoya or in the user settings folder,
 { "extensions": ["@example/omoya-extension"] }
 ```
 
-Omoya resolves each listed installed package at startup and treats its package root as another content layer: top-level JSON files (except `package.json` and npm lockfiles) merge as settings; `themes/*.json`, `providers/*.js`, `tools/*.js`, `skills/`, and `prompts/` follow the existing conventions. Folder scans do not recurse. Extension roots load in listed order after Omoya's package and before user settings; duplicate tool/provider names fail rather than silently replacing each other. An extension cannot add more extensions, nor can project settings select extensions. Only install extensions you trust: providers and tools execute code with access to host resources and credentials. Restart Omoya after installing or changing extensions.
+Omoya resolves each listed installed package at startup and treats its package root as another content layer: top-level JSON files (except `package.json` and npm lockfiles) merge as settings; `themes/*.json`, `providers/*.js`, `tools/*.js`, `skills/`, `prompts/`, and `hooks/*.js` follow the existing conventions. Folder scans do not recurse. Extension roots load in listed order after Omoya's package and before user settings; duplicate tool/provider names fail rather than silently replacing each other. An extension cannot add more extensions, nor can project settings select extensions. Only install extensions you trust: providers, tools and hooks execute code with access to host resources and credentials. A `hooks/<name>.js` module exports `hooks(env)` returning `{ [Agent.EVENT.MESSAGE_COMMITTED]: (payload, agent) => { /* observe */ } }` (import `Agent` from `omoya/agent`). Keys must be existing numeric `Agent.EVENT` values. Hooks observe asynchronously; failures are reported once per hook/event on `Agent.EVENT.LOG` and never fail a turn. Hook roots are the harness package, installed extensions, and user settings folder, **never the project**; `tool-refresh` reloads hooks as well as tools. Restart Omoya after installing or changing extensions.
 
 ## Tools with enforced boundaries
 
@@ -108,7 +108,7 @@ om-tools2bash    # generate direct shell wrappers for the tools
 
 ### Limiting side-effects to the agent's folder
 
-Each agent has a working folder (defaults to `cwd`), **making it the agent's root**, enforced in layers rather than by prompt instructions: file tools refuse absolute paths and parent traversal; `read` rejects symbolic links; `bash` refuses `cd`, `ln`, and visible outside paths; mutating tools fork under an OS write sandbox (macOS Seatbelt, Linux Bubblewrap).
+Each agent has a working folder (defaults to the environment's `cwd`), **making it the agent's write root**. `write` and `edit` restrict destinations to that folder; `read` permits the agent folder and environment project tree (including `../` paths to project siblings). Embedded independent agents can have a folder outside the environment tree. Children created by an agent inherit its write root or narrow it; `worker-create` cannot widen it. `read` rejects symbolic links; `bash` refuses `cd`, `ln`, and visible paths outside both trees. Mutating tools fork under an OS write sandbox rooted at the agent folder (macOS Seatbelt, Linux Bubblewrap). The Bash scanner is not a write policy: visible project-sibling reads work, while kernel confinement blocks sibling writes.
 
 With no sandbox available, safe mode is forced: only read-only tools exist. `--safe` selects the same posture at any time.
 
@@ -160,9 +160,11 @@ Both accept structured context as JSON or JSONL (plain input becomes a user mess
 om --serve --port 9900
 ```
 
-A standalone chat SPA over HTTP and WebSocket, carrying the same Agent/Env events used everywhere else. The server owns the agent; the browser only renders it — closing the tab detaches the view while the agent keeps running. It binds to loopback and checks the WebSocket Origin header. There is no auth token: **reaching the port means owning the agent**, so keep it off shared networks unless you put your own auth in front.
+Use the terminal agent's engine from your browser, not a separate chat service. The Web app carries the same Agent/Env events as the terminal: see responses, thinking, tool calls, and edit diffs as they arrive; ask questions and inspect or edit the context the model receives. Use every slash command or the command palette (Ctrl/⌘+K), choose a theme, sign in to endpoints, and resume or rename sessions. The server owns the agent, so closing a tab detaches the view without stopping its work.
 
-It offers the TUI's feature set: every slash command, a command palette (Ctrl/⌘+K, the TUI's ^X menu), the shared named theme catalog (independent `tui.theme` and `web.theme` selections, each falling back to global `theme`), endpoint sign-in and sign-out including browser OAuth, live thinking and tool-call cards, questions, agent and session naming, the context viewer, and queued-message recall.
+One server can serve several projects. The root URL shows their agents and saved sessions; each project has its own URL, and groups provide shared views. Add an existing folder from the project menu. In Settings › Projects, pin projects to serve them on the next start or stop serving one (local connections only). The app remembers recent models per pinned project, making it easier to return to the work you left there. Start with `om --serve --port 9900` and open the local URL it prints.
+
+By default the server listens on loopback, so only this machine can reach it. Websites open in your browser cannot drive it: it answers only requests addressed to this machine's own names (blocking DNS rebinding), and WebSocket and upload requests must come from its own origin. There is **no login**, though: any program or user account on this machine can connect, and `--host 0.0.0.0` lets anyone on your network control the agent. Use `--host` only on networks you trust; for remote access, prefer an SSH tunnel that keeps the same port (`ssh -L 9900:localhost:9900 <machine>`).
 
 Math in messages can use explicit `\(x^2\)` inline delimiters (recommended when prose also mentions prices), `$x^2$` for unambiguous inline formulas, or `$$` or `\[` and `\]` on separate lines around display math. Ambiguous numeric dollar spans such as `$13/day` or `$2/$10` remain prices, not math. The shared Markdown module parses a **small TeX subset** (Greek/common symbols, superscripts, subscripts, `\\frac{a}{b}`, `\\sqrt{x}`) into source-bearing structural nodes. The browser lays those out without external dependencies; hover a formula to see the original TeX. The terminal preserves the TeX source verbatim so even partial selections copy accurately. Unknown commands remain literal; this is not full KaTeX/LaTeX support. Code spans and fenced code are not parsed as math.
 
@@ -172,22 +174,22 @@ Math in messages can use explicit `\(x^2\)` inline delimiters (recommended when 
 
 ## File queries without shell pipelines
 
-The read-only `read` tool handles cat/head/tail, listings, filename filters, and literal/regex search. `write.source` saves query payloads without sending them back through the model. Without an effective search it forces `annotate: false`, even if supplied true; searches honor `annotate` (default true) to retain source locations:
+The `read` tool handles cat/head/tail, listings, filename filters, and literal/regex search. `read` with `target` saves the payload to a file (copying, saved listings or reports) instead of returning it through the model; it is refused in safe mode and runs as a sequential mutating call. Without an effective search it forces `annotate: false`, even if supplied true; searches honor `annotate` (default true) to retain source locations:
 
 ```js
 read({ path: "README.md", annotate: false });
 read({ path: "log.txt", lines: { from: -8 } }); // last eight lines
 read({ path: "src", recursive: true, glob: ["*.js", "*.md"],
   exclude: "generated/**", search: { text: "TODO", regex: "\\bFIXME\\b", before: 2, after: 2 }, limit: 20 });
-write({ path: "report.txt", source: { path: "src", recursive: true,
-  glob: "*.md", search: { text: "TODO" }, info: true } });
+read({ path: "src", recursive: true, target: "report.txt",
+  glob: "*.md", search: { text: "TODO" }, info: true });
 ```
 
 `lines` is 1-based/inclusive; `characters` and `bytes` are 0-based/exclusive at the end. Negative indexes count from end (`-1` is last; exclusive `to: -1` omits the last character/byte). `lines.last` is an alternative tail selection. Zero offsets, zero limits, and valid booleans are intentional; wrong-type model fillers normalize to absence. Old flat `startLine`/`endLine`/`pattern`/`maxMatches` arguments are no longer accepted.
 
-`ignore` defaults false: Git publishing exclusions often hide useful AI artifacts. Opt in with `ignore: true` to load `.gitignore` then `.ignore` and system exclusions; explicit files always bypass ignore rules. Symlinks are never followed. `info` gives contextual file metadata/listing counts/search paths and line counts. `annotate: false` strips payload decoration, not execution-status warnings. `binary` selects bytes; `base64` produces encoded text. No JSON format switch or separate copy API.
+`ignore` defaults false: Git publishing exclusions often hide useful AI artifacts. Opt in with `ignore: true` to load `.gitignore` then `.ignore` and system exclusions; explicit files always bypass ignore rules. Symlinks are never followed. `info` gives contextual file metadata/listing counts/search paths and line counts. `annotate: false` strips payload decoration, not execution-status warnings. `binary` selects bytes; `base64` produces encoded text. No JSON format switch; copies use `target`.
 
-Finite `read` settings bound work: `scanBytes` (64 MiB), `fileBytes` (16 MiB), `files` (10000), `entries` (20000), `grepFileSizeLimit` (5 MiB per discovered search file), `outputBytes` (64 KiB), `artifactBytes` (16 MiB for `write.source`), `regexMs` (1000), and `timeoutMs` (30000). Positive safe integers customize budgets; nonpositive values do not disable them. Counts stopped by budgets are incomplete. Explicit result limits are intentional; execution/serialization failures prevent saving. Raw binary saves contain bytes, not annotations; status is never inserted into saved data. `write` accepts exactly one `content` or `source` (a read query) and still overwrites existing files, now through atomic replacement.
+Finite `read` settings bound work: `scanBytes` (64 MiB), `fileBytes` (16 MiB), `files` (10000), `entries` (20000), `grepFileSizeLimit` (5 MiB per discovered search file), `outputBytes` (64 KiB), `artifactBytes` (16 MiB for `read` with `target`), `regexMs` (1000), and `timeoutMs` (30000). Positive safe integers customize budgets; nonpositive values do not disable them. Counts stopped by budgets are incomplete. With `target`, an omitted `limit` saves all selected listing/search results within these budgets, and annotated searches preserve full lines instead of preview excerpts. Explicit limits, offsets, and ranges remain intentional. Budget exhaustion or oversized/unreadable search inputs prevent saving and leave an existing destination unchanged. Raw binary saves contain bytes, not annotations; status is never inserted into saved data. `write` takes text `content` only; both `write` and `read` with `target` overwrite existing files through atomic replacement.
 
 ## Sessions and jobs
 
@@ -208,14 +210,17 @@ Configuration is layered — package, then the user settings directory, then env
 
 | key | meaning |
 |---|---|
-| `providers` | Endpoint URLs, protocol names, model metadata, endpoint limits, per-endpoint model `filter` regex |
+| `providers` | Endpoint URLs, protocol names, model metadata, endpoint limits, per-endpoint model `filter` regex, `disabled: true` to switch an endpoint off |
 | `tools` | Tool policy: `folders` array (trusted package/user roots only), `timeout` (120000 ms), `timeoutLimit` (1200000 ms), `concurrency` (3) |
 | `skills` / `prompts` | Additional instruction and prompt roots |
-| `mcp` | MCP servers and launch settings |
+| `mcp` | Trusted package/user-scope MCP server definitions (`{url, oauth:{clientId?,issuer?}}` for HTTP OAuth, or `command` for stdio); never keep tokens in settings |
+| `projects` | Pinned projects (user `projects.json` only): `{"<folder>": {name, models: {"<endpoint>/<model>": <ISO timestamp>}}}` |
 | `tui` | Interface mode, theme, theme definitions |
 | `think` | Default reasoning effort |
 | `safe` | Start read-only |
 | `timeout` / `tools.timeout` | Per-request and per-tool-call duration limits |
+
+HTTP MCP sign-in is explicit: configure the server under `mcp`, then run `om --mcp-login <name>` (or TUI `/mcp-login <name>` / Web login panel). The `mcp` tool reports a sign-in instruction on authorization failure and never opens a browser. MCP tokens live only in user-scope auth files, separate from settings and project files. Omoya's hosted OAuth client metadata is `https://omoya.ai/oauth/client.json` (deploy `website/build/` before CIMD sign-in); authorization servers may instead accept a configured `clientId` or support dynamic registration. `mcp` also supports `resources`/`resource` and `prompts`/`prompt` actions; server content is untrusted tool-result data.
 
 Tool durations accept millisecond numbers or unit strings such as `"30s"`. Project settings may adjust `tools.timeout`, `tools.timeoutLimit`, and `tools.concurrency`, but `tools.folders` is stripped from every project settings/auth file. Folder arrays accumulate across trusted layers. Old `tool`, `toolTimeout`, `toolTimeoutLimit`, and root-level `tools` arrays are replaced by this object:
 

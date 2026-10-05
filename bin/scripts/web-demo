@@ -1,0 +1,88 @@
+#!/usr/bin/env bun
+/**
+ * web-demo — run the web app against the scripted TEST provider with
+ * an isolated settings + sessions folder (ai-tmp/web-demo), so the UI can
+ * be exercised end to end with no network, no real model, and no writes to
+ * the user's real settings or sessions.
+ *
+ * Usage: bun bin/scripts/web-demo [--port N] [--stream]   (default 9911)
+ * The script: thinking + text + a `read` tool call, then a Markdown answer
+ * (table, code, diff); the last turn repeats. Bundled themes are loaded.
+ * --stream: agents instead use a paced fake IO (thinking + a long Markdown
+ * answer in small deltas every 15ms) to observe streaming smoothness.
+ * Gotcha: the demo folder is wiped on each start.
+ */
+import { mkdirSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+
+const usage = "usage: bun bin/scripts/web-demo [--port N] [--stream] — hermetic web UI demo (scripted test provider, ai-tmp/web-demo settings)";
+const args = process.argv.slice(2);
+if (args.includes("--help")) {
+  console.log(usage);
+  process.exit(0);
+}
+const allowed = args.every((arg, i) => arg === "--stream" || arg === "--port" || (args[i - 1] === "--port" && /^\d+$/.test(arg)));
+const portValue = args[args.indexOf("--port") + 1];
+const port = args.includes("--port") ? Number(portValue) : 9911;
+if (!allowed || args.filter((arg) => arg === "--port").length > 1 || args.filter((arg) => arg === "--stream").length > 1 || !Number.isInteger(port) || port < 1 || port > 65535) {
+  console.error(usage);
+  process.exit(1);
+}
+const root = resolve(import.meta.dir, "../..");
+const dir = resolve(root, "ai-tmp/web-demo");
+rmSync(dir, { recursive: true, force: true });
+mkdirSync(dir, { recursive: true });
+process.env.OMOYA_SETTINGS_DIR = dir;
+
+const script = [
+  [
+    { thinking: "The user wants an overview. I should read the README first, then summarize the key facts in a table." },
+    { text: "Let me check the project README." },
+    { toolCall: { name: "read", arguments: { path: "README.md" } } },
+  ],
+  [
+    { thinking: "Now I can answer with a concise summary." },
+    { text: "## Summary\n\nOmoya is a **zero-dependency** agent. Highlights:\n\n| Surface | Notes |\n| :--- | :--- |\n| CLI | `om` |\n| Web | `om --serve` |\n\n```diff\n- old line\n+ new line\n```\n\n- [x] themes\n- [ ] more\n\n```js\nconst answer = 42;\n```" },
+  ],
+  [
+    { toolCall: { name: "question", arguments: { questions: [{ header: "Format", question: "How should I format the report?", multiSelect: false, options: [
+      { label: "Short", description: "Three bullet points", preview: "- one\n- two\n- three" },
+      { label: "Detailed", description: "Full sections with tables" },
+    ] }] } } },
+  ],
+  [{ text: "Got it — thanks for choosing." }],
+];
+
+process.env.OMOYA_TEST_SCRIPT = JSON.stringify(script); // the provider's script channel
+await import("../../lib/index_app.js"); // enables bundled theme loading
+const { default: Env } = await import("../../lib/env.js");
+const { serve } = (await import("../../lib/app/web/index.js")).default;
+const env = await Env.create({
+  cwd: root, settingsDir: dir, // package dir stays default: bundled themes/ + settings.json load
+  settings: {
+    providers: { demo: { provider: "test", url: "test://script", models: { scripted: {}, "scripted-large": {} } } },
+  },
+});
+const { default: Agent } = await import("../../lib/agent.js");
+/** Paced stream: real providers deliver many small deltas over seconds. */
+const pacedIO = () => ({
+  state: "idle",
+  async write(_context, callbacks) {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const chunks = (text, size) => Array.from({ length: Math.ceil(text.length / size) }, (_, i) => text.slice(i * size, (i + 1) * size));
+    callbacks.onStart?.({ type: "start" });
+    for (const piece of chunks("Planning the answer step by step.\n".repeat(20), 12)) { callbacks.onThinkingDelta?.({ type: "thinking_delta", text: piece }); await sleep(15); }
+    const answer = Array.from({ length: 60 }, (_, i) => `${i % 12 === 0 ? `\n## Section ${i / 12 + 1}\n\n` : ""}Paragraph ${i} with **bold**, \`code\` and more words to fill the line nicely.\n`).join("\n");
+    for (const piece of chunks(answer, 8)) { callbacks.onTextDelta?.({ type: "text_delta", text: piece }); await sleep(15); }
+    callbacks.onDone?.({ type: "done" });
+    return { type: "done" };
+  },
+  async kill() { this.state = "closed"; },
+});
+const stream = args.includes("--stream");
+const web = await serve({
+  env, port, model: { selector: "demo/scripted" },
+  ...(stream ? { createSession: async () => ({ agent: new Agent({ env, model: "demo/scripted", context: [], createIO: pacedIO }) }) } : {}),
+});
+process.stderr.write(`web demo: ${web.url}\n`);
+await web.done;

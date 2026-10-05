@@ -150,6 +150,32 @@ describe("kimi provider: context2msg (chat-completions dialect)", () => {
     }]);
   });
 
+  test("assistant thinking returns as reasoning_content (Preserved Thinking)", () => {
+    // platform.kimi.ai/docs/guide/use-thinking-models: pass the assistant
+    // message back as-is, including reasoning_content — required by K3 and
+    // kimi-k2.7-code in tool loops and multi-turn conversations.
+    const connection = new Protocol("https://api.kimi.com/coding/v1", aiio());
+    const [, body] = connection.context2msg([
+      user("go"),
+      assistant([
+        { type: "thinking", text: "plan " },
+        { type: "toolCall", callId: "c1", name: "read", arguments: { path: "a.txt" } },
+      ]),
+      { type: 4, callId: "c1", name: "read", content: [{ type: "text", text: "a" }] },
+      assistant([
+        { type: "thinking", text: "first" },
+        { type: "text", text: "done" },
+        { type: "thinking", text: " second" },
+      ]),
+      assistant([{ type: "text", text: "no thinking" }]),
+    ]);
+    const replies = body.messages.filter((message) => message.role === "assistant");
+    expect(replies[0]).toMatchObject({ content: null, reasoning_content: "plan " });
+    expect(replies[0].tool_calls).toHaveLength(1);
+    expect(replies[1]).toEqual({ role: "assistant", content: "done", reasoning_content: "first second" });
+    expect(replies[2]).toEqual({ role: "assistant", content: "no thinking" });
+  });
+
   test("parallel tool results precede attached system payloads on the strict Kimi wire", () => {
     const connection = new Protocol("https://api.kimi.com/coding/v1", aiio());
     const [, body] = connection.context2msg([

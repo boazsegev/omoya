@@ -1,9 +1,8 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { buildQuestionDialog } from "../lib/app/web/public/app/logic/question-dialog.js";
 
-const js = readFileSync(new URL("../lib/app/web/public/app.js", import.meta.url), "utf8");
 const css = readFileSync(new URL("../lib/app/web/public/style.css", import.meta.url), "utf8");
-const source = js.slice(js.indexOf("function renderQuestion()"), js.indexOf("function closeQuestion()"));
 const document = { activeElement: null };
 
 function element(tag, className = "", textContent = "") {
@@ -38,13 +37,12 @@ function harness(questions) {
   dialog.append(head, body);
   const sent = [];
   document.activeElement = null;
-  const openQuestion = { requestId: "q1", questions };
-  const render = new Function("scope", `with (scope) { ${source}; return renderQuestion; }`)({
-    openQuestion, openDialog: () => ({ dialog, body, head }), el: element, markdownNode: element,
+  let pending = true;
+  buildQuestionDialog({ dialog, body, head }, { requestId: "q1", questions }, {
+    el: element, markdownNode: element, document, send: (value) => sent.push(value),
     button: (className, text, onClick) => { const node = element("button", className, text); if (onClick) node.addEventListener("click", onClick); return node; },
-    document, send: (value) => sent.push(value),
+    settle: () => { const was = pending; pending = false; return was; },
   });
-  render();
   return { dialog, body, document, sent, options: body.querySelectorAll(".question-option"), previews: body.querySelectorAll(".question-preview-pane") };
 }
 
@@ -151,6 +149,13 @@ test("Enter in custom answer does not submit unless Submit has focus", () => {
   other.value = "custom"; other.fire("input"); other.focus();
   press(view, "Enter");
   expect(view.sent).toEqual([]);
+});
+
+test("closing refuses once; a dialog closed after settling sends nothing", () => {
+  const view = harness([question]);
+  view.dialog.close();
+  view.dialog.close();
+  expect(view.sent).toEqual([{ type: "question.answer", requestId: "q1", answers: null }]);
 });
 
 test("a question dialog and its preview have stable viewport-bounded geometry", () => {

@@ -30,7 +30,7 @@ import Agent from "../../lib/agent.js";
 import CLI from "../../lib/cli.js";
 const { Env, IO, NAMES } = Agent;
 const { ProviderError } = IO;
-const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, logoutEndpoint, selectEndpointModel, adoptResumeOrigin } = CLI;
+const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, runMcpLogin, logoutEndpoint, selectEndpointModel, adoptResumeOrigin } = CLI;
 
 // The invoked name, like the TUI's: argv[1] holds the wrapper's file
 // name; a bare `bun bin/scripts/agent` has none, so the namespace-
@@ -83,6 +83,7 @@ options:
                        (the PRIMARY guard is context usage, settings.
                        context.cap/context.turn — 90%/40%)
   --login              configure an endpoint with the interactive wizard, then exit
+  --mcp-login <name>   sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
   --help               show this text and exit
 
@@ -93,7 +94,7 @@ const HELP = HELP_TEMPLATE.replaceAll(PROGRAM, NAME);
 
 const FLAGS = [
   "model", "url", "token", "timeout", "tools", "tool-timeout",
-  "session", "resume", "max-turns", "max-tool-calls", "logout",
+  "session", "resume", "max-turns", "max-tool-calls", "logout", "mcp-login",
 ];
 const BOOL_FLAGS = ["no-tool-fork", "tool-async", "login"];
 
@@ -131,6 +132,14 @@ async function main() {
   // Async construction belongs in Env.create(): the returned environment has
   // its provider and tool registries ready for Agent.
   const env = await Env.create();
+  if (args["mcp-login"]) {
+    try {
+      const name = args["mcp-login"];
+      await runMcpLogin(env, name);
+      log(`MCP signed in: ${name}`);
+      return;
+    } catch (err) { log(`MCP login failed: ${err.message}`); process.exitCode = EXIT.usage; return; }
+  }
   if (args.login) {
     try {
       const result = await runLoginWizard(env);

@@ -118,6 +118,6 @@ test("settingChips: endpoint, model, thinking, safe, logging — labels, emphasi
   expect(fresh.model).toMatchObject({ label: "Choose model", action: "choose a model" });
   expect(fresh.endpoint).toMatchObject({ label: "Choose endpoint", action: "choose an endpoint" });
   expect(fresh.thinking).toMatchObject({ label: "Think: auto", active: false });
-  expect(fresh.safe).toMatchObject({ icon: "🔓", label: "Read/write", pressed: false });
+  expect(fresh.safe).toMatchObject({ icon: "🔓", label: "Read/Write", pressed: false });
   expect(fresh.logging).toMatchObject({ label: "No-log", title: "Not logged: nothing is written to disk", warn: true, pressed: false, action: "log this conversation" });
 });

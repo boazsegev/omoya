@@ -2,6 +2,85 @@
 
 Omoya releases are listed newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not. Tool descriptions and model-facing schemas can change between runs as the agent receives the current tool catalog.
 
+## 0.2.3 — 2026-10-08
+
+### Browser workspace and agent workflows
+
+- The Web app displays streamed thinking, tool output, and inline images. Copying a selection preserves Markdown, including lists and task lists.
+- `bash` can start a background command; use `process` to inspect its output or stop it. `worker-status` now includes the commands workers accept. Trusted extension packages can register lifecycle hooks; the new `visual-check` skill and `web-demo` script support visual review of Web changes.
+- HTTP MCP servers can authenticate with OAuth, with sign-in available in the CLI, TUI, and Web app. MCP resources and prompts can be listed and read through the `mcp` tool. Configure tokens through sign-in rather than storing them in project settings.
+- Tool-result images are forwarded to model providers that support them.
+
+### One Env per project folder
+
+- **`Env.envs`** maps each absolute project folder to its one open Env (a frozen snapshot per read). The constructor registers an Env and `env.close()` removes it; **a second open Env for the same folder throws**, so look it up first. `env.closed` reports closure, and a closed Env refuses `agentCreate`/`childCreate`. `Env.create` closes its Env when loading fails.
+- **`env.cwd` is read-only** (the absolute registry key). `env.name` is the project name: the shortest path suffix no other open Env shares (`fiz/bar/foo` and `faz/bar/foo` when two `foo` folders are open). The web app lists projects by `env.name`; pin records no longer store `name`.
+- `Env.use(folder, fn)` runs `fn` with that folder's open Env, creating one when missing and closing it afterwards unless agents joined it. Tools called without an Agent's Env (`skill`, `skill-resource`) use the root folder's Env this way.
+- `new Agent()` without `env` reuses the open Env of `process.cwd()`, else creates one that closes with its last Agent (or at once when construction is rejected).
+- **Reserved agent names**: the name setter, `agentCreate`, and `childCreate` reject names that read as an address or a privileged identity — exactly `new`, `all`, `everyone`, a chat role (`assistant`, `human`, `model`, `tool`, `function`, `ai`) or the product name, and any name containing `user`, `admin`, `group`, `root`, `sudo`, `system`, `developer`, `owner`, `operator`, `supervisor`, `moderator`, `privilege` or `authori`. Matching ignores case, full-width forms, accents, invisible characters, Cyrillic/Greek look-alike letters and (for contained words) separators. An older session's reserved name is not restored on resume.
+- **Resume is confined to the project**: `agent.contextResume(id)` and `new Agent({contextId})` refuse a session recorded in another folder ("resume anywhere" is removed; `contextResume` returns `{id, file}`). `--resume <id>` on the command line still moves to the session's folder before the Env is built.
+- Project groups: a pin record may carry `groups: {<name>: true}`. Web Settings › Projects shows each project's groups; its ＋ menu joins or leaves a group or creates one. Joining pins the project. Protocol: `project.group {path, group, member}`; project entries carry `groups`.
+- With several projects visible, agents are named `<project>/<agent>`: the web sidebar and palette in the all-projects view, and the terminal UI agent menu, which now lists the agents of every open Env grouped by project.
+- **Web group views**: `/group:<group>/` shows the agents and saved sessions of a group's served projects (a project whose URL is the same path wins; an unknown or empty group answers 404). The project menu opens the all-projects view, each group's view, or the current project; group members switch in place, other projects open their own URL. Viewers of a project that leaves the group move to another member (else to `/`). Group names cannot contain `/`. Protocol: `scope` "group" with `group`.
+- Web saved sessions: the filter always shows; multi-project views list every shown project's saved sessions in alphabetical, collapsible per-project sections with counts (also with one project); resume, rename and delete act in the owning project. `/session-resume <id>` reaches a saved session of any open project: in place when the view shows that project, else by opening the project's URL with `?resume=<id>` (new `navigate {url}` packet); completion lists the viewed project's sessions.
+- Fixed: web pop-up menus opened from a modal dialog (Settings) rendered behind it and could not be clicked.
+- Fixed: web selection copy failed for lists and other block sequences, copying the displayed text instead of the original Markdown.
+
+### Pinned projects in the web app
+
+- Settings › Projects lists every served project. On local connections, 📌 pins or unpins a project and × stops serving it. Removing a project unpins it and closes its idle agents; saved sessions stay on disk. Removal is refused while its agents are working, and the last project cannot be removed. Viewers of a removed project move to another project; a removed project's own URL redirects to the root view.
+- Pinned projects are saved to `projects.json` in the user settings folder as `projects.<folder> = {models: {"<endpoint>/<model>": <timestamp>}}`. Every `om --serve` start serves them. Project settings cannot pin projects.
+- A pinned project remembers its own recent models (up to 8). A new session there starts on its newest available model before falling back to the global last-model memory. `ModelInfo` gains `projectLastUsed`.
+- Settings schema entries may name a `file`: writes to that key always persist there. `projects` uses this.
+- Protocol: `project.pin {path, pinned}` and `project.remove {path}` are new client packets, and the server sends `project.removed {url}` to viewers of a removed project. Project entries carry `pinned`. `canAddProject` is renamed `canManageProjects`.
+
+### Disable endpoints; edit max active from settings
+
+- `providers.<endpoint>.disabled: true` switches an endpoint off without signing out (for example, while its token budget is depleted). Its models leave menus, completions, and last-model selection. New agents and workers cannot use it, and open agents refuse their next request. `env.models(true)` still lists its pairs with `disabled: true`, and sign-out still reaches it.
+- Both apps edit endpoint settings: the terminal UI menu (`^X` › Endpoints) and the web Settings › Endpoints section switch an endpoint on or off and set `maxActive` for an endpoint or a single model. Leave `maxActive` unset to inherit; 0 excludes. Each change persists only that settings path. `CLI.endpointPolicies(env)` and `CLI.endpointPolicySet(env, selector, change)` serve both apps. The web protocol adds `endpoint.policy {selector, change}`, and `endpoints` packets carry `policies`.
+- Fixed: a per-model preference such as `providers.<endpoint>.models.<model>.maxActive` replaced that model's catalog metadata (context window, thinking modes) instead of merging with it.
+
+### Web app shows its project
+
+- The web app shows `📁 project / agent` in the header and starts tab titles with the project name. The project menu lists served folders and lets local clients add an existing absolute directory (or `~/…` / `~`, expanded on the server; `~user/` is refused); switching navigates to its project URL. Settings ends with the full project path. `hello` and `projects` carry project entries and `canManageProjects`; `project.add {path}` replies with `project.added {url}`.
+- The tool-access chip and setting read `Read/Write` (was `Read/write`) in both the web app and the terminal UI.
+
+### Saving read results moved to `read`
+
+- `read` gains `target`: it saves the selected file, listing, or search report to a project file instead of returning it to the model. Use it for copies and saved reports. **`write.source` is removed**: use `read({ path: "notes.md", target: "copy.md" })` instead of `write({ path: "copy.md", source: { path: "notes.md" } })`. `target` is refused in safe mode and never runs in parallel with other tool calls. `write` now takes text `content` only, and `content` is required.
+
+- `read.target` no longer inherits the preview's default 100-result limit or long-line excerpts. Omit `limit` to save all selected results within host budgets; explicit limits/ranges still apply. Oversized or unreadable search inputs now refuse the save rather than leave a partial report. Budget exhaustion leaves existing destinations unchanged.
+
+- Shorter `read` and `write` tool descriptions: together their schemas are less than half their previous size, leaving more context for the conversation. The `read` and `skill-resource` descriptions say saving is available only when the `write` tool is available.
+
+- Fixed: tools loaded from tool folders lost their read-only classification, so a `skill-resource` call saving a `target` could run in parallel with reads. Such calls now run in order.
+
+### MCP over HTTP
+
+- `mcp.<name>` settings accept a `url` for Streamable HTTP servers, next to stdio `command`. Optional `headers` expand `${VAR}` from the filtered environment; an unset variable is a connection error. Both the current stateless protocol and the earlier session-based protocol are supported. URLs must use https, or http on a loopback host.
+
+- MCP connection status is reliable: idle servers are no longer reported as unavailable, and status updates when a server connects, fails, or exits. Cancelling a call cancels only that request instead of stopping the shared server. Changing MCP settings closes outdated servers.
+
+- Stdio MCP servers start in the project folder, so relative commands and arguments resolve against it.
+
+### Safer Web and agent boundaries
+
+- The Web server answers only requests addressed to this machine's names on its port, which blocks DNS-rebinding pages from driving the local agent. LAN use with `--host 0.0.0.0` still works.
+
+- An agent's writes (`write`, `edit`, saved targets, and the shell write sandbox) stay inside its Agent folder; reads can still reach the project. A worker inherits its leader's folder when none is given and cannot move outside it.
+
+- File tools accept absolute paths inside the project; tool output shows them relative to the Agent folder.
+
+### Fixes
+
+- Binary image reads no longer truncate images at the 64 KiB text-output budget. Complete images use the host's `read.fileBytes` budget; partial or over-budget images return a notice instead of invalid image data.
+
+- Anthropic/Claude, OpenAI, and Kimi reject unsupported image formats before sending, with a conversion instruction.
+
+- Copying a selection in Web gives Markdown again, including task lists and selections spanning several messages.
+
+- Kimi thinking models receive their earlier reasoning back as `reasoning_content`, as Moonshot requires across tool loops and turns.
+
 ## 0.2.2 — 2026-10-05
 
 ### Clearer tools, quicker reads

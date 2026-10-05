@@ -4,7 +4,8 @@ const revision = toolRevision();
 import { lstat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 const { normalizeReadQuery } = await import(`./query.js?revision=${revision}`);
-const { createReadState, guardedPath, openReadFile, readChunk, directoryEntries, charge, checkReadState, relativeReadPath, readError, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
+const { relativeCwdPath } = await import(`../guard/resolve.js?now=${revision}`);
+const { createReadState, selectReadBoundary, guardedPath, openReadFile, readChunk, directoryEntries, charge, checkReadState, relativeReadPath, readError, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
 const { matchesGlob } = await import(`./glob.js?revision=${revision}`);
 const { ancestorIgnores, loadIgnore, isIgnored, isSystemFile } = await import(`./ignore.js?revision=${revision}`);
 const { loadText, selectText, sourceLines, rangeBounds } = await import(`./text.js?revision=${revision}`);
@@ -61,9 +62,9 @@ async function* walk(abs, query, state, skips, stack) {
 function skipped() { return { symlink: 0, special: 0, ignored: 0, binary: 0, oversized: 0, unreadable: 0 }; }
 
 function rootHint(state, path) {
-  if (![".", "./"].includes(path) || state.scope.cwd === state.scope.boundary) return null;
-  const folder = relative(state.scope.boundary, state.scope.cwd).split(sep).join("/");
-  const up = relative(state.scope.cwd, state.scope.boundary).split(sep).join("/");
+  if (![".", "./"].includes(path) || state.scope.cwd === state.scope.project) return null;
+  const folder = relative(state.scope.project, state.scope.cwd).split(sep).join("/");
+  const up = relative(state.scope.cwd, state.scope.project).split(sep).join("/");
   return `Hint: you're in \`./${folder}\`, use \`${up}/\` to read files from the root project.`;
 }
 
@@ -71,12 +72,14 @@ function rootHint(state, path) {
 export async function executeReadQuery(args, context, { artifact = false } = {}) {
   const state = createReadState(context, artifact);
   try {
-    try { return await executeQuery(normalizeReadQuery(args), state); }
+    try { return await executeQuery(normalizeReadQuery(args, { artifact }), state); }
     finally { await closeSearch(state); }
   } catch (error) { throw readError(error, state); }
 }
 
 async function executeQuery(query, state) {
+  selectReadBoundary(query.path, state.scope);
+  query.path = relativeCwdPath(query.path, state.scope);
   let inspected;
   try { inspected = await guardedPath(query.path, state); }
   catch (error) {
@@ -131,11 +134,31 @@ async function byteQuery(result, opened, state) {
   result.mime = mimeDetect({ path: result.source });
   result.byteCount = to - from;
   if (result.query.info) return;
-  const count = Math.min(to - from, state.outputLimit);
-  if (count < to - from) { result.selectionComplete = false; result.status.push("binary output budget exhausted; narrow bytes"); }
-  result.payload = await readChunk(opened.handle, from, count, state);
+  const prefix = result.mime === "application/octet-stream" && from === 0
+    ? await readChunk(opened.handle, from, Math.min(16, to - from, state.outputLimit), state) : Buffer.alloc(0);
+  result.mime = mimeDetect({ path: result.source, buffer: prefix });
+  const count = binaryReadCount(result, opened.metadata.size, state, from, to);
+  if (count === null) return;
+  const rest = await readChunk(opened.handle, from + prefix.length, count - prefix.length, state);
+  result.payload = prefix.length ? Buffer.concat([prefix, rest]) : rest;
   result.mime = mimeDetect({ path: result.source, buffer: result.payload });
   result.binary = true;
+}
+
+function binaryReadCount(result, size, state, from, to) {
+  const image = result.mime.startsWith("image/") && !result.query.base64 && !state.artifact;
+  const count = Math.min(to - from, image ? state.budgets.fileBytes : state.outputLimit);
+  if (count < to - from) {
+    result.selectionComplete = false;
+    result.status.push(image ? "image fileBytes budget exhausted; resize the image" : "binary output budget exhausted; narrow bytes");
+  }
+  // Vision decoders need a whole file, never a text-budget preview or byte slice.
+  if (image && (size === 0 || from !== 0 || to !== size || count !== size)) {
+    result.selectionComplete = false;
+    result.status.push("image not sent: empty or incomplete file; use a complete image within read.fileBytes, or base64:true to inspect bytes as text");
+    return null;
+  }
+  return count;
 }
 
 function validateFolder(query) {
@@ -226,7 +249,7 @@ async function searchFile(result, selection, state) {
   }
   const positions = new Map(matched.positions);
   for (const [index, context] of [...print].sort((a, b) => a[0] - b[0])) {
-    const shown = query.annotate ? excerpt(lines[index], positions.get(index)) : { text: lines[index], omitted: false };
+    const shown = query.annotate && !state.artifact ? excerpt(lines[index], positions.get(index)) : { text: lines[index], omitted: false };
     if (shown.omitted) {
       result.selectionComplete = false;
       if (!result.status.includes("long lines excerpted; narrow the query or use annotate:false")) result.status.push("long lines excerpted; narrow the query or use annotate:false");

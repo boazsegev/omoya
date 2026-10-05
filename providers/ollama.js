@@ -20,9 +20,9 @@
  *   tool result  -> {role:"tool", name, content} — name resolved from
  *                   the message's `name`, else the matching toolCall block
  *   image and generic binary blocks ride Ollama's sole documented `images`
- *   channel (base64) on user and tool-result messages. The selected local
- *   model decides which binary formats it can consume; Ollama exposes no
- *   separate generic-file field in /api/chat.
+ *   channel (base64) on user messages; tool-result attachments follow all
+ *   tool messages in a labeled user message. Ollama exposes no generic-file
+ *   field in /api/chat.
  * Tools: Env catalog entries -> {type:"function", function:{name,
  * description, parameters}}; omitted when the catalog is empty.
  *
@@ -62,7 +62,7 @@ function context2msg(context, aiio) {
 
   const body = {
     model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1),
-    messages: context.map((msg, i) => toOllamaMessage(msg, context, i)),
+    messages: ollamaMessages(context),
     stream: true,
   };
   // Thinking control: `think` is already the native mode (IO maps the
@@ -85,6 +85,25 @@ function context2msg(context, aiio) {
   return [headers, body];
 }
 
+function ollamaMessages(context) {
+  const messages = [];
+  const followups = [];
+  const flush = () => {
+    for (const [msg, index] of followups) {
+      const attachments = (msg.content ?? []).filter((b) => b?.type === ContentType.Image || b?.type === ContentType.Binary);
+      messages.push(withAttachments({ role: "user", content: `Image or file from ${msg.name ?? toolNameFor(msg.callId, context, index) ?? "tool"} (${msg.callId ?? "unknown call"}):` }, { content: attachments }));
+    }
+    followups.length = 0;
+  };
+  for (const [i, msg] of context.entries()) {
+    if (msg.type !== MessageType.ToolResult) flush();
+    messages.push(toOllamaMessage(msg, context, i));
+    if (msg.type === MessageType.ToolResult && (msg.content ?? []).some((b) => b?.type === ContentType.Image || b?.type === ContentType.Binary)) followups.push([msg, i]);
+  }
+  flush();
+  return messages;
+}
+
 function toOllamaMessage(msg, context, i) {
   switch (msg.type) {
     case MessageType.System:
@@ -102,11 +121,11 @@ function toOllamaMessage(msg, context, i) {
       return out;
     }
     case MessageType.ToolResult:
-      return withAttachments({
+      return {
         role: "tool",
         name: msg.name ?? toolNameFor(msg.callId, context, i),
         content: textOf(msg),
-      }, msg);
+      };
     default:
       // tolerant reader: unknown message types degrade to user text
       return withAttachments({ role: "user", content: textOf(msg) }, msg);
@@ -282,14 +301,12 @@ async function models({ url = DEFAULT_URL, signal } = {}) {
     if (typeof m?.name !== "string" || m.name === "") continue;
     map[m.name] = {
       label: m.name,
-      input: ["text"],
       ...(Number.isFinite(m.details?.context_length) ? { contextWindow: m.details.context_length } : {}),
       ...(Number.isFinite(m.size) ? { size: m.size } : {}),
       ...(typeof m.details?.family === "string" ? { family: m.details.family } : {}),
     };
   }
   await Promise.all(Object.keys(map).map(async (name) => {
-    if (map[name].contextWindow !== undefined) return;
     try {
       const show = await fetch(`${url}/api/show`, {
         method: "POST",
@@ -298,7 +315,9 @@ async function models({ url = DEFAULT_URL, signal } = {}) {
         signal,
       });
       if (!show.ok) return;
-      const info = (await show.json()).model_info ?? {};
+      const data = await show.json();
+      if (Array.isArray(data.capabilities)) map[name].input = data.capabilities.includes("vision") ? ["text", "image"] : ["text"];
+      const info = data.model_info ?? {};
       const key = Object.keys(info).find((k) => k.endsWith(".context_length"));
       if (key && Number.isFinite(info[key]) && info[key] > 0) {
         map[name].contextWindow = info[key];

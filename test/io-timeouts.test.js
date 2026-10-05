@@ -58,6 +58,7 @@ describe("IO timeouts: the three-timeout model", () => {
   });
 
   test("endpoint settings carry timeouts", () => {
+    env.close();
     const configured = new Env({ dir, cwd: dir, settings: {
       providers: { fake: { provider: "fake", url: "http://fake", stuckTimeout: "45s", timeout: "2h" } },
     } });

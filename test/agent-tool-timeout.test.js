@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 // test/agent-tool-timeout.test.js — proof that tool timeouts belong to
 // Agent: Env supplies default/limit, schema-declared timeout is
 // extracted and capped, in-process calls are bounded, and onTimeout is
@@ -29,9 +30,9 @@ function register(env, name, fn, { onTimeout } = {}) {
 
 describe("Agent-owned tool timeout policy", () => {
   test("each Agent resolves duration-parsed tool timeouts once, when created; the callback grace is fixed", () => {
-    const defaults = new Agent({ env: new Env({ settingsDir: null, settings: {} }) });
+    const defaults = new Agent({ env: new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} }) });
     expect(defaults.policy.tools).toMatchObject({ timeout: 120_000, timeoutLimit: 1_200_000 });
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: "3s", timeoutLimit: "7m" } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: "3s", timeoutLimit: "7m" } } });
     const agent = new Agent({ env });
     expect(agent.policy.tools).toMatchObject({ timeout: 3000, timeoutLimit: 420_000 });
     env.settings.tools.timeout = "9s"; // a later settings edit applies to the NEXT Agent
@@ -42,7 +43,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("tools receive the actual resolved deadline including per-call overrides", async () => {
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: "30s", timeoutLimit: "40s" } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: "30s", timeoutLimit: "40s" } } });
     register(env, "deadline", (_args, context) => context.deadline);
     const agent = new Agent({ env });
     for (const [args, duration] of [[{}, 30_000], [{ timeout: 5_000 }, 5_000], [{ timeout: 90_000 }, 40_000]]) {
@@ -54,7 +55,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("a declared timeout is extracted, capped, and onTimeout may return the final result", async () => {
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: 100, timeoutLimit: 35 } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 100, timeoutLimit: 35 } } });
     let invokedArgs;
     let timeoutContext;
     register(env, "timed-final", async (args) => {
@@ -81,7 +82,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("cleanup-only onTimeout keeps the ordinary timeout error", async () => {
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: 25, timeoutLimit: 100 } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 25, timeoutLimit: 100 } } });
     let cleaned = 0;
     register(env, "timed-cleanup", () => new Promise(() => {}), {
       onTimeout: () => { cleaned++; },
@@ -96,7 +97,7 @@ describe("Agent-owned tool timeout policy", () => {
     // The interactive 5-minute first window (prepareToolTimeout's
     // question-capable fallback) must never extend a call past
     // toolTimeoutLimit: a tight limit caps the boost too.
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: 50, timeoutLimit: 150 } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 50, timeoutLimit: 150 } } });
     register(env, "asking", () => new Promise(() => {})); // never settles
     const agent = new Agent({
       env, context: [],
@@ -108,7 +109,7 @@ describe("Agent-owned tool timeout policy", () => {
     expect(textOf(outcome)).toContain('tool "asking" timed out after 150ms');
 
     // Room under the limit: the full 5-minute first window applies.
-    const roomy = new Env({ settingsDir: null, settings: { tools: { timeout: 50 } } });
+    const roomy = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 50 } } });
     register(roomy, "asking-roomy", () => new Promise(() => {}));
     const roomyAgent = new Agent({ env: roomy, context: [], question: { ask: async () => null } });
     const prepared = (await import("../lib/agent/tool-timeout.js")).prepareToolTimeout(
@@ -117,7 +118,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("clears the ordinary deadline after a fast tool settles", async () => {
-    const env = new Env({ settingsDir: null, settings: { tools: { timeout: 100_000 } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 100_000 } } });
     const agent = new Agent({ env, context: [] });
     let cleared = 0;
     const outcome = await runWithToolTimeout({
@@ -129,7 +130,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("onTimeout is validated and stripped from the provider catalog", () => {
-    const env = new Env({ settingsDir: null, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} });
     const hook = () => "done";
     register(env, "private-timeout-hook", () => "ok", { onTimeout: hook });
     expect(toolEntry(env, "private-timeout-hook").onTimeout).toBe(hook);

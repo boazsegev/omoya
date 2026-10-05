@@ -47,6 +47,7 @@ describe("loginEndpoint", () => {
     expect(existsSync(join(dir, "settings.json"))).toBe(false);
     // and the auth file AUTO-CATALOGS the endpoint: a fresh environment
     // lists it without any settings.providers entry
+    env.close();
     const fresh = new Env({ dir, cwd });
     // endpoint() is the effective CONNECTION view: credentials stay on
     // the settings view, never in connection policy
@@ -65,6 +66,7 @@ describe("loginEndpoint", () => {
     const auth = JSON.parse(readFileSync(join(cwd, projectAuth("local-wire")), "utf8"))["local-wire"];
     expect(auth).toMatchObject({ provider: "wire", url: "http://localhost:9999", auth: { token: "local" } });
     expect(existsSync(join(cwd, NAMES.projectSettings))).toBe(false); // a login never writes providers settings
+    env.close();
     const fresh = new Env({ dir, cwd });
     expect(endpointOf(fresh, "local-wire")).toEqual({ provider: "wire", url: "http://localhost:9999" });
     expect(settingsOf(fresh, "local-wire").auth.token).toBe("local");

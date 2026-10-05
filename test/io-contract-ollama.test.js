@@ -44,7 +44,7 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("Env scan-load registers ollama from the package providers dir", async () => {
-    const pkgEnv = new Env({ dir: PACKAGE_ROOT });
+    const pkgEnv = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: PACKAGE_ROOT });
     const names = await providersLoad(pkgEnv);
     expect(names).toContain("ollama");
     const Ollama = providerOf(pkgEnv, "ollama");

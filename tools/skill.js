@@ -34,9 +34,8 @@ function activation(env, names, context) {
  */
 export async function skill({ names } = {}, context) {
   const list = normalizeSkillNames(names);
-  const env = context?.env ?? new Env();
-  try { return activation(env, list, context); }
-  finally { if (!context?.env) env.close(); }
+  // Without an Agent's Env, the root folder's Env answers (Env.use).
+  return context?.env ? activation(context.env, list, context) : Env.use("/", (env) => activation(env, list, context));
 }
 
 export function toolDescription() {

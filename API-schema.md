@@ -25,6 +25,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
       "timeout": "number",
     },
   },
+  "projects": {},
   "prompts": "string | string[]",
   "providerPaths": "string | string[]",
   "providers": {
@@ -211,6 +212,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 - PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow) — `lib/env/tool-registry.js`
 - PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx) — `tools/read.js`
 - PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed) — `tools/write.js`
+- PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop) — `tools/process.js`
 - PUBLISHES — Agent's current filtered model-facing descriptors — `lib/agent.js`
 - REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them — `lib/agent/tool-context.js`
 - REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx) — `lib/agent/tool-exec.js`
@@ -293,6 +295,7 @@ Source: `tools/bash.js`; flags: sandbox
 
 ```schema
 {
+  "background?": "boolean",
   "command": "string",
   "env?": "object",
   "timeout?": "integer",
@@ -364,6 +367,20 @@ Source: `tools/note.js`; flags: safe
 }
 ```
 
+List, read buffered output from, or stop this Agent's background Bash processes. Stop is unavailable in safe mode.
+
+Source: `tools/process.js`; flags: safe
+
+### `Env.toolDescription.process.inputSchema`
+
+```schema
+{
+  "action": ["list", "output", "stop"],
+  "from?": "integer",
+  "id?": "string",
+}
+```
+
 Ask the user to resolve a decision or provide missing information. Send 1–4 clear questions with distinct options; users can also give custom answers.
 
 Source: `tools/question.js`; flags: safe, sandbox
@@ -398,7 +415,7 @@ Source: `tools/question.js`; flags: safe, sandbox
 }
 ```
 
-Read project files, list folders, or search their contents. Use ranges for excerpts, glob/exclude to filter files, and search for literal text or regex matches. Set recursive for subfolders. Check skip and incomplete-result notices before assuming coverage.
+Read files, list folders, or search contents. Heed skip and incomplete notices before assuming full coverage.
 
 Source: `tools/read.js`; flags: safe
 
@@ -417,8 +434,8 @@ Source: `tools/read.js`; flags: safe
     "from?": "integer",
     "to?": "integer",
   },
-  "exclude?": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}.",
-  "glob?": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames.",
+  "exclude?": "Skip files or subtrees matching a glob string or array; overrides glob.",
+  "glob?": "Only files matching a glob string or array, e.g. *.md, src/**/*.js, {a,b}. Slashless patterns match filenames.",
   "ignore?": "boolean",
   "info?": "boolean",
   "limit?": "integer",
@@ -438,6 +455,7 @@ Source: `tools/read.js`; flags: safe
     "regex?": "string",
     "text?": "string",
   },
+  "target?": "string",
 }
 ```
 
@@ -455,7 +473,7 @@ Source: `tools/skill.js`; flags: safe
 }
 ```
 
-Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new project file. In read-only mode, omit target.
+Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new file inside the Agent folder. Saving is available only if `write` is available.
 
 Source: `tools/skill-resource.js`; flags: safe, trusted
 
@@ -508,7 +526,7 @@ Source: `tools/worker-close.js`; flags: trusted
 }
 ```
 
-Create named workers and send the same self-contained first prompt to each. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
 
 Source: `tools/worker-create.js`; flags: trusted
 
@@ -516,14 +534,14 @@ Source: `tools/worker-create.js`; flags: trusted
 
 ```schema
 {
-  "prompt": "string",
+  "prompt?": "string",
   "workers": {
     "array": {
       "description?": "string",
       "model?": "string",
       "name": "string",
       "safe?": "boolean",
-      "subfolder?": "Existing subfolder path relative to the project root; restrict the worker's working folder and sandbox to it. Omit or use \"\", \".\", \"/\", \"./\", false, or null for the project root (\"/\" never means the filesystem root). Other absolute paths, parent traversal, and symlinks outside the project are forbidden.",
+      "subfolder?": "Existing project subfolder inside the leader folder; sets the worker write root. Reads may still access the project. Omit or use \"\", \".\", \"/\", \"./\", false, or null to inherit the leader folder (\"/\" never means the filesystem root). Absolute paths, parent traversal, and escaping symlinks are forbidden.",
       "thinking?": ["none", "low", "medium", "high", "xhigh", "max"],
     },
   },
@@ -545,7 +563,7 @@ Source: `tools/worker-message.js`; flags: trusted
 }
 ```
 
-Shows workers grouped by busy/idle and available models. Omit flags for both; request a specific section with workers or models.
+Shows workers grouped by busy/idle, available models, and the commands a worker accepts at the start of a message (/compact, /<prompt>). Omit flags for all; request sections with workers, models, or commands.
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -553,12 +571,13 @@ Source: `tools/worker-status.js`; flags: safe, trusted
 
 ```schema
 {
+  "commands?": "boolean",
   "models?": "boolean",
   "workers?": "boolean",
 }
 ```
 
-Create or overwrite a project file. Supply content for text, or source to copy a file or save a listing or search result; never both. Use edit for targeted changes. Incomplete source results leave the destination unchanged.
+Create or overwrite a text file in the Agent folder. Use edit for targeted changes; use read with target to copy files or save read results.
 
 Source: `tools/write.js`; flags: trusted
 
@@ -567,42 +586,8 @@ Source: `tools/write.js`; flags: trusted
 ```schema
 {
   "ask?": "boolean",
-  "content?": "string",
+  "content": "string",
   "path": "string",
-  "source?": {
-    "annotate?": "boolean",
-    "base64?": "boolean",
-    "binary?": "boolean",
-    "bytes?": {
-      "from?": "integer",
-      "to?": "integer",
-    },
-    "characters?": {
-      "from?": "integer",
-      "to?": "integer",
-    },
-    "exclude?": "Exclude files or subtrees matching a glob or any glob in an array; overrides glob. Supports *, ?, ** and {a,b}.",
-    "glob?": "Include files matching a glob or any glob in an array, e.g. *.md or src/**/*.js. Slashless patterns match filenames.",
-    "ignore?": "boolean",
-    "info?": "boolean",
-    "limit?": "integer",
-    "lines?": {
-      "from?": "integer",
-      "last?": "integer",
-      "to?": "integer",
-    },
-    "offset?": "integer",
-    "path": "string",
-    "recursive?": "boolean",
-    "search?": {
-      "after?": "integer",
-      "before?": "integer",
-      "ignoreCase?": "boolean",
-      "invert?": "boolean",
-      "regex?": "string",
-      "text?": "string",
-    },
-  },
 }
 ```
 
@@ -621,6 +606,11 @@ export const TOOL_TIMEOUT_DEFAULT: unknown;
 
 ```ts
 export class Agent {
+  backgroundList: () => unknown;
+  backgroundOutput: (id: unknown, from: unknown) => unknown;
+  backgroundStart: (options: unknown) => unknown;
+  backgroundStop: (id: unknown) => unknown;
+  backgroundStopAll: () => unknown;
   get busy(): unknown;
   cancel: () => unknown;
   childCreate: (options?: object) => Agent;
@@ -634,7 +624,7 @@ export class Agent {
   static Context: unknown;
   contextFork: (id: string|false) => {id: string, file: string, save: boolean};
   contextNew: (id: string|false) => {id: string, file: string, save: boolean};
-  contextResume: (id: string) => {id: string, file: string, cwd: string|undefined, originMissing: boolean};
+  contextResume: (id: string) => {id: string, file: string};
   get contextUsage(): {used: number, total: number|null, approximate: boolean};
   get description(): unknown;
   set description(value: string);
@@ -714,6 +704,8 @@ export const armCancelSignals: (options?: Object) => () => void;
 export const close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
 export const completeOAuthPaste: (input: string) => boolean;
 export const defaultUrl: (provider: string) => string;
+export const endpointPolicies: (env: object) => Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>;
+export const endpointPolicySet: (env: object, selector: string, change: unknown) => void;
 export const execute: (command: unknown) => unknown;
 export const EXIT: unknown;
 export const exitCodeFor: (terminal: unknown) => number;
@@ -736,6 +728,7 @@ export const resolveCliToolArgs: (argv: string[], entry: unknown) => object;
 export const resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
 export const resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
 export const runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
+export const runMcpLogin: (env: object, name: string, { input?: unknown, output?: unknown) => Promise<{name: string}>;
 export const runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
 export const selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
 export const tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
@@ -753,6 +746,8 @@ export class CLI {
   static close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
   static completeOAuthPaste: (input: string) => boolean;
   static defaultUrl: (provider: string) => string;
+  static endpointPolicies: (env: object) => Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>;
+  static endpointPolicySet: (env: object, selector: string, change: unknown) => void;
   static execute: (command: unknown) => unknown;
   static EXIT: unknown;
   static exitCodeFor: (terminal: unknown) => number;
@@ -775,6 +770,7 @@ export class CLI {
   static resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
   static resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
   static runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
+  static runMcpLogin: (env: object, name: string, { input?: unknown, output?: unknown) => Promise<{name: string}>;
   static runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
   static selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
   static tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
@@ -921,23 +917,32 @@ export class Context {
 
 ```ts
 export class Env {
+  _attachHooks: (agent: unknown) => unknown;
+  _detachHooks: (agent: unknown) => unknown;
+  _hooksRefresh: () => unknown;
   agentAdd: (agent: object) => object;
   agentCreate: (options?: object) => object;
   agentRemove: (agent: object) => boolean;
   agents: () => object[];
   close: () => unknown;
+  get closed(): boolean;
   connection: (selector: string, { remember?: unknown) => object;
   constructor(options?: Object);
   static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
-  cwd: string;
+  get cwd(): string;
+  static get envs(): Readonly<Object<string, Env>>;
   static EVENT: unknown;
   static extend: (plugin: unknown) => {EVENT: Object<string, symbol>, emit: (env: object, event: symbol, payload: object) => void};
   get folders(): ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}>;
   login: (name: string, config: unknown, options: unknown) => Promise<{name: string, endpoint: object, auth: object|undefined, scope: string|undefined, verified: *}>;
   loginPresets: () => object[];
   logout: (name: string) => {name: string, dynamic: boolean};
+  mcpLogin: (name: string, options: unknown) => Promise<{name: string}>;
+  mcpPaste: (input: string) => boolean;
+  mcpStatus: () => Array<{name: string, state: string}>;
   models: (secret?: boolean) => Map<string, object>;
   get modelsReady(): Promise<void>;
+  get name(): string;
   offEvent: (handle: number) => boolean;
   onEvent: (event: symbol, callback: (payload: object) => void) => number;
   prompts: () => Map<string, {name: string, description: string, file: string, source: string, body: string}>;
@@ -949,6 +954,7 @@ export class Env {
   toolAdd: (name: string, fn: Function, schema: object, { builtin?: unknown, file }?: unknown) => Function;
   toolCall: (name: string, args: object, context: object) => Promise<*>;
   tools: (safe?: boolean, selector: string) => Promise<Map<string, object>>;
+  static use: (cwd: string, fn: (env: Env) => T|Promise<T>) => Promise<T>;
 }
 ```
 
@@ -1241,6 +1247,11 @@ export class Markdown {
 
 ```ts
 export class Sandbox {
+  static backgroundList: (agent: unknown) => unknown;
+  static backgroundOutput: (agent: unknown, id: unknown, from: unknown) => unknown;
+  static backgroundStart: (agent: unknown, options: unknown) => unknown;
+  static backgroundStop: (agent: unknown, id: unknown) => unknown;
+  static backgroundStopAll: (agent: unknown) => unknown;
   static osAvailable: () => boolean;
   static osKind: () => "seatbelt"|"bwrap"|"delegated"|null;
   static osWrap: (file: string, args: string[], cwd: string, workingDirectory: string) => [string, string[]];

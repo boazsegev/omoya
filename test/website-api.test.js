@@ -3,6 +3,17 @@ import { collect } from "./api-reference.js";
 import { apiPages } from "../website/lib/api.js";
 import { homePage } from "../website/lib/home.js";
 import { settingsSchemaValues } from "./api-schema.js";
+import { readFileSync } from "node:fs";
+
+const CLIENT_DOCUMENT = "https://omoya.ai/oauth/client.json";
+test("hosted MCP client metadata matches its client ID and fixed loopback redirect", () => {
+  const metadata = JSON.parse(readFileSync(new URL("../website/static/oauth/client.json", import.meta.url), "utf8"));
+  expect(metadata.client_id).toBe(CLIENT_DOCUMENT);
+  expect(metadata.client_name).toBe("Omoya MCP Client");
+  expect(metadata.redirect_uris).toEqual(["http://localhost:8765/oauth/callback"]);
+  expect(metadata.grant_types).toContain("authorization_code");
+  expect(metadata.token_endpoint_auth_method).toBe("none");
+});
 
 test("architecture environment detection links to the public startup API", async () => {
   const pages = apiPages(await collect());

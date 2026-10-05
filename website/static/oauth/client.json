@@ -1,0 +1,9 @@
+{
+  "client_id": "https://omoya.ai/oauth/client.json",
+  "client_name": "Omoya MCP Client",
+  "client_uri": "https://omoya.ai/",
+  "redirect_uris": ["http://localhost:8765/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}

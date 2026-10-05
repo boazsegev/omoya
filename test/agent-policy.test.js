@@ -49,7 +49,7 @@ describe("agentPolicy(settings)", () => {
 
 describe("agent.policy", () => {
   test("is read from env.settings when the Agent is created and kept for its lifetime", () => {
-    const env = new Env({ settingsDir: null, settings: { context: { cap: 0.7 }, retry: { attempts: 1 } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { context: { cap: 0.7 }, retry: { attempts: 1 } } });
     const agent = new Agent({ env });
     expect(agent.policy.context.cap).toBe(0.7);
     expect(agent.policy.retry.attempts).toBe(1);
@@ -62,7 +62,7 @@ describe("agent.policy", () => {
   });
 
   test("the policy keys are Agent's settings schema entries; Env publishes no policy getters", () => {
-    const env = new Env({ settingsDir: null, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} });
     expect(env.settingsSchema().context.default).toEqual({ cap: 0.9, turn: 0.4, autocompact: 0 }); // a number: 0 = never
     expect(env.settingsSchema().retry.default).toEqual({ attempts: 3, base: 2_000, max: 30_000 });
     for (const gone of ["contextGuardCap", "contextGuardTurnCap", "maxAttempts", "retryDelay", "toolTimeout", "toolTimeoutLimit"]) {

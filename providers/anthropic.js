@@ -49,6 +49,7 @@ const { MessageType, ContentType, mimeOf, contentIndexer } = Context;
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1";
 const API_VERSION = "2023-06-01";
+const IMAGE_MIMETYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const REGISTRY_URL = "https://models.dev/api.json";
 /** A week: how long a registry snapshot stays fresh (process memory). */
 const REGISTRY_TTL = 7 * 24 * 3600 * 1000;
@@ -145,7 +146,7 @@ function context2msg(context, aiio = this.aiio) {
     .join("\n\n");
   if (system) body.system = system;
   for (const message of context) {
-    const wire = toMessage(message);
+    const wire = toMessage(message, aiio);
     if (!wire) continue;
     const last = body.messages[body.messages.length - 1];
     if (last && last.role === wire.role) last.content.push(...wire.content);
@@ -211,10 +212,14 @@ function thinkingOptions(think) {
 }
 
 /** One context message -> one wire message (nil when nothing to send). */
-function toMessage(message) {
+function toMessage(message, aiio) {
   if (message?.type === MessageType.System) return null;
   if (message?.type === MessageType.ToolResult) {
-    const block = { type: "tool_result", tool_use_id: message.callId, content: textOf(message) };
+    const blocks = message.content ?? [];
+    const nested = toMessage({ type: MessageType.User, content: blocks })?.content ?? [];
+    const content = nested.every((part) => part.type === "text")
+      ? textOf({ content: blocks }) : nested;
+    const block = { type: "tool_result", tool_use_id: message.callId, content };
     if (message.isError === true || message.error === true) block.is_error = true;
     return { role: "user", content: [block] };
   }
@@ -250,9 +255,13 @@ function toMessage(message) {
     } else if (block?.type === ContentType.Image ||
         (block?.type === ContentType.Binary && String(mimeOf(block) ?? "").startsWith("image/"))) {
       if (typeof block.content !== "string" || block.content === "") continue;
+      const mimetype = mimeOf(block) ?? "image/png";
+      if (!IMAGE_MIMETYPES.has(mimetype)) throw Object.assign(new Error(
+        `Claude cannot accept ${mimetype} images; convert the image to JPEG, PNG, GIF, or WebP first`,
+      ), { kind: "provider" });
       content.push({
         type: "image",
-        source: { type: "base64", media_type: mimeOf(block) ?? "image/png", data: block.content },
+        source: { type: "base64", media_type: mimetype, data: block.content },
       });
     } else if (block?.type === ContentType.Binary && typeof block.content === "string" && block.content !== "") {
       const mimetype = mimeOf(block);

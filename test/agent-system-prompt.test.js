@@ -115,7 +115,7 @@ describe("Agent: construction-time system-prompt seeding", () => {
 
   test("a resumed session (resume: true) keeps its stored context — no seeding", async () => {
     const env = envWith({ sessions: resolve(ROOT),  system: "be terse" });
-    const store = new Context({ id: "s1", dir: ROOT });
+    const store = new Context({ id: "s1", dir: ROOT, origin: env.cwd });
     store.append(USER("earlier"));
     store.flush();
     store.close();
@@ -129,7 +129,7 @@ describe("Agent: construction-time system-prompt seeding", () => {
 
   test("contextResume() replaces the seeded context with the stored one", async () => {
     const env = envWith({ sessions: resolve(ROOT),  system: "be terse" });
-    const store = new Context({ id: "s2", dir: ROOT });
+    const store = new Context({ id: "s2", dir: ROOT, origin: env.cwd });
     store.append(USER("earlier"));
     store.flush();
     store.close();

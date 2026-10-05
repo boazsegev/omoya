@@ -132,7 +132,7 @@ describe("TUI status toolbar", () => {
     await tick();
     expect(statusLine(memory)).toContain("◎ p   ◇ m   ✦ Think: auto"); // endpoint left of model
     expect(statusLine(memory)).toContain("✦ Think: auto");
-    expect(statusLine(memory)).toContain("🔓 Read/write");
+    expect(statusLine(memory)).toContain("🔓 Read/Write");
     expect(statusLine(memory)).toContain("📝 No-log"); // the harness agent is anonymous
     expect(hintLine(memory)).toContain("↓ settings");
     ui.stop();

@@ -28,6 +28,6 @@ Require each handoff to identify changed artifacts and the version checked; chec
 3. Return findings to the owner, review repairs, and rerun affected checks. After two failed repair rounds, ask before changing the plan or acceptance criteria.
 4. Accept only when required checks pass on the final combined result and no blocking finding remains.
 
-Close workers after their units are accepted or abandoned. Report acceptance status, outcomes, evidence, check omissions, assumptions, and remaining risks or blockers. If incomplete, state the exact next action.
+Close workers only after their units are accepted or abandoned, not when pausing for user review. Report acceptance status, outcomes, evidence, check omissions, assumptions, and remaining risks or blockers. If incomplete, state the exact next action.
 
 ## Task / Task Ledger

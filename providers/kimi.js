@@ -13,8 +13,9 @@
  *                  then GET /files/{id}/content and fold the extracted
  *                  text into the message as a text part — Moonshot's
  *                  chat API has no file/file_id content part at all)
- *   assistant    -> {role:"assistant", content, tool_calls?} — call
- *                  arguments are always the JSON STRING
+ *   assistant    -> {role:"assistant", content, reasoning_content?,
+ *                  tool_calls?} — thinking text returns as
+ *                  reasoning_content; call arguments are always the JSON STRING
  *   tool result  -> {role:"tool", tool_call_id, content}
  * Tools: {type:"function", function:{name, description, parameters}};
  * stream_options.include_usage asks for the trailing usage chunk.
@@ -55,6 +56,7 @@ const ONE_SHOT = { connection: "close" };
  */
 const BAD_CREDENTIAL_403 = /invalid[_ ]?api[_ ]?key|unauthorized|authentication/i;
 
+const IMAGE_MIMETYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/heic", "image/heif"]);
 const KIMI_URL = "https://api.moonshot.ai/v1";
 const KIMI_CN_URL = "https://api.moonshot.cn/v1";
 const KIMI_CODING_URL = "https://api.kimi.com/coding/v1";
@@ -138,6 +140,7 @@ function contextMessages(context) {
   for (let i = 0; i < context.length; i++) {
     const message = context[i];
     out.push(...toMessages(message));
+    if (message?.type === MessageType.ToolResult) out.push(...toolResultFollowup(message));
     if (message?.type !== MessageType.Assistant ||
         !(message.content ?? []).some((block) => block?.type === ContentType.ToolCall)) continue;
 
@@ -154,6 +157,7 @@ function contextMessages(context) {
       else payloads.push(next);
     }
     for (const result of results) out.push(...toMessages(result));
+    for (const result of results) out.push(...toolResultFollowup(result));
     for (const payload of payloads) out.push(...toMessages(payload));
     i = j - 1;
   }
@@ -169,6 +173,11 @@ function toMessages(message) {
   }
   if (message?.type === MessageType.Assistant) {
     const out = { role: "assistant", content: textOf(message) || null };
+    // Thinking models (K3, kimi-k2.7-code, kimi-k2.6 with keep) expect the
+    // assistant message back as-is, reasoning_content included; dropping it
+    // breaks Preserved Thinking inside tool loops.
+    const reasoning = thinkingOf(message);
+    if (reasoning) out.reasoning_content = reasoning;
     const calls = (message.content ?? []).filter((b) => b?.type === ContentType.ToolCall);
     if (calls.length > 0) {
       out.tool_calls = calls.map((b) => ({
@@ -194,9 +203,12 @@ function toMessages(message) {
     } else if ((block?.type === ContentType.Image ||
         (block?.type === ContentType.Binary && String(mimetype ?? "").startsWith("image/"))) &&
         typeof block.content === "string" && block.content !== "") {
+      const imageMime = mimetype ?? "image/png";
+      if (!IMAGE_MIMETYPES.has(imageMime)) throw failure("provider",
+        `Kimi cannot accept ${imageMime} images; convert the image to JPEG, PNG, GIF, WebP, BMP, HEIC, or HEIF first`);
       content.push({
         type: "image_url",
-        image_url: { url: `data:${mimetype ?? "image/png"};base64,${block.content}` },
+        image_url: { url: `data:${imageMime};base64,${block.content}` },
       });
     } else if (block?.type === ContentType.Binary && typeof block.content === "string" && block.content !== "") {
       content.push({
@@ -210,6 +222,14 @@ function toMessages(message) {
     }
   }
   return [{ role: "user", content: content.length === 1 && content[0].type === "text" ? content[0].text : content }];
+}
+
+// Chat tool messages carry text; image parts belong to the following user turn.
+function toolResultFollowup(result) {
+  const attachments = (result.content ?? []).filter((b) => b?.type === ContentType.Image || b?.type === ContentType.Binary);
+  if (!attachments.length) return [];
+  const label = `Image or file from ${result.name ?? "tool"} (${result.callId ?? "unknown call"}):`;
+  return toMessages({ type: MessageType.User, content: [{ type: ContentType.Text, text: label }, ...attachments] });
 }
 
 function filenameOf(block, mimetype) {
@@ -318,6 +338,13 @@ async function fetchExtractedContent(connection, headers, fileId) {
   });
   if (!response.ok) throw await statusError(response);
   return response.text();
+}
+
+function thinkingOf(message) {
+  return (message?.content ?? [])
+    .filter((block) => block?.type === ContentType.Thinking && !block.redacted)
+    .map((block) => block.text ?? "")
+    .join("");
 }
 
 function textOf(message) {

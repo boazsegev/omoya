@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mcpConnect } from "../lib/env/mcp-client.js";
-import { once } from "node:events";
+import { resolve } from "node:path";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, TOOLCALL, TEXT } from "./fakes.js";
 import { toolsLoad } from "./env-internals.js";
@@ -117,30 +116,25 @@ describe("dispatch-owned cancellation", () => {
     } finally { child?.kill("SIGKILL"); await agent.cancel(); await run; agent.close(); }
   });
 
-  test("cancel after a pooled MCP handshake but before the next RPC still closes its server", async () => {
+  test("cancel after a pooled handshake leaves the server available", async () => {
     const server = `cancel-gap-${process.pid}`;
     const env = await testEnv({ mcp: { [server]: { command: process.execPath,
-      args: ["./test/fixtures/mcp-server.js"], safe: true } } });
-    let conn;
-    let invoked = false;
-    register(env, async (_args, context) => {
-      const { childEnv } = await import("../lib/util.js");
-      conn = await mcpConnect(env._mcpPool, server, { ...env.settings.mcp[server],
-        env: childEnv(env.settings) }, context);
-      await new Promise((resolve) => {
-        invoked = true;
-        context.signal.addEventListener("abort", resolve, { once: true });
-      });
-    });
+      args: [resolve("./test/fixtures/mcp-server.js")], safe: true } } });
+    await toolsLoad(env, { dirs: ["./tools"] });
+    await env.toolCall("mcp", { action: "tools", server });
+    const conn = env._mcpServers.entries.get(server).client.transport;
+    register(env, async (_args, context) => new Promise((resolve) => {
+      context.signal.addEventListener("abort", resolve, { once: true });
+    }));
     const { agent } = createAgent(env, TOOLCALL(0, "c1", "pending", {}));
     const run = agent.run();
     try {
-      for (let attempts = 0; attempts < 100 && !invoked; attempts++) await Bun.sleep(5);
-      expect(invoked).toBe(true);
+      await Bun.sleep(20);
       await bounded(agent.cancel());
       expect(await bounded(run)).toMatchObject({ kind: "cancelled" });
-      expect(isAlive(conn.child.pid)).toBe(false);
-    } finally { conn?.child?.kill("SIGKILL"); await agent.cancel(); await run; agent.close(); }
+      expect(conn.closed).toBe(false);
+      expect(await env.toolCall("mcp", { action: "call", server, tool: "echo", arguments: { text: "alive" } })).toBe("alive");
+    } finally { await agent.cancel(); await run; agent.close(); }
   });
 
   test("onTimeout's final answer still closes running processes at dispatch teardown", async () => {
@@ -159,8 +153,7 @@ describe("dispatch-owned cancellation", () => {
   });
 
   test("one cancel kills Bash and its command descendants, not just the worker", async () => {
-    const env = await testEnv();
-    env.cwd = process.cwd(); // the worker needs an existing absolute working directory
+    const env = await testEnv({}, { cwd: process.cwd() }); // the worker needs an existing working directory
     await toolsLoad(env, { dirs: ["./tools"] });
     const ready = deferred();
     const pids = [];
@@ -180,36 +173,36 @@ describe("dispatch-owned cancellation", () => {
   }, 10000);
 
   for (const phase of ["initialize", "tools/list", "tools/call"]) {
-    test(`cancel tears down an MCP process and pending RPC during ${phase}`, async () => {
+    test(`cancel only the pending MCP RPC during ${phase}`, async () => {
       const server = `cancel-${phase}`;
       const env = await testEnv({ mcp: { [server]: { command: process.execPath,
-        args: ["./test/fixtures/mcp-cancel-server.js", phase], safe: true } } });
+        args: [resolve("./test/fixtures/mcp-cancel-server.js"), phase], safe: true } } });
       await toolsLoad(env, { dirs: ["./tools"] });
       const ready = deferred();
+      const cancelled = deferred();
       let conn;
       const args = phase === "tools/call" ? { action: "call", server, tool: "hang" } : { action: "tools", server };
       const { agent } = createAgent(env, TOOLCALL(0, "c1", "mcp", args));
-      // Attach to the real process through the protocol pool at the spawn boundary.
       const run = agent.run();
       try {
         for (let attempt = 0; attempt < 100 && !conn; attempt++) {
-          conn = [...env._mcpPool.values()].find((entry) => entry.name === server && !entry.closed);
+          conn = env._mcpServers.entries.get(server)?.client?.transport;
           if (!conn) await Bun.sleep(5);
         }
         expect(conn).toBeDefined();
-        conn.child.stderr.on("data", (chunk) => { if (String(chunk).includes("pending:")) ready.resolve(); });
+        conn.child.stderr.on("data", (chunk) => {
+          if (String(chunk).includes("pending:")) ready.resolve();
+          if (String(chunk).includes("cancelled:")) cancelled.resolve();
+        });
         await bounded(ready.promise, 3000);
-        const closed = once(conn.child, "close");
         await bounded(agent.cancel());
         expect(await bounded(run)).toMatchObject({ kind: "cancelled" });
-        await bounded(closed, 500);
-        expect(isAlive(conn.child.pid)).toBe(false);
+        await bounded(cancelled.promise, 1000);
+        expect(conn.closed).toBe(false);
         expect(conn.pending.size).toBe(0);
-      } finally {
-        conn?.child?.kill("SIGKILL");
-        await agent.cancel(); await run; agent.close();
-        for (const [key, value] of env._mcpPool) if (value === conn) env._mcpPool.delete(key);
-      }
+        expect(isAlive(conn.child.pid)).toBe(true);
+        expect(await env.toolCall("mcp", { action: "call", server, tool: "echo", arguments: { text: "alive" } })).toBe("alive");
+      } finally { await agent.cancel(); await run; agent.close(); }
     }, 10000);
   }
 });

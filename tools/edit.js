@@ -10,8 +10,8 @@
  *
  * Hardened by the GLOBAL path-traversal policy: the path argument
  * passes the DETERMINISTIC resolver (tools/guard/resolve.js —
- * normalized against the working folder, refused on a leading `..`
- * or an absolute form), and every edits[].newText — the material the
+ * normalized against the Agent folder; paths escaping that folder
+ * are refused, while contained absolute paths work), and every edits[].newText — the material the
  * edit INTRODUCES — passes the fast-path content trip-wire
  * (tools/guard/paths.js): strings that look like a path and resolve
  * outside the working folder are flagged (a first-line `#!` shebang
@@ -44,7 +44,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { toolRevision } from "../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp
 
 const timestamp = toolRevision(); // shared tool-registry revision
-const { resolveCwdPath } = await import(`./guard/resolve.js?now=${timestamp}`);
+const { resolveCwdPath, relativeCwdPath } = await import(`./guard/resolve.js?now=${timestamp}`);
 const { rejectSymlinkPath } = await import(`./guard/symlinks.js?now=${timestamp}`);
 const { enforceContentPolicy } = await import(`./guard/paths.js?now=${timestamp}`);
 const { unifiedPatch, recordEdit, peekEdit, removeEdit } = await import(`./edit/diff.js?now=${timestamp}`);
@@ -198,15 +198,13 @@ async function rollbackEdit(rollback, path, context) {
   if (!entry) {
     throw new Error("Use an edit id returned by a recent successful edit, or make a new targeted edit.");
   }
-  if (entry.path !== path) {
+  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
+  const requested = resolveCwdPath(path, { cwd: writeCwd });
+  if (resolveCwdPath(entry.path, { cwd: writeCwd }) !== requested) {
     throw new Error("Use the `path` matching the `rollback` id you want to roll back, or make a targeted edit.");
   }
-  // Same project-bounded resolution as the forward edit: the agent's
-  // folder is cwd, and a rollback may target a project sibling recorded
-  // through ../, but must never follow a planted link.
-  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
-  const projectCwd = context?.env?.cwd ?? context?.agent?.env?.cwd ?? writeCwd;
-  const resolved = await rejectSymlinkPath(resolveCwdPath(entry.path, { cwd: writeCwd, boundary: projectCwd }), { cwd: projectCwd });
+  // Rollback obeys the same agent-local write boundary as forward edits.
+  const resolved = await rejectSymlinkPath(resolveCwdPath(entry.path, { cwd: writeCwd }), { cwd: writeCwd });
   return queueEdit(resolved, async () => {
     const raw = await readFile(resolved, "utf8");
     const { bom, text } = splitBom(raw);
@@ -251,13 +249,11 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new TypeError("Give one or more edits, each with oldText and newText.");
   }
-  // The agent folder is cwd and Env.cwd is the enclosing project boundary.
-  // A relative ../ may edit a project sibling, never a path outside Env.cwd.
+  // Mutations stay in the agent folder even when Env.cwd is elsewhere.
   const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
-  const projectCwd = context?.env?.cwd ?? context?.agent?.env?.cwd ?? writeCwd;
-  const contentCwd = projectCwd;
-  // The same symbolic-link refusal write.js applies across the project.
-  const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd: writeCwd, boundary: projectCwd }), { cwd: projectCwd }); // filename guard
+  const contentCwd = writeCwd;
+  const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd: writeCwd }), { cwd: writeCwd }); // filename guard
+  path = relativeCwdPath(path, { cwd: writeCwd });
   // Permission can await user input. Do it before entering the queue, then
   // read the newest file contents inside it so no pre-prompt snapshot wins.
   for (const e of edits) {
@@ -303,7 +299,7 @@ export function toolDescription() {
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Path to the file to edit (relative to the working folder)" },
+          path: { type: "string", description: "File inside the Agent folder; use a relative or contained absolute path." },
           edits: {
             type: "array",
             description:
@@ -326,7 +322,7 @@ export function toolDescription() {
             type: "boolean",
             description:
               "Ask the user for permission, showing the offending lines, when a " +
-              "newText names a path outside the working folder. Omit it to refuse " +
+              "newText names an existing outside path or an existing absolute project path. Omit it to refuse " +
               "such edits outright.",
           },
           matchAll: {

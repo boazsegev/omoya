@@ -120,3 +120,25 @@ describe("active-agent menu snapshots", () => {
     expect(plain.snapshot.lines.join("\n")).not.toContain("Owns the database.");
   });
 });
+
+describe("agents of several open Envs", () => {
+  test("list per project, this Env first, named <project>/<agent>", async () => {
+    const { mkdtempSync, mkdirSync } = await import("node:fs");
+    const { join, resolve } = await import("node:path");
+    const { default: Env } = await import("../lib/env.js");
+    const root = resolve(mkdtempSync("./ai-tmp/tui-projects-"));
+    for (const name of ["iodine", "fio"]) mkdirSync(join(root, name));
+    const iodine = new Env({ cwd: join(root, "iodine"), settingsDir: null });
+    const fio = new Env({ cwd: join(root, "fio"), settingsDir: null });
+    const bug = fio.agentCreate({ name: "bug" });
+    const main = iodine.agentCreate({ name: "main" });
+    const options = activeAgentMenuOptions(iodine, main);
+    expect(options.map(({ name }) => name)).toEqual(["iodine/main", "fio/bug"]);
+    expect(buildMenuItems({ agents: options }).filter((item) => item.value?.type === "agent.switch").map((item) => item.label)).toEqual(["iodine/main", "fio/bug"]);
+    bug.close();
+    fio.close();
+    expect(activeAgentMenuOptions(iodine, main).map(({ name }) => name)).toEqual(["main"]);
+    main.close();
+    iodine.close();
+  });
+});

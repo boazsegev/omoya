@@ -5,7 +5,7 @@ import { NAMES } from "../lib/namespace.js";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cli } from "./bin-names.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
 import { renderSettingsTemplate, writeSettingsTemplate } from "../lib/cli.js";
 import { parseJsonc } from "../lib/env/jsonc.js";
@@ -55,7 +55,7 @@ describe("writeSettingsTemplate", () => {
     const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
     await toolsLoad(env, { dirs: ["./tools"] });
     const file = writeSettingsTemplate(env);
-    expect(file).toBe(join(dir, NAMES.projectSettings));
+    expect(file).toBe(resolve(dir, NAMES.projectSettings));
     expect(existsSync(file)).toBe(true);
     expect(parseJsonc(readFileSync(file, "utf8"))).toEqual({});
   });

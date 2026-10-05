@@ -287,6 +287,57 @@ describe("packageSearch", () => {
       .rejects.toThrow(/all configured search engines failed/);
   });
 
+  test("does not mistake search-result text mentioning CAPTCHA or JavaScript for a challenge", async () => {
+    const duck = ddgHtml.replace("Second duck", "How to enable JavaScript and verify you are human after unusual traffic or a captcha");
+    const mojeek = mojeekHtml.replace("Third", "Guide to captcha and unusual traffic");
+    const fetchImpl = createFetch([
+      ["https://html.duckduckgo.com/html/", response(duck)],
+      ["https://www.mojeek.com/search", response(mojeek)],
+    ]);
+    const markdown = await packageSearch({ query: "captcha", limit: 5 },
+      { env: { settings: { web: { debug: true, search: { cacheSeconds: 0 } } } } }, { fetchImpl, env: {} });
+    expect(markdown).toContain("duckduckgo: success (2 results)");
+    expect(markdown).toContain("mojeek: success (2 results)");
+    expect(markdown).toContain("URL: https://example.com/b");
+  });
+
+  test("does not reject SearXNG HTML results containing challenge-related terms", async () => {
+    const html = '<html><body><article><a href="https://example.com/guide">CAPTCHA guide</a><p class="content">Verify you are human</p></article></body></html>';
+    const markdown = await packageSearch({ query: "guide", limit: 5 },
+      { env: { settings: { web: { search: { cacheSeconds: 0, backends: [{ type: "searxng", url: "https://searx.test/search" }], engines: [] } } } } },
+      { fetchImpl: createFetch([["https://searx.test/", response(html)]]) });
+    expect(markdown).toContain("URL: https://example.com/guide");
+  });
+
+  test("backs off an HTML engine after a confirmed challenge without blocking other engines", async () => {
+    const calls = [];
+    const fetchImpl = createFetch([
+      ["https://html.duckduckgo.com/html/", () => response('<html><title>Verify you are human</title><form id="challenge-form"></form></html>')],
+      ["https://www.mojeek.com/search", () => response(mojeekHtml)],
+    ], calls);
+    const context = { env: { settings: { web: { debug: true, search: { cacheSeconds: 0 } } } } };
+    const options = { fetchImpl, env: {} };
+    const first = await packageSearch({ query: "first", limit: 5 }, context, options);
+    const second = await packageSearch({ query: "second", limit: 5 }, context, options);
+    expect(first).toContain("duckduckgo: failed (recognized challenge page)");
+    expect(second).toContain("duckduckgo: failed (challenge cooldown)");
+    expect(second).toContain("mojeek: success (2 results)");
+    expect(calls.filter((call) => call.url.startsWith("https://html.duckduckgo.com/"))).toHaveLength(1);
+  });
+
+  test("backs off on rate limits without repeatedly contacting the throttled HTML engine", async () => {
+    const calls = [];
+    const fetchImpl = createFetch([
+      ["https://html.duckduckgo.com/html/", () => response("slow down", { status: 429 })],
+      ["https://www.mojeek.com/search", () => response(mojeekHtml)],
+    ], calls);
+    const context = { env: { settings: { web: { debug: true, search: { cacheSeconds: 0 } } } } };
+    await packageSearch({ query: "one", limit: 5 }, context, { fetchImpl, env: {} });
+    const next = await packageSearch({ query: "two", limit: 5 }, context, { fetchImpl, env: {} });
+    expect(next).toContain("duckduckgo: failed (challenge cooldown)");
+    expect(calls.filter((call) => call.url.startsWith("https://html.duckduckgo.com/"))).toHaveLength(1);
+  });
+
   test("returns aggregate errors after partial group failure only when all engines fail", async () => {
     const fetchImpl = createFetch([
       ["https://html.duckduckgo.com/html/", response("captcha challenge")],

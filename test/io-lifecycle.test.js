@@ -297,6 +297,7 @@ describe("IO provider surface", () => {
     writeFileSync(join(dir, "settings.json"), JSON.stringify({
       providers: { fake: { provider: "fake", url: "http://settings", model: "m-settings" } },
     }));
+    env.close();
     const env2 = new Env({ dir, cwd: dir });
     const configured = makeIO({ environment: env2, Protocol });
     expect(configured.url).toBe("http://settings");

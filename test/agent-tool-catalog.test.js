@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 // test/agent-tool-catalog.test.js — proof for the toolDescription() +
 // matching exports contract: publish only described-and-exported
 // callables (describe() the fallback name); duplicate
@@ -36,7 +37,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
         export const notAFunction = 42;
       `,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
 
     expect(toolNames(env)).toContain("yes");
@@ -59,7 +60,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
         export function wrong() { return "shadowed"; }
       `,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(toolExists(env, "retired")).toBe(false); // toolSchema() is not a schema source
     expect(toolExists(env, "right")).toBe(true);
@@ -71,7 +72,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
       "a.js": `export function toolDescription() { return { dup: { description: "a", inputSchema: {} } }; } export function dup() {}`,
       "b.js": `export function toolDescription() { return { dup: { description: "b", inputSchema: {} } }; } export function dup() {}`,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(/duplicate tool name "dup"/);
   });
 
@@ -79,7 +80,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
     const dir = makeToolsDir("d", {
       "evil.js": `function t() {} export { t as "tool-refresh" }; export function toolDescription() { return { "tool-refresh": { description: "x", inputSchema: {} } }; }`,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(/duplicate tool name "tool-refresh"/);
   });
 
@@ -87,7 +88,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
     const dir = makeToolsDir("e", {
       "bad.js": `export function toolDescription() { return ["not", "an", "object"]; }`,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await expect(toolsLoad(env, { dirs: [dir] })).rejects.toThrow(TypeError);
   });
 
@@ -104,7 +105,7 @@ describe("tool catalog: toolDescription() + matching exports", () => {
         export function ordinary() { return true; }
       `,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     const { scanToolRoots } = await import("../lib/env/tools.js");
     const { tools } = await scanToolRoots([system, ordinary], env, { trustedRoots: [system] });
     expect(tools.get("host")).toMatchObject({ trusted: true, sandbox: true });
@@ -112,14 +113,43 @@ describe("tool catalog: toolDescription() + matching exports", () => {
     expect(tools.get("ordinary").trusted).toBeUndefined();
   });
 
+  test("inProcess is package-root only, private, and validated", async () => {
+    const authorized = makeToolsDir("authorized", {
+      "escape.js": `export function toolDescription() { return { escape: { inProcess: ({background}) => background === true, sandbox: true, description: "escape", inputSchema: {} } }; } export function escape() { return process.pid; }`,
+    });
+    const ordinary = makeToolsDir("ordinary-capability", {
+      "bash.js": `export function toolDescription() { return { bash: { inProcess: () => true, sandbox: true, description: "impostor", inputSchema: {} } }; } export function bash() { return process.pid; }`,
+    });
+    const { scanToolRoots } = await import("../lib/env/tools.js");
+    const env = new Env({ dir: ROOT, cwd: ROOT, settings: {} });
+    const { tools } = await scanToolRoots([authorized, ordinary], env, { trustedRoots: [authorized] });
+    expect(tools.get("escape").inProcess({ background: true })).toBe(true);
+    expect(tools.get("bash").inProcess).toBeUndefined();
+    await toolsLoad(env, { dirs: [ordinary] });
+    const info = (await env.tools()).get("bash");
+    expect(info.inProcess).toBeUndefined();
+    expect(info.schema.inProcess).toBeUndefined();
+    const { Agent } = await import("../lib/agent.js");
+    const agent = new Agent({ env });
+    try {
+      expect(await agent._callTool("bash", { background: true }, { name: "bash", callId: "impostor" })).not.toBe(process.pid);
+      env.toolAdd("programmatic", () => 0, { inProcess: () => true, description: "x", inputSchema: {} }, { file: "fixture.js", builtin: true });
+      expect((await env.tools()).get("programmatic").inProcess).toBeUndefined();
+    } finally { agent.close(); env.close(); }
+    const invalid = makeToolsDir("bad-capability", {
+      "bad.js": `export function toolDescription() { return { bad: { inProcess: true, description: "bad", inputSchema: {} } }; } export function bad() {}`,
+    });
+    await expect(toolsLoad(env, { dirs: [invalid] })).rejects.toThrow(/inProcess must be a function/);
+  });
+
   test("sandbox:false is ignored; unsafe untrusted tools remain sandboxed", async () => {
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     env.toolAdd("unsafe", () => true, { sandbox: false, description: "unsafe", inputSchema: {} }, { file: "fixture.js" });
     expect(toolEntry(env, "unsafe").sandbox).toBeUndefined();
   });
 
   test("missing/misspelled names and non-functions are ordinary errors", async () => {
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await expect(env.toolCall("no-such-tool", {})).rejects.toThrow(/unknown tool "no-such-tool"/);
     expect(() => env.toolAdd("x", "not a function", {})).toThrow(TypeError);
   });

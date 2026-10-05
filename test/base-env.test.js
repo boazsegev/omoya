@@ -1,7 +1,7 @@
 // test/base-env.test.js — proof for lib/env.js core (registry surfaces, views)
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
 import { providerAdd, providerNamesOf, providerOf, settingsOf, toolExists, toolNames, toolsLoad } from "./env-internals.js";
 
@@ -40,14 +40,15 @@ describe("Env construction", () => {
     const folders = env.folders;
     expect(Object.isFrozen(folders)).toBe(true);
     expect(folders.slice(0, 3)).toEqual([
-      { kind: "project", title: "project folder", path: dir },
+      { kind: "project", title: "project folder", path: resolve(dir) },
       { kind: "harness", title: "harness folder", path: dir },
       { kind: "settings", title: "settings folder", path: settingsDir },
     ]);
     await toolsLoad(env, { dirs: [join(dir, "tools-a"), join(dir, "tools-a")] }); // a repeated root lists once
     expect(env.folders.filter((f) => f.kind === "tools")).toEqual([{ kind: "tools", title: "tool folder", path: join(dir, "tools-a") }]);
-    env.cwd = join(dir, "elsewhere"); // a resumed session's folder
-    expect(env.folders[0].path).toBe(join(dir, "elsewhere"));
+    expect(() => { env.cwd = join(dir, "elsewhere"); }).toThrow();
+    expect(env.folders[0].path).toBe(resolve(dir));
+    env.close();
     expect(new Env({ dir, cwd: dir, settingsDir: null }).folders.some((f) => f.kind === "settings")).toBe(false);
   });
 });

@@ -126,7 +126,7 @@ describe("library namespaces", () => {
 });
 
 describe("Agent.folderSet: agent-local tool root", () => {
-  test("accepts only existing folders inside env.cwd and leaves the shared environment unchanged", () => {
+  test("accepts existing folders outside env.cwd for embedded agents without changing the environment", () => {
     const root = mkdtempSync("./ai-tmp/agent-folder-");
     const child = `${root}/project`;
     mkdirSync(child);
@@ -135,12 +135,35 @@ describe("Agent.folderSet: agent-local tool root", () => {
     const agent = new Agent({ env });
     agent.folder = "project";
     expect(agent.folder).toBe(resolve(child));
-    expect(env.cwd).toBe(root);
+    expect(env.cwd).toBe(resolve(root));
     expect(() => (agent.folder = "missing")).toThrow(/does not exist/);
-    expect(() => (agent.folder = "../")).toThrow(/inside env\.cwd/);
+    const separate = mkdtempSync("./ai-tmp/agent-separate-");
+    agent.folder = resolve(separate);
+    expect(agent.folder).toBe(resolve(separate));
+    expect(env.cwd).toBe(resolve(root));
     expect(() => (agent.folder = "plain-file")).toThrow(/not a folder/);
     agent.folder = undefined;
-    expect(agent.folder).toBe(root);
+    expect(agent.folder).toBe(resolve(root));
+  });
+
+  test("childCreate inherits its parent write root and rejects direct widening", () => {
+    const root = mkdtempSync("./ai-tmp/agent-parent-");
+    mkdirSync(`${root}/area/deep`, { recursive: true });
+    mkdirSync(`${root}/sibling`);
+    const env = new Env({ dir: ROOT, cwd: root, settings: {} });
+    const manager = new Agent({ env, folder: "area", createIO: () => null });
+    const inherited = manager.childCreate({ name: "inherit" });
+    expect(inherited.folder).toBe(resolve(root, "area"));
+    expect(() => (inherited.folder = undefined)).not.toThrow();
+    expect(inherited.folder).toBe(resolve(root, "area"));
+    expect(() => (inherited.folder = "sibling")).toThrow(/parent folder/);
+    expect(() => (inherited.folder = resolve(root))).toThrow(/parent folder/);
+    expect(inherited.folder).toBe(resolve(root, "area"));
+    expect(() => manager.childCreate({ name: "wide", folder: "sibling" })).toThrow(/parent folder/);
+    expect(() => manager.childCreate({ name: "outside", folder: resolve(root) })).toThrow(/parent folder/);
+    expect(manager.children.map((child) => child.name)).toEqual(["inherit"]);
+    const narrow = manager.childCreate({ name: "narrow", folder: "area/deep" });
+    expect(narrow.folder).toBe(resolve(root, "area/deep"));
   });
 });
 

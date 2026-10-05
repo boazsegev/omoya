@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 // test/agent-tool-discovery.test.js — proof for tool-folder discovery:
 // configured settings.tools.folders roots, TOP-LEVEL .js modules only (the scan
 // is NOT recursive — sub-folders hold a tool's private helpers), missing
@@ -44,7 +45,7 @@ describe("tool-folder discovery", () => {
       "real-tool.js": TOOL("real", "here"),
       "contest.js": TOOL("contest", "kept"), // contains "test" but no token boundary
     });
-    const env = new Env({ dir: join(ROOT, "empty-pkg"), settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: join(ROOT, "empty-pkg"), settings: {} });
     const names = await toolsLoad(env, { dirs: [dir] });
 
     expect(names).toContain("real");
@@ -73,7 +74,7 @@ ${TOOL("quiet", "ok")}`,
     process.stderr.write = (c, ...r) => { errChunks.push(String(c)); r.find((a) => typeof a === "function")?.(); return true; };
     let env;
     try {
-      env = new Env({ dir: ROOT, settings: {} });
+      env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
       await toolsLoad(env, { dirs: [dir] });
     } finally {
       process.stdout.write = outWrite;
@@ -93,7 +94,7 @@ ${TOOL("quiet", "ok")}`,
       "ns/deep.js": `globalThis.__DEEP_IMPORTED = 1; ${TOOL("dig", "namespaced")}`,
       "ns/too/deep.js": TOOL("buried", "never"),
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(toolNames(env).sort()).toEqual(["hello", "tool-refresh"]);
     expect(await env.toolCall("hello")).toBe("root");
@@ -113,7 +114,7 @@ ${TOOL("quiet", "ok")}`,
       `,
       "real.js": TOOL("real", 1),
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(toolNames(env)).toContain("real");
     expect(toolNames(env)).not.toContain("extend");
@@ -149,7 +150,7 @@ ${TOOL("quiet", "ok")}`,
         export function retired() { return "never published"; }
       `,
     });
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(await env.toolCall("viaDescribe")).toBe("from describe");
     expect(await env.toolCall("preferred")).toBe("from toolDescription");
@@ -159,13 +160,13 @@ ${TOOL("quiet", "ok")}`,
 
   test("tools.folders requires an array of non-empty strings", () => {
     for (const folders of ["./tool", [null], [""], ["   "], {}]) {
-      const env = new Env({ dir: ROOT, settings: { tools: { folders } } });
+      const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: { tools: { folders } } });
       expect(() => toolRoots(env)).toThrow("tools.folders must be an array of non-empty strings");
     }
   });
 
   test("missing/unreadable roots scan as empty; only built-ins remain", async () => {
-    const env = new Env({ dir: ROOT, settings: {} });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
     const names = await toolsLoad(env, { dirs: [join(ROOT, "does-not-exist")] });
     expect(names).toEqual(["tool-refresh"]);
   });
@@ -216,11 +217,11 @@ ${TOOL("quiet", "ok")}`,
 
   test("settings.tools.folders array works; package tools/ is the fallback default", async () => {
     const dir = makeToolsDir("single", { "one.js": TOOL("one", 1) });
-    const env = new Env({ dir: ROOT, settings: { tools: { folders: [dir] } } });
+    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: { tools: { folders: [dir] } } });
     expect(await toolsLoad(env)).toContain("one");
 
     // no settings.tools.folders -> package ./tools (its tool set is content, not asserted)
-    const fallback = new Env({ settings: {} });
+    const fallback = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settings: {} });
     expect(toolRoots(fallback).join("/")).toContain("tools");
     const names = await toolsLoad(fallback);
     expect(names.length).toBeGreaterThan(0);

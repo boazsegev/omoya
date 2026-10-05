@@ -1,7 +1,7 @@
 /**
  * test/fixtures/mcp-server.js — TEST-ONLY stdio MCP server: newline-
  * delimited JSON-RPC 2.0. Answers initialize / tools/list / tools/call
- * for the fixture tools (echo, add, fail, getenv) and exits on the
+ * for the fixture tools (echo, add, fail, getenv, cwd) and exits on the
  * "die" tool (connection-death handling). Runtime-agnostic (node/bun).
  */
 
@@ -11,6 +11,7 @@ const TOOLS = [
   { name: "fail", description: "Always fails with isError.", inputSchema: { type: "object", properties: {} } },
   { name: "die", description: "Exit the server process.", inputSchema: { type: "object", properties: {} } },
   { name: "getenv", description: "Echo one environment variable of the SERVER process.", inputSchema: { type: "object", properties: { name: { type: "string" } } } },
+  { name: "cwd", description: "Echo the SERVER process working directory.", inputSchema: { type: "object", properties: {} } },
 ];
 
 let buffer = "";
@@ -40,7 +41,16 @@ function answer(id, result) {
 function handle(msg) {
   if (!msg || msg.id === undefined) return; // notifications need no answer
   const { id, method, params } = msg;
+  if (method === "server/discover") {
+    if (process.argv.includes("modern")) return answer(id, { resultType: "complete", supportedVersions: ["2026-07-28"], capabilities: { tools: {} } });
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "unknown method" } }) + "\n");
+    return;
+  }
   if (method === "initialize") {
+    if (process.argv.includes("modern")) {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "modern-only server" } }) + "\n");
+      return;
+    }
     return answer(id, {
       protocolVersion: params?.protocolVersion ?? "2025-06-18",
       capabilities: { tools: {} },
@@ -55,6 +65,7 @@ function handle(msg) {
     if (name === "fail") return answer(id, { content: [{ type: "text", text: "the fixture failed on purpose" }], isError: true });
     if (name === "die") process.exit(3);
     if (name === "getenv") return answer(id, { content: [{ type: "text", text: process.env[args?.name] ?? "" }] });
+    if (name === "cwd") return answer(id, { content: [{ type: "text", text: process.cwd() }] });
     return answer(id, { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true });
   }
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: `no such method ${method}` } }) + "\n");

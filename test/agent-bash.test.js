@@ -105,10 +105,11 @@ describe("bash tool", () => {
   });
 
   test("existing outside absolute paths ARE refused", async () => {
-    await expect(bash({ command: "echo ok > " + ETC + "/omoya-escape-test" })).rejects.toThrow(/^Keep every path argument/);
-    await expect(bash({ command: "cat " + ETC + "/hosts" })).rejects.toThrow(/^Keep every path argument/);
-    // the jailed TMPDIR: existing, outside the working folder, test-controlled
-    await expect(bash({ command: "echo x > " + process.env.TMPDIR + "/omoya-escape" })).rejects.toThrow(/^Keep every path argument/);
+    await expect(bash({ command: "echo ok > " + ETC + "/omoya-escape-test" })).rejects.toThrow(/^Keep every visible path/);
+    await expect(bash({ command: "cat " + ETC + "/hosts" })).rejects.toThrow(/^Keep every visible path/);
+    // Temporary conventions pass the scanner; the execution sandbox owns write policy.
+    const { findCommandTraversal } = await import("../tools/guard/paths.js");
+    expect(await findCommandTraversal(`echo x > '${process.env.TMPDIR}/omoya-escape'`)).toEqual([]);
   });
 
   test("uses the agent folder as cwd and permits project-relative parent paths", async () => {
@@ -120,7 +121,12 @@ describe("bash tool", () => {
     const context = { env: { cwd: project }, agent: { folder } };
     expect(await bash({ command: "cat agent.txt" }, context)).toBe("agent");
     expect(await bash({ command: "cat ../project.txt" }, context)).toBe("project");
-    await expect(bash({ command: "cat ../../outside.txt" }, context)).rejects.toThrow(/^Keep every path argument/);
+    const separate = `${ROOT}/separate`;
+    mkdirSync(separate);
+    writeFileSync(`${separate}/own.txt`, "own");
+    const embedded = { env: { cwd: project }, agent: { folder: separate } };
+    expect(await bash({ command: "cat own.txt && cat ../project/project.txt" }, embedded)).toBe("ownproject");
+    await expect(bash({ command: "cat ../../outside.txt" }, context)).rejects.toThrow(/^Keep every visible path/);
   });
 
   test("streams complete output lines through context.onData during execution", async () => {

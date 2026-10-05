@@ -1,3 +1,4 @@
+import { mkdtempSync } from "node:fs";
 // test/io-provider-test.test.js — proof for the scripted "test"
 // connector: predetermined turns (array of block arrays), script from
 // settings/inline-JSON/file/env, turn advance + last-turn repeat,
@@ -26,7 +27,7 @@ afterEach(() => {
 });
 
 function env() {
-  const root = "./ai-tmp/test-provider-env";
+  const root = mkdtempSync("./ai-tmp/test-provider-env-");
   const value = new Env({
     dir: root,
     cwd: root,
@@ -204,7 +205,7 @@ describe("test provider: block translation", () => {
 
 describe("test provider: package scan registration", () => {
   test("Env scan-load registers test from the package providers dir", async () => {
-    const pkgEnv = new Env();
+    const pkgEnv = new Env({ cwd: mkdtempSync("./ai-tmp/test-provider-pkg-") });
     const names = await providersLoad(pkgEnv);
     expect(names).toContain("test");
     const Protocol = providerOf(pkgEnv, "test");

@@ -110,6 +110,7 @@ const CONTRACTS = [
       { label: "PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow)", file: "lib/env/tool-registry.js", symbols: ["registerTool", "toolsList", "callTool"] },
       { label: "PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx)", file: "tools/read.js", example: true },
       { label: "PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed)", file: "tools/write.js", example: true },
+      { label: "PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop)", file: "tools/process.js", symbols: ["process", "toolDescription"] },
       { label: "PUBLISHES — Agent's current filtered model-facing descriptors", file: "lib/agent.js", members: { class: "Agent", names: ["tools"] } },
       { label: "REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them", file: "lib/agent/tool-context.js", symbols: ["toolContextFor"] },
       { label: "REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx)", file: "lib/agent/tool-exec.js", symbols: ["callToolFor"] },
@@ -132,7 +133,8 @@ const CONTRACTS = [
       { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "description", "spawnPermission"] } },
       { label: "Env plugins: how a higher layer installs its Env members (Env.extend)", file: "lib/env/extend.js", moduleDoc: true },
       { label: "Agent's Env plugin: the active-Agent registry, agentCreate, capacity, AGENT_* events", file: "lib/agent/env-plugin.js", moduleDoc: true },
-      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend"] } },
+      { label: "Trusted Agent event hooks: scan roots, lifecycle and observer diagnostics", file: "lib/agent/hooks.js", moduleDoc: true },
+      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend", "envs", "use", "closed", "name"] } },
     ],
   },
   {
@@ -163,7 +165,7 @@ const CONTRACTS = [
     name: "TUI input, cursor, mouse-selection, and questionnaire editing",
     sources: [
       { file: "lib/app/tui/input-controller.js", moduleDoc: true },
-      { file: "lib/app/gtui/controls.js", symbols: ["createControls"] },
+      { file: "lib/app/gtui/controls/manager.js", symbols: ["createControls"] },
       { file: "lib/app/gtui/terminal-input.js", symbols: ["createTerminalInput"] },
       { file: "lib/app/tui/questionnaire-view.js", moduleDoc: true },
     ],

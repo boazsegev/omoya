@@ -1,10 +1,10 @@
 /**
- * tools/read.js — the `read` tool: an independent, read-only,
- * cwd-rooted file access tool. Thin WRAPPER publishing the callable
+ * tools/read.js — the `read` tool: a cwd-rooted file access tool,
+ * read-only unless `target` saves the result. Thin WRAPPER publishing the callable
  * implemented under tools/read/. The tool scan is NOT recursive:
  * sub-folders are never scanned. read/ owns query normalization,
- * guarded execution and serialization; write.source consumes those explicit
- * shared contracts. No helper is independently published as a tool.
+ * guarded execution and serialization; `target` saves through write/save.js.
+ * Shared contracts stay explicit. No helper is independently published as a tool.
  *
  * One exception BY DESIGN: tools/guard/ is the shared guard layer
  * EVERY tool imports (read, write, edit, bash) — the deterministic

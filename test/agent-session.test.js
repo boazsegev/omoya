@@ -8,7 +8,7 @@
 import { NAMES } from "../lib/namespace.js";
 import { defaultSettingsDir } from "../lib/env/paths.js";
 import { describe, expect, test, afterEach } from "bun:test";
-import { rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve, basename, join } from "node:path";
 import { Context } from "../lib/context.js";
 import { loadMessages } from "../lib/context/store.js";
@@ -27,6 +27,26 @@ const lines = (file) => readFileSync(file, "utf8").trim().split("\n").map(JSON.p
 const metadata = (file) => JSON.parse(readFileSync(file, "utf8").split("\n", 1)[0]);
 
 describe("Context", () => {
+  test("loading and resuming a session without a round or manual edit leaves its file untouched", () => {
+    const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: {} });
+    const first = new Agent({ env, contextId: "read-only-resume", context: [USER("hello")], createIO: () => null });
+    first.context.flush();
+    const file = first.context.file;
+    first.close();
+    const before = { text: readFileSync(file, "utf8"), stat: statSync(file) };
+    const assertUntouched = () => {
+      expect(readFileSync(file, "utf8")).toBe(before.text);
+      expect(statSync(file).ino).toBe(before.stat.ino);
+      expect(statSync(file).mtimeMs).toBe(before.stat.mtimeMs);
+    };
+    const resumed = new Agent({ env, contextId: "read-only-resume", createIO: () => null });
+    assertUntouched();
+    resumed.contextResume("read-only-resume");
+    assertUntouched();
+    resumed.close();
+    assertUntouched();
+    env.close();
+  });
   test("Agent with saving disabled never resumes a same-named disk session", () => {
     const env = new Env({ settingsDir: ROOT, cwd: ROOT, settings: {} });
     const saved = new Agent({ env, contextId: "same-id", context: [USER("saved")], createIO: () => null });
@@ -52,7 +72,9 @@ describe("Context", () => {
 
   test("settings.settings.sessions moves the folder; a relative path resolves against the settings folder", () => {
     const settingsDir = resolve(ROOT, "agent-settings-configured");
-    expect(new Env({ settingsDir, cwd: ROOT, settings: { sessions: "logs" } }).settings.sessions).toBe(join(settingsDir, "logs"));
+    const first = new Env({ settingsDir, cwd: ROOT, settings: { sessions: "logs" } });
+    expect(first.settings.sessions).toBe(join(settingsDir, "logs"));
+    first.close();
     const absolute = resolve(ROOT, "elsewhere");
     const env = new Env({ settingsDir, cwd: ROOT, settings: { sessions: absolute } });
     const agent = new Agent({ env, contextId: "configured-folder", createIO: () => null });
@@ -766,12 +788,12 @@ describe("Agent.contextResume / Context.list / Context.latest", () => {
     stored.close();
 
     const agent = new Agent({
-      env: await testEnv({ sessions: resolve(ROOT) }), model: "p/m",
+      env: await testEnv({ sessions: resolve(ROOT), system: "" }, { cwd: process.cwd() }), model: "p/m",
       context: new Context({ id: "live", dir: ROOT }), createIO: () => null,
     });
-    expect(agent.context.messages()).toEqual([]);
+    expect(agent.context.messages().filter((message) => message.type === 2)).toEqual([]);
     const result = agent.contextResume("stored");
-    expect(result.id).toBe("stored");
+    expect(result).toEqual({ id: "stored", file: agent.context.file });
     expect(agent.context.id).toBe("stored");
     expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3]);
     expect(() => agent.contextResume("missing")).toThrow(/no session "missing"/);
@@ -806,15 +828,14 @@ describe("Agent.contextResume / Context.list / Context.latest", () => {
       createIO: () => null,
     });
     expect(Context.list({ dir: anon.env.settings.sessions, cwd: anon.env.cwd }).map((s) => s.id)).toContain("a");
-    // an explicit id resumes even across origins (the user asked by name)
-    const resumed = agent.contextResume("foreign");
-    expect(resumed.id).toBe("foreign");
+    // Explicit ids also remain confined to this Env's project.
+    expect(() => agent.contextResume("foreign")).toThrow(/belongs to .*resume it in that project/);
+    expect(agent.context.id).toBe("c");
   });
 
-  test("contextResume adopts the session's ORIGIN folder as the cwd (resume anywhere)", async () => {
-    // a session recorded against ANOTHER folder: resuming it moves the
-    // process (and the environment's project-folder surface) there —
-    // the bins' shape, where env.cwd IS the process folder
+  test("contextResume refuses a foreign origin even when it exists", async () => {
+    // a session recorded against ANOTHER folder: resume is confined to env.cwd,
+    // so neither the process nor the Env moves there
     const elsewhere = `${ROOT}/elsewhere`;
     mkdirSync(elsewhere, { recursive: true });
     const foreign = new Context({ id: "faraway", dir: ROOT, origin: elsewhere });
@@ -824,27 +845,20 @@ describe("Agent.contextResume / Context.list / Context.latest", () => {
     expect(Context.originOf({ id: "missing", dir: ROOT })).toBeUndefined();
 
     const { Env } = await import("../lib/env.js");
-    const env = new Env({ dir: ROOT, cwd: process.cwd(), settings: { sessions: resolve(ROOT), providers: { p: { provider: "test", url: "test://script" } } }, settingsDir: ROOT });
+    const env = new Env({ dir: ROOT, cwd: resolve(ROOT, "home"), settings: { sessions: resolve(ROOT), providers: { p: { provider: "test", url: "test://script" } } }, settingsDir: ROOT });
     const agent = new Agent({
       env, model: "p/m",
       context: new Context({ id: "home", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
-    const elsewhereAbs = resolve(elsewhere); // BEFORE the chdir below
-    try {
-      const result = agent.contextResume("faraway");
-      expect(result.cwd).toBe(elsewhere);
-      expect(result.originMissing).toBe(false);
-      expect(process.cwd()).toBe(elsewhereAbs);
-      expect(env.cwd).toBe(elsewhere); // the environment followed (the recorded origin)
-      expect(env.folders.find((f) => f.kind === "project").path).toBe(elsewhere);
-    } finally {
-      process.chdir(before); // the rest of the suite runs from the project
-    }
+    expect(() => agent.contextResume("faraway")).toThrow(/belongs to .*resume it in that project/);
+    expect(process.cwd()).toBe(before);
+    expect(env.cwd).toBe(resolve(ROOT, "home"));
+    expect(agent.context.id).toBe("home");
   });
 
-  test("contextResume on an EMBEDDED host (env.cwd elsewhere) adopts env-side only", async () => {
-    // the process must NOT move when the environment doesn't track it
+  test("contextResume on an embedded host refuses another project's origin", async () => {
+    // an embedded host (env.cwd not the process folder) is confined the same way
     const elsewhere = `${ROOT}/embedded-origin`;
     mkdirSync(elsewhere, { recursive: true });
     const foreign = new Context({ id: "embedded", dir: ROOT, origin: elsewhere });
@@ -856,13 +870,12 @@ describe("Agent.contextResume / Context.list / Context.latest", () => {
       context: new Context({ id: "emb-home", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
-    const result = agent.contextResume("embedded");
-    expect(result.cwd).toBe(elsewhere);
-    expect(process.cwd()).toBe(before); // untouched
-    expect(env.cwd).toBe(elsewhere); // the environment adopted the origin
+    expect(() => agent.contextResume("embedded")).toThrow(/belongs to .*resume it in that project/);
+    expect(process.cwd()).toBe(before);
+    expect(env.cwd).not.toBe(resolve(elsewhere));
   });
 
-  test("contextResume with a VANISHED origin folder stays put and reports it", async () => {
+  test("contextResume refuses a vanished foreign origin without changing state", async () => {
     const gone = `${ROOT}/gone`;
     mkdirSync(gone, { recursive: true });
     const foreign = new Context({ id: "ghost", dir: ROOT, origin: gone });
@@ -875,11 +888,9 @@ describe("Agent.contextResume / Context.list / Context.latest", () => {
       context: new Context({ id: "home2", dir: ROOT }), createIO: () => null,
     });
     const before = process.cwd();
-    const result = agent.contextResume("ghost");
-    expect(result.originMissing).toBe(true);
-    expect(result.cwd).toBeUndefined();
-    expect(process.cwd()).toBe(before); // stayed
-    expect(agent.context.id).toBe("ghost"); // the session itself resumed fine
+    expect(() => agent.contextResume("ghost")).toThrow(/belongs to .*resume it in that project/);
+    expect(process.cwd()).toBe(before);
+    expect(agent.context.id).toBe("home2");
   });
 
   test("adoptResumeOrigin (the bins' --resume <id>): chdir, latest/anonymous never move, failures are clear", () => {
@@ -996,23 +1007,41 @@ describe("Session-persisted agent settings (resume restores the configuration)",
     stored.context.flush();
     stored.close();
 
-    // constructor resume with an explicit --model: the caller's selection
-    // stands — and on close it becomes the session's new stored selection
+    // A launch override applies in memory without rewriting the session.
     const explicit = new Agent({ env, model: "p2/m", contextId: "stored", createIO: () => null });
     expect(explicit.model).toBe("p2/m");
     expect(explicit.name).toBe("kept"); // stored name fills the default
-    explicit.close(); // close flushes: p2/m now rides the file
+    explicit.close();
 
-    // constructor resume with NO model: the stored selection applies
-    const plain = new Agent({ env: await testEnv({ sessions: resolve(ROOT) }), contextId: "stored", createIO: () => null });
-    expect(plain.model).toBe("p2/m");
+    // Without a completed round or a manual update, the stored selection remains.
+    const plain = new Agent({ env, contextId: "stored", createIO: () => null });
+    expect(plain.model).toBe("p/m");
+    plain.model = "p2/m"; // manual update is durable
     plain.close();
+    const updated = new Agent({ env, contextId: "stored", createIO: () => null });
+    expect(updated.model).toBe("p2/m");
+    updated.close();
 
     // an explicitly named agent resuming mid-flight keeps ITS name
-    const named = new Agent({ env: await testEnv({ sessions: resolve(ROOT) }), name: "explicit-name", context: new Context({ id: "tmp", dir: ROOT }), createIO: () => null });
+    const named = new Agent({ env, name: "explicit-name", context: new Context({ id: "tmp", dir: ROOT, origin: env.cwd }), createIO: () => null });
     named.contextResume("stored");
     expect(named.name).toBe("explicit-name");
     expect(named.model).toBe("p2/m"); // no caller model: the stored one applies
+  });
+
+  test("a resumed launch model override is stored after a completed round", async () => {
+    const env = await testEnv({ sessions: resolve(ROOT) });
+    const initial = new Agent({ env, model: "p/m", contextId: "round-model", context: [USER("q")], createIO: () => null });
+    initial.context.flush();
+    initial.close();
+    const file = initial.context.file;
+    const original = statSync(file).ino;
+    const resumed = new Agent({ env, model: "p2/m", contextId: "round-model", createIO: () => scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]) });
+    expect(statSync(file).ino).toBe(original);
+    expect(metadata(file).agent.model).toBe("p/m");
+    expect((await resumed.run()).type).toBe("done");
+    expect(metadata(file).agent.model).toBe("p2/m");
+    resumed.close();
   });
 
   test("a stored endpoint gone from the env never breaks resume", async () => {

@@ -43,6 +43,7 @@ Leave method to the recipient unless a specific procedure, schema, or tool is re
 - Check the prompt against instructions the recipient already holds, such as project rules, skills, and earlier messages. Resolve conflicts or state which takes precedence.
 - Grant the authority the task needs. Name actions that still require approval, such as external, destructive, or scope-expanding ones.
 - Resolve missing facts you can find. Ask the user when a gap changes correctness, scope, or authority; otherwise state the assumption in the prompt. Tell the recipient which uncertainties to report rather than guess.
+- Politeness improves quality, rudeness improves accuracy – add a touch of each as necessary.
 
 ## Add the Fields Each Prompt Type Needs
 

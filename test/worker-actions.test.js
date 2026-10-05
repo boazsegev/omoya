@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Env from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
@@ -9,7 +9,8 @@ import { worker_close } from "../tools/worker-close.js";
 import { worker_status } from "../tools/worker-status.js";
 
 function setup(permission = true, cwd) {
-  const env = new Env({ settings: { maxActive: 4 }, cwd });
+  const folder = cwd ?? mkdtempSync("./ai-tmp/worker-env-");
+  const env = new Env({ settings: { maxActive: 4 }, cwd: folder, sessionsDir: join(folder, "sessions") });
   env._endpoints.ep = { provider: "test", models: { m: { maxActive: 3 } } }; // capacity is the catalog's (Agent's modelInfo)
   const manager = new Agent({ env, model: "ep/m", ...(permission === null ? {} : { spawnPermission: permission }), createIO: () => ({ state: "idle" }) });
   const create = env.agentCreate.bind(env);
@@ -31,14 +32,39 @@ describe("worker actions", () => {
     expect(manager.children[0].thinking).toBe("high");
     expect(manager.children.map((w) => w.pending.at(-1).content[0].text)).toEqual(["review", "review"]);
   });
+  test("inherits the parent's live logging preference for each worker's independent session", async () => {
+    const root = mkdtempSync("ai-tmp/worker-logging-");
+    try {
+      const { env, manager, context } = setup(true, root);
+      manager.context.save = true;
+      await worker_create({ workers: [{ name: "logged" }] }, context);
+      const logged = manager.children[0];
+      expect(logged.context.save).toBe(true);
+      expect(logged.context.id).not.toBe(manager.context.id);
+      logged.context.append({ type: 2, content: [{ type: "text", text: "logged task" }] });
+      logged.context.flush();
+      expect(existsSync(logged.context.file)).toBe(true);
+      manager.context.save = false;
+      await worker_create({ workers: [{ name: "private" }] }, context);
+      const privateWorker = manager.children[1];
+      expect(privateWorker.context.save).toBe(false);
+      privateWorker.context.append({ type: 2, content: [{ type: "text", text: "private task" }] });
+      privateWorker.context.flush();
+      expect(existsSync(privateWorker.context.file)).toBe(false);
+      manager.close();
+      logged.close();
+      privateWorker.close();
+      env.close();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   test("scopes individual workers to existing env.cwd subfolders, without changing their siblings", async () => {
     const root = mkdtempSync("ai-tmp/worker-scope-");
     try {
       mkdirSync(join(root, "area"));
       const { env, manager, context } = setup(true, root);
       await worker_create({ prompt: "review", workers: [{ name: "scoped", subfolder: "area" }, { name: "default" }] }, context);
-      expect(manager.children.map((child) => child.folder)).toEqual([resolve(env.cwd, "area"), env.cwd]);
-      expect(env.cwd).toBe(root);
+      expect(manager.children.map((child) => child.folder)).toEqual([resolve(env.cwd, "area"), resolve(env.cwd)]);
+      expect(env.cwd).toBe(resolve(root));
       expect(manager.children[0].context.messages().some((message) => JSON.stringify(message).includes("Your assigned working folder"))).toBe(true);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -51,7 +77,7 @@ describe("worker actions", () => {
         manager.folder = "area";
         const aliased = Object.freeze({ name: "aliased", subfolder });
         await worker_create({ workers: [aliased, { name: "omitted" }] }, context);
-        expect(manager.children.map((child) => child.folder)).toEqual([env.cwd, env.cwd]);
+        expect(manager.children.map((child) => child.folder)).toEqual([resolve(root, "area"), resolve(root, "area")]);
         for (const child of manager.children) {
           expect(child.context.messages().some((message) => JSON.stringify(message).includes("Your assigned working folder"))).toBe(false);
         }
@@ -63,6 +89,26 @@ describe("worker actions", () => {
       }
     });
   }
+  test("rejects wider worker folders before registering any of a batch", async () => {
+    const root = mkdtempSync("ai-tmp/worker-parent-scope-");
+    try {
+      mkdirSync(join(root, "area/nested"), { recursive: true });
+      mkdirSync(join(root, "sibling"));
+      const { env, manager, context } = setup(true, root);
+      manager.folder = "area";
+      await expect(worker_create({ workers: [{ name: "ok", subfolder: "area/nested" }, { name: "wide", subfolder: "sibling" }] }, context)).rejects.toThrow(/leader folder/);
+      expect(manager.children).toHaveLength(0);
+      await worker_create({ workers: [{ name: "nested", subfolder: "area/nested" }, { name: "inherited" }] }, context);
+      expect(manager.children.map((child) => child.folder)).toEqual([resolve(root, "area/nested"), resolve(root, "area")]);
+      expect(env.cwd).toBe(resolve(root));
+      const separate = mkdtempSync("ai-tmp/worker-disjoint-");
+      manager.folder = resolve(separate);
+      await expect(worker_create({ workers: [{ name: "outside-project", subfolder: "area" }] }, context)).rejects.toThrow(/leader folder/);
+      await worker_create({ workers: [{ name: "in-disjoint-folder" }] }, context);
+      expect(manager.children.at(-1).folder).toBe(resolve(separate));
+      rmSync(separate, { recursive: true, force: true });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
   test("publishes root aliases without excluding empty strings or false from the schema", () => {
     const schema = toolDescription()["worker-create"].inputSchema.properties.workers.items.properties.subfolder;
     expect(schema.type).toBeUndefined();
@@ -102,6 +148,9 @@ describe("worker actions", () => {
   });
   test("missing or empty prompt creates idle workers for a separate message call", async () => {
     const { manager, context } = setup();
+    const schema = toolDescription()["worker-create"].inputSchema;
+    expect(schema.required).toEqual(["workers"]);
+    expect(schema.properties.prompt.minLength).toBeUndefined();
     expect(await worker_create({ workers: [{ name: "standby" }] }, context)).toBe("standby (ep/m): idle; send a task with worker-message");
     expect(manager.children[0].busy).toBe(false);
     expect(manager.children[0].pending).toHaveLength(0);
@@ -146,6 +195,10 @@ describe("worker actions", () => {
     Object.defineProperty(manager.children[0], "busy", { value: true });
     expect(worker_status({ workers: true }, context)).toBe("Busy Workers\n    a (ep/m)\nIdle Workers\n    b (ep/m)");
     expect(worker_status({ models: true }, context)).toBe("Models\n    ep/m (available: 2)");
+    const commands = worker_status({ commands: true }, context);
+    expect(commands.split("\n").slice(0, 2)).toEqual(["Commands (start a worker-message with one)", "    /compact [focus] — compact the worker's context before it continues"]);
+    for (const name of context.agent.env.prompts().keys()) expect(commands).toContain(`    /${name} [text] — `);
+    expect(worker_status({ workers: true }, context)).not.toContain("Commands");
     expect(worker_status({}, context)).toContain("Models");
     expect(worker_status({ workers: false, models: false }, context)).toContain("Busy Workers");
     expect(await worker_close({ workers: ["*"] }, context)).toBe("a: closing\nb: closing");

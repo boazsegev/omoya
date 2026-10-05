@@ -1,8 +1,8 @@
 /**
  * tools/bash.js — run a bash command from the working folder.
  *
- * The command scanner refuses visible outside paths, `cd`, and `ln`; the Agent's
- * OS sandbox denies writes outside the working folder. This cannot prevent a
+ * The scanner refuses visible paths outside Agent and project trees, `cd`,
+ * and `ln`; the Agent's OS sandbox denies writes outside its own folder. This cannot prevent a
  * command from reading through a symlink created or supplied inside the tree:
  * see SECURITY.md. The `read` tool does reject symlinks directly.
  */
@@ -14,6 +14,7 @@ import Sandbox from "../lib/sandbox.js";
 // a forked sandbox worker stays process + jail + settings + this file.
 import { toolRevision } from "../lib/tool-runtime.js";
 import { childEnv } from "../lib/util.js";
+
 
 const timestamp = toolRevision();
 const { findCommandTraversal } = await import(`./guard/paths.js?now=${timestamp}`);
@@ -55,7 +56,8 @@ function capOutput(text) {
   return `${text.slice(0, half)}\n[… ${text.length - MAX_OUTPUT} characters elided …]\n${text.slice(-half)}`;
 }
 
-export async function bash({ command, env } = {}, context) {
+export async function bash({ command, env, background = false } = {}, context) {
+  if (typeof background !== "boolean") throw new TypeError("background must be a boolean");
   if (typeof command !== "string" || command.trim() === "") {
     throw new TypeError("Provide a non-empty Bash command, then try again.");
   }
@@ -69,7 +71,12 @@ export async function bash({ command, env } = {}, context) {
   const boundary = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
   const violations = await findCommandTraversal(command, { cwd, boundary });
   if (violations.length > 0) {
-    throw refusal("Keep every path argument inside the working folder, then try again.");
+    throw refusal("Keep every visible path inside the agent or project folder, then try again.");
+  }
+  if (background) {
+    if (context?.safe) throw refusal("Background bash is not available in safe mode.");
+    if (!context?.agent || !context?.osSandbox) throw refusal("Background bash requires an Agent with OS sandbox enforcement.");
+    return context.agent.backgroundStart({ command, cwd, env });
   }
   const onData = typeof context?.onData === "function" ? context.onData : null;
   return new Promise((resolve, reject) => {
@@ -122,11 +129,13 @@ export function toolDescription() {
     // The worker relays complete output records through its one-way stderr
     // protocol, so bash remains forked and OS-sandboxed while streaming.
     sandbox: true,
+    inProcess: ({ background }) => background === true,
     description: "Run a Bash command in the working folder; return output and any exit code. Prefer read to inspect folders.",
     inputSchema: { type: "object", properties: {
-      command: { type: "string", description: "The bash command line to run (no cd or ln; every visible path argument must stay inside the working folder)" },
+      command: { type: "string", description: "The Bash command to run (no cd or ln). Visible paths may read the agent and project folders; the OS jail restricts writes to the agent folder." },
       timeout: { type: "integer", description: "Requested milliseconds timeout (default: 120000; capped at 1200000)" },
       env: { type: "object", description: "Extra environment variables for the command." },
+      background: { type: "boolean", description: "Start under this Agent and return a process id after a short output grace period; inspect or stop it with process." },
     }, required: ["command"] },
   } };
 }

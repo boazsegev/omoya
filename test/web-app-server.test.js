@@ -16,8 +16,8 @@ const { messageUser } = Context;
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 const origin = (web) => `http://127.0.0.1:${web.port}`;
-function connect(web, received = []) {
-  const socket = new WebSocket(`ws://127.0.0.1:${web.port}/ws`, { headers: { Origin: origin(web) } });
+function connect(web, received = [], path = "/ws", host = "127.0.0.1") {
+  const socket = new WebSocket(`ws://127.0.0.1:${web.port}${path}`, { headers: { Origin: `http://${host}:${web.port}`, Host: `${host}:${web.port}` } });
   socket.onmessage = (event) => received.push(JSON.parse(event.data));
   return new Promise((resolve, reject) => { socket.onopen = () => resolve(socket); socket.onerror = reject; });
 }
@@ -44,6 +44,326 @@ test("protocol validates client packets and rejects malformed input", () => {
   expect(() => parseClientMessage(JSON.stringify({ type: "question.answer", requestId: "q1", answers: "x" }))).toThrow();
 });
 
+test("hello names the served project; root is the all-projects view, the project URL its own view", async () => {
+  const env = await testEnv();
+  const agent = scripted(env, 0, "unused");
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [], scoped = [];
+  try {
+    const socket = await connect(web, received); await tick();
+    const name = env.cwd.split(/[\\/]/).filter(Boolean).at(-1);
+    expect(received.find((m) => m.type === "hello")).toMatchObject({ projects: [{ name, path: env.cwd, url: `/${name}/`, current: true }], scope: "all", canManageProjects: true });
+    expect(received.find((m) => m.type === "hello").agent.project).toBe(env.cwd);
+    const own = await connect(web, scoped, `/${name}/ws`); await tick();
+    expect(scoped.find((m) => m.type === "hello")).toMatchObject({ scope: "project", agent: { project: env.cwd } });
+    socket.close(); own.close();
+  } finally { web.stop(); }
+});
+
+test("project.add gates local connections and validates directories; broadcast and prefixed routing work", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions: { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } } });
+  const root = [], alternate = [];
+  const waitFor = async (messages, type) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some((m) => m.type === type)) await tick(); return messages.findLast((m) => m.type === type); };
+  try {
+    const socket = await connect(web, root);
+    expect((await waitFor(root, "hello")).canManageProjects).toBe(true);
+    const send = (path) => socket.send(JSON.stringify({ type: "project.add", path }));
+    send("relative"); expect((await waitFor(root, "error")).message).toContain("absolute"); root.length = 0;
+    send("~other/x"); expect((await waitFor(root, "error")).message).toContain("absolute"); root.length = 0;
+    const absolute = (await import("node:path")).resolve(env.cwd);
+    send(`${absolute}/missing`); expect((await waitFor(root, "error")).message).toContain("does not exist"); root.length = 0;
+    send(absolute); expect((await waitFor(root, "error")).message).toContain("already served"); root.length = 0;
+    const path = `${absolute}/other`; (await import("node:fs")).mkdirSync(path);
+    send(path);
+    // The all-projects view switches to the added project in place.
+    const moved = await waitFor(root, "hello");
+    expect(moved.projects.find((p) => p.current)).toMatchObject({ url: "/other/", path });
+    expect(moved).toMatchObject({ scope: "all", agent: { project: path } });
+    expect(root.findLast((m) => m.type === "projects")?.projects).toHaveLength(2);
+    // A project view navigates to the added project instead.
+    const startup = root.find((m) => m.type === "projects").projects.find((p) => p.path !== path);
+    const scopedReceived = [];
+    const scoped = await connect(web, scopedReceived, startup.url + "ws");
+    const third = `${absolute}/third`; (await import("node:fs")).mkdirSync(third);
+    scoped.send(JSON.stringify({ type: "project.add", path: third }));
+    expect((await waitFor(scopedReceived, "project.added")).url).toBe("/third/");
+    scoped.close();
+    expect((await fetch(`${origin(web)}/other`, { redirect: "manual" })).status).toBe(301);
+    expect((await fetch(`${origin(web)}/other/app.js`)).status).toBe(200);
+    expect((await fetch(`${origin(web)}/not-served/app.js`)).status).toBe(404);
+    expect((await fetch(`${origin(web)}/not-served/style.css`)).status).toBe(404);
+    expect((await fetch(`${origin(web)}/not-served`)).status).toBe(404);
+    const second = await connect(web, alternate, "/other/ws");
+    expect((await waitFor(alternate, "hello")).projects.find((p) => p.current)?.url).toBe("/other/");
+    send(path); expect((await waitFor(root, "error")).message).toContain("already served");
+    second.close(); socket.close();
+  } finally { web.stop(); }
+});
+
+test("the all-projects view lists, switches, and manages agents across projects", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions: { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } } });
+  const all = [], mine = [];
+  const waitFor = async (messages, test) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(test)) await tick(); return messages.findLast(test); };
+  const sessionsWith = (count) => (m) => m.type === "sessions" && m.agents.length === count;
+  try {
+    const { resolve } = await import("node:path");
+    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const root = await connect(web, all);
+    const first = (await waitFor(all, (m) => m.type === "hello")).agent;
+    root.send(JSON.stringify({ type: "project.add", path }));
+    // Moving to the new project opens its first agent (none yet: a new one).
+    const second = (await waitFor(all, (m) => m.type === "hello" && m.agent.project === path)).agent;
+    const listed = await waitFor(all, sessionsWith(2));
+    expect(listed.agents.map((a) => [a.project, a.id])).toEqual([[env.cwd, first.id], [path, second.id]]);
+    expect(listed.agents.find((a) => a.active).project).toBe(path);
+    // A project view sees only its own agents, and cannot address others.
+    const scoped = await connect(web, mine, "/second/ws");
+    expect((await waitFor(mine, (m) => m.type === "sessions")).agents.map((a) => a.project)).toEqual([path]);
+    scoped.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
+    expect((await waitFor(mine, (m) => m.type === "error")).message).toBe("unknown agent");
+    // Switching to another project's agent moves the socket and updates the project indicator.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
+    const back = await waitFor(all, (m) => m.type === "hello");
+    expect(back.agent).toMatchObject({ id: first.id, project: env.cwd });
+    expect(back.projects.find((p) => p.current).path).toBe(env.cwd);
+    // Selecting a project opens its first agent; the same project is a no-op.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "project.select", path }));
+    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ id: second.id, project: path });
+    // Agent changes in one project refresh all-projects viewers attached elsewhere.
+    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.cwd);
+    all.length = 0;
+    scoped.send(JSON.stringify({ type: "session.add" }));
+    expect((await waitFor(all, sessionsWith(3))).agents.filter((a) => a.project === path)).toHaveLength(2);
+    // Managing another project's agent runs in that project.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "agent.rename", agentId: second.id, name: "Renamed", project: path }));
+    expect((await waitFor(all, (m) => m.type === "sessions" && m.agents.some((a) => a.name === "Renamed"))).agents.find((a) => a.name === "Renamed").project).toBe(path);
+    root.send(JSON.stringify({ type: "session.close", agentId: "Renamed", project: path }));
+    expect((await waitFor(all, sessionsWith(2))).agents.every((a) => a.name !== "Renamed")).toBe(true);
+    root.send(JSON.stringify({ type: "session.switch", agentId: "missing", project: path }));
+    expect((await waitFor(all, (m) => m.type === "error")).message).toBe("unknown agent");
+    root.close(); scoped.close();
+  } finally { web.stop(); }
+});
+
+test("the all-projects view lists and manages every project's saved sessions; a project view only its own", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions: { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } } });
+  const all = [], mine = [];
+  const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
+  const save = (id, origin) => { const context = new Context({ id, dir: env.settings.sessions, origin, save: true, messages: [messageUser(`hello ${id}`)] }); context.flush(); };
+  const ids = (packet, project) => packet.recent.filter((s) => s.project === project).map((s) => s.id).sort();
+  try {
+    const { resolve } = await import("node:path");
+    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const root = await connect(web, all);
+    await waitFor(all, (m) => m.type === "hello");
+    root.send(JSON.stringify({ type: "project.add", path }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
+    const home = resolve(env.cwd);
+    save("home-a", home); save("home-b", home); save("second-a", path);
+    all.length = 0;
+    root.send(JSON.stringify({ type: "session.list" }));
+    const listed = await waitFor(all, (m) => m.type === "sessions" && m.recent.length >= 3);
+    expect(ids(listed, env.cwd)).toEqual(["home-a", "home-b"]);
+    expect(ids(listed, path)).toEqual(["second-a"]);
+    // A project view lists only its own saved sessions.
+    const scoped = await connect(web, mine, "/second/ws");
+    const own = await waitFor(mine, (m) => m.type === "sessions");
+    expect(own.recent.map((s) => s.project)).toEqual([path]);
+    // Resuming another project's session moves the socket there, onto a new agent.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "session.resume", id: "home-a", project: env.cwd }));
+    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ project: env.cwd, session: "home-a" });
+    // Renaming and deleting another project's saved session run in that project.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "session.rename", id: "second-a", name: "second-b", project: path }));
+    expect(ids(await waitFor(all, (m) => m.type === "sessions" && m.recent.some((s) => s.id === "second-b")), path)).toEqual(["second-b"]);
+    root.send(JSON.stringify({ type: "session.delete", id: "second-b", project: path }));
+    expect(ids(await waitFor(all, (m) => m.type === "sessions" && !m.recent.some((s) => s.id === "second-b")), path)).toEqual([]);
+    root.send(JSON.stringify({ type: "session.resume", id: "missing", project: path }));
+    expect((await waitFor(all, (m) => m.type === "error")).message).toBe("unknown session");
+    root.close(); scoped.close();
+  } finally { web.stop(); }
+});
+
+test("group views show their member projects; a project URL wins over a group URL; leaving the group moves its viewers", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions: { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } } });
+  const all = [], grouped = [];
+  const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
+  try {
+    const { resolve } = await import("node:path");
+    const { mkdirSync } = await import("node:fs");
+    const home = resolve(env.cwd);
+    const red = `${home}/red`, blue = `${home}/blue`, clash = `${home}/group:blue`;
+    for (const path of [red, blue, clash]) mkdirSync(path);
+    const root = await connect(web, all);
+    await waitFor(all, (m) => m.type === "hello");
+    for (const path of [red, blue]) { root.send(JSON.stringify({ type: "project.add", path })); await waitFor(all, (m) => m.type === "hello" && m.agent.project === path); }
+    expect((await fetch(`${origin(web)}/group:warm/`)).status).toBe(404); // no member yet
+    for (const path of [home, red]) root.send(JSON.stringify({ type: "project.group", path, group: "warm", member: true }));
+    await waitFor(all, (m) => m.type === "projects" && m.projects.filter((p) => p.groups.includes("warm")).length === 2);
+    expect(() => parseClientMessage(JSON.stringify({ type: "project.group", path: red, group: "a/b", member: true }))).toThrow("no /");
+    // The group view: scope "group", only member projects' agents; non-members are out of reach.
+    expect((await fetch(`${origin(web)}/group:warm`, { redirect: "manual" })).headers.get("location")).toBe("/group:warm/");
+    expect((await fetch(`${origin(web)}/group:warm/`)).status).toBe(200);
+    const view = await connect(web, grouped, "/group:warm/ws");
+    const hello = await waitFor(grouped, (m) => m.type === "hello");
+    expect(hello).toMatchObject({ scope: "group", group: "warm" });
+    const sessions = await waitFor(grouped, (m) => m.type === "sessions" && m.agents.length > 0);
+    expect([...new Set(sessions.agents.map((a) => a.project))].sort()).toEqual([home, red].sort());
+    view.send(JSON.stringify({ type: "project.select", path: blue }));
+    expect((await waitFor(grouped, (m) => m.type === "error")).message).toBe("unknown project");
+    view.send(JSON.stringify({ type: "project.select", path: red }));
+    expect((await waitFor(grouped, (m) => m.type === "hello" && m.agent.project === red)).scope).toBe("group");
+    // Leaving the group moves its viewers onto another member.
+    grouped.length = 0;
+    root.send(JSON.stringify({ type: "project.group", path: red, group: "warm", member: false }));
+    expect((await waitFor(grouped, (m) => m.type === "hello")).agent.project).toBe(home);
+    // A served project whose URL is /group:blue/ wins over the group view.
+    root.send(JSON.stringify({ type: "project.group", path: blue, group: "blue", member: true }));
+    root.send(JSON.stringify({ type: "project.add", path: clash }));
+    const listed = await waitFor(all, (m) => m.type === "projects" && m.projects.some((p) => p.path === clash));
+    expect(listed.projects.find((p) => p.path === clash).url).toBe("/group%3Ablue/");
+    const clashView = [];
+    const clashed = await connect(web, clashView, "/group:blue/ws");
+    expect((await waitFor(clashView, (m) => m.type === "hello"))).toMatchObject({ scope: "project", agent: { project: clash } });
+    root.close(); view.close(); clashed.close();
+  } finally { web.stop(); }
+});
+
+test("/session-resume reaches any open project's saved session: in place in a multi-project view, by navigation elsewhere", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions: { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } } });
+  const all = [], mine = [], landed = [];
+  const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
+  try {
+    const { resolve } = await import("node:path");
+    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const root = await connect(web, all);
+    await waitFor(all, (m) => m.type === "hello");
+    root.send(JSON.stringify({ type: "project.add", path }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
+    for (const [id, origin] of [["far-a", path], ["far-b", path]]) new Context({ id, dir: env.settings.sessions, origin, save: true, messages: [messageUser(id)] }).flush();
+    // The root view (now in `second`) moves home, then resumes `second`'s session in place.
+    root.send(JSON.stringify({ type: "project.select", path: env.cwd }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.cwd);
+    all.length = 0;
+    root.send(JSON.stringify({ type: "chat.submit", text: "/session-resume far-a" }));
+    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ project: path, session: "far-a" });
+    // A project view navigates to the owning project's URL, which resumes the session on connect.
+    const homeUrl = all.findLast((m) => m.type === "hello").projects.find((p) => p.path === env.cwd).url;
+    const scoped = await connect(web, mine, `${homeUrl}ws`);
+    expect((await waitFor(mine, (m) => m.type === "hello")).scope).toBe("project");
+    scoped.send(JSON.stringify({ type: "chat.submit", text: "/session-resume far-b" }));
+    expect((await waitFor(mine, (m) => m.type === "navigate")).url).toBe("/second/?resume=far-b");
+    const arrived = await connect(web, landed, "/second/ws?resume=far-b");
+    expect((await waitFor(landed, (m) => m.type === "hello")).agent).toMatchObject({ project: path, session: "far-b" });
+    // An unknown id stays this project's resume (and its error); an unknown ?resume= opens normally.
+    mine.length = 0;
+    scoped.send(JSON.stringify({ type: "chat.submit", text: "/session-resume nowhere" }));
+    expect((await waitFor(mine, (m) => m.type === "error")).message).toContain("nowhere");
+    const plain = [];
+    const unknown = await connect(web, plain, "/second/ws?resume=nowhere");
+    expect((await waitFor(plain, (m) => m.type === "hello")).agent.session).not.toBe("nowhere");
+    root.close(); scoped.close(); arrived.close(); unknown.close();
+  } finally { web.stop(); }
+});
+
+test("projects are pinned to projects.json, served at the next start, and removed with their viewers redirected", async () => {
+  const env = await testEnv();
+  const { resolve, join } = await import("node:path");
+  const { mkdirSync } = await import("node:fs");
+  const envOptions = { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } };
+  const path = `${resolve(env.cwd)}/pinned`; mkdirSync(path);
+  const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
+  const listed = (messages, pinned) => (m) => m.type === "projects" && m.projects.find((p) => p.path === path)?.pinned === pinned;
+  const projectsFile = () => JSON.parse(readFileSync(join(env._settingsDir, "projects.json"), "utf8")).projects;
+  let web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions });
+  const first = [];
+  try {
+    const root = await connect(web, first);
+    root.send(JSON.stringify({ type: "project.add", path }));
+    await waitFor(first, (m) => m.type === "hello" && m.agent.project === path);
+    root.send(JSON.stringify({ type: "project.pin", path, pinned: true }));
+    await waitFor(first, listed(first, true));
+    await tick(50); // coalesced settings write
+    // the pin seeds the model its agent runs; the listed name is env.name
+    expect(Object.keys(projectsFile()[path].models)).toEqual([`p/${first.findLast((m) => m.type === "hello").agent.model}`]);
+    expect(first.findLast(listed(first, true)).projects.find((p) => p.path === path).name).toBe("pinned");
+    // groups live in the pin record: joining lists and persists them, leaving the last drops the key
+    const grouped = (names) => (m) => m.type === "projects" && JSON.stringify(m.projects.find((p) => p.path === path)?.groups) === JSON.stringify(names);
+    root.send(JSON.stringify({ type: "project.group", path, group: "ruby", member: true }));
+    root.send(JSON.stringify({ type: "project.group", path, group: "c", member: true }));
+    await waitFor(first, grouped(["c", "ruby"]));
+    await tick(50);
+    expect(projectsFile()[path].groups).toEqual({ ruby: true, c: true });
+    root.send(JSON.stringify({ type: "project.group", path, group: "c", member: false }));
+    root.send(JSON.stringify({ type: "project.group", path, group: "ruby", member: false }));
+    await waitFor(first, grouped([]));
+    await tick(50);
+    expect(projectsFile()[path].groups).toBeUndefined();
+    expect(projectsFile()[path].models).toBeDefined();
+    root.close();
+  } finally { web.stop(); }
+  env.close(); // one open Env per folder: the restarted server opens the folder again
+
+  // A new server with the same user settings serves the pinned project from the start.
+  const restarted = new (await import("../lib/env.js")).Env({ dir: env._dir, cwd: env.cwd, settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+  web = await serve({ port: 0, env: restarted, session: { kind: "anonymous" }, envOptions });
+  const all = [], scoped = [];
+  try {
+    const root = await connect(web, all);
+    const hello = await waitFor(all, (m) => m.type === "hello");
+    expect(hello.projects.find((p) => p.path === path)).toMatchObject({ pinned: true, url: "/pinned/" });
+    const own = await connect(web, scoped, "/pinned/ws");
+    await waitFor(scoped, (m) => m.type === "hello");
+    root.send(JSON.stringify({ type: "project.select", path }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
+    all.length = 0;
+    root.send(JSON.stringify({ type: "project.remove", path }));
+    // the project view is redirected; the all-projects view moves to a served project
+    expect((await waitFor(scoped, (m) => m.type === "project.removed")).url).toBe("/");
+    expect((await waitFor(all, (m) => m.type === "hello")).agent.project).toBe(restarted.cwd);
+    expect((await waitFor(all, (m) => m.type === "projects" && m.projects.length === 1)).projects[0].path).toBe(restarted.cwd);
+    await tick(50);
+    expect(projectsFile()[path]).toBeUndefined();
+    root.send(JSON.stringify({ type: "project.remove", path: restarted.cwd }));
+    expect((await waitFor(all, (m) => m.type === "error")).message).toContain("last served project");
+    root.close(); own.close();
+  } finally { web.stop(); }
+});
+
+test("project.add denies a non-loopback Host even when its peer is loopback", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received, "/ws", "localhost");
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "hello")) await tick();
+    expect(received.find((m) => m.type === "hello").canManageProjects).toBe(true);
+    socket.close();
+    // Host allowlist accepts the bound machine name, but it is not a loopback name.
+    const { hostname } = await import("node:os");
+    if (["localhost", "127.0.0.1"].includes(hostname().toLowerCase())) return;
+    const count = received.filter((m) => m.type === "hello").length;
+    const remote = await connect(web, received, "/ws", hostname());
+    while (Date.now() < deadline && received.filter((m) => m.type === "hello").length === count) await tick();
+    expect(received.findLast((m) => m.type === "hello").canManageProjects).toBe(false);
+    remote.send(JSON.stringify({ type: "project.add", path: env.cwd }));
+    while (Date.now() < deadline && !received.some((m) => m.type === "error")) await tick();
+    expect(received.findLast((m) => m.type === "error")?.message).toContain("local connection");
+    remote.close();
+  } finally { web.stop(); }
+});
+
 test("uploads are origin and connection bound, bounded, and consumed as text-first binary blocks", async () => {
   const env = await testEnv();
   const agent = scripted(env, 0, "uploaded");
@@ -68,6 +388,101 @@ test("uploads are origin and connection bound, bounded, and consumed as text-fir
   } finally { web.stop(); }
 });
 
+test("context images replay as immutable capability media URLs", async () => {
+  const env = await testEnv();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const svg = Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'/>");
+  const context = [
+    { type: 2, content: [{ type: "text", text: "look" }, { type: "binary", mimetype: "image/png", filename: "shot.png", content: png.toString("base64") }, { type: "binary", mimetype: "application/pdf", filename: "doc.pdf", content: "AAAA" }] },
+    { type: 3, content: [{ type: "toolCall", callId: "c1", name: "read", arguments: {} }] },
+    { type: 4, callId: "c1", name: "read", content: [{ type: "text", text: "ok" }, { type: "image", mimetype: "image/svg+xml", content: svg.toString("base64") }] },
+  ];
+  const agent = new Agent({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received); await tick();
+    const history = received.find((m) => m.type === "hello").history;
+    const [image, pdf] = history.find((block) => block.kind === "user").attachments;
+    expect(image).toMatchObject({ name: "shot.png", mime: "image/png", size: png.length });
+    expect(pdf).toEqual({ name: "doc.pdf", mime: "application/pdf", size: 3 });
+    expect(JSON.stringify(history)).not.toContain(png.toString("base64"));
+    const response = await fetch(`${origin(web)}/${image.url}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("content-security-policy")).toContain("sandbox");
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(Buffer.from(await response.arrayBuffer()).equals(png)).toBe(true);
+    const tool = history.find((block) => block.kind === "tool-answer").attachments[0];
+    expect(tool.mime).toBe("image/svg+xml");
+    expect(await (await fetch(`${origin(web)}/${tool.url}`)).text()).toBe(svg.toString());
+    // A wrong capability, a stale content version, or a non-image block misses.
+    const [, key, m, b, version] = image.url.split("/");
+    expect((await fetch(`${origin(web)}/media/${"0".repeat(48)}/${m}/${b}/${version}`)).status).toBe(404);
+    expect((await fetch(`${origin(web)}/media/${key}/${m}/${b}/0`)).status).toBe(404);
+    expect((await fetch(`${origin(web)}/media/${key}/0/2/${version}`)).status).toBe(404);
+    expect((await fetch(origin(web))).headers.get("content-security-policy")).toContain("img-src 'self'");
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("the context inspector previews file blocks and display images without their bytes", async () => {
+  const env = await testEnv();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4, 5, 6]).toString("base64");
+  const gif = Buffer.from("GIF89a-display").toString("base64");
+  const context = [
+    { type: 2, content: [{ type: "text", text: "look" }, { type: "binary", mimetype: "image/png", filename: "shot.png", content: png }] },
+    { type: 3, content: [{ type: "toolCall", callId: "c1", name: "snap", arguments: {} }] },
+    { type: 4, callId: "c1", name: "snap", content: [{ type: "text", text: "ok" }], display: [{ type: "image", mimetype: "image/gif", content: gif }] },
+  ];
+  const agent = new Agent({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received); await tick();
+    socket.send(JSON.stringify({ type: "context.inspect" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "context")) await tick();
+    const packet = received.find((m) => m.type === "context");
+    expect(JSON.stringify(packet)).not.toContain(png);
+    expect(JSON.stringify(packet)).not.toContain(gif);
+    const image = packet.blocks[0].content[1];
+    expect(image).toMatchObject({ text: null, attachment: { name: "shot.png", mime: "image/png", size: 11 }, data: { filename: "shot.png", content: "<11 bytes, base64 omitted>" } });
+    expect(Buffer.from(await (await fetch(`${origin(web)}/${image.attachment.url}`)).arrayBuffer()).toString("base64")).toBe(png);
+    const display = packet.blocks[2].content.find((block) => block.viewerType === "tool display");
+    expect(display).toMatchObject({ blockIndex: 1, text: null, attachment: { mime: "image/gif" } });
+    expect(Buffer.from(await (await fetch(`${origin(web)}/${display.attachment.url}`)).arrayBuffer()).toString("base64")).toBe(gif);
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("live tool results send image URLs instead of image bytes", async () => {
+  const env = await testEnv();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7, 6]).toString("base64");
+  env.toolAdd("snap", async () => ({ content: [{ type: "image", mimetype: "image/png", content: png }] }), {
+    description: "Returns an image.", inputSchema: { type: "object", properties: {} }, safe: true,
+  });
+  const io = scriptedIO([
+    [{ type: "start" }, ...TOOLCALL(0, "c1", "snap", {}), { type: "done" }],
+    [{ type: "start" }, ...TEXT(0, "seen"), { type: "done" }],
+  ]);
+  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received); await tick();
+    socket.send(JSON.stringify({ type: "chat.submit", text: "take one" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "tool.result")) await tick();
+    const packet = received.find((m) => m.type === "tool.result");
+    expect(JSON.stringify(packet.result)).not.toContain(png);
+    expect(packet.attachments).toMatchObject([{ mime: "image/png", size: 12 }]);
+    const response = await fetch(`${origin(web)}/${packet.attachments[0].url}`);
+    expect(Buffer.from(await response.arrayBuffer()).toString("base64")).toBe(png);
+    socket.close();
+  } finally { web.stop(); }
+});
+
 test("server enforces origin, frame size, and serves the SPA with CSP", async () => {
   const env = await testEnv();
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
@@ -83,12 +498,39 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
     const logo = await fetch(`${origin(web)}/logo.svg`);
     expect(logo.headers.get("content-type")).toContain("image/svg+xml");
     expect(await logo.text()).toContain("Omoya logo");
+    expect((await fetch(`${origin(web)}/markdown/inline.js`)).status).toBe(200); // shared with the TUI
+    for (const path of ["/..%2Fhost.js", "/app/..%2F..%2Fhost.js", "/.hidden.js", "/AI-MEMORY.md", "/app/missing.js", "/style.css.map"]) {
+      expect((await fetch(`${origin(web)}${path}`)).status).toBe(404);
+    }
     expect((await fetch(`${origin(web)}/ws`)).status).toBe(403);
     expect((await fetch(`${origin(web)}/ws`, { headers: { Origin: "http://evil.invalid" } })).status).toBe(403);
     const socket = await connect(web);
     const closed = new Promise((resolve) => { socket.onclose = (event) => resolve(event.code); });
     socket.send("x".repeat(MAX_WS_PAYLOAD_LENGTH + 1));
     expect([1009, 1006]).toContain(await closed);
+  } finally { web.stop(); }
+});
+
+test("server refuses foreign Host names (DNS rebinding) and accepts this machine's names", async () => {
+  // A rebinding page reaches the loopback port from the local browser, so the
+  // peer address is loopback; only the Host name it used gives it away.
+  const { hostname, networkInterfaces } = await import("node:os");
+  const env = await testEnv();
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const as = (host, path = "/", extra = {}) => fetch(`${origin(web)}${path}`, { headers: { Host: host, ...extra } });
+  try {
+    const rebound = `evil.example:${web.port}`;
+    expect((await as(rebound)).status).toBe(403);
+    expect((await as(rebound, "/ws", { Origin: `http://${rebound}` })).status).toBe(403);
+    expect((await as(rebound, "/upload", { Origin: `http://${rebound}` })).status).toBe(403);
+    expect((await as(`127.0.0.1:${web.port + 1}`)).status).toBe(403); // not our port
+    // Allowed names: a non-upgrade /ws request passes the Host/Origin gate and fails the upgrade (400).
+    for (const host of ["127.0.0.1", "localhost", "LOCALHOST", "[::1]", hostname()]) {
+      expect((await as(`${host}:${web.port}`)).status, host).toBe(200);
+      expect((await as(`${host}:${web.port}`, "/ws", { Origin: `http://${host.toLowerCase()}:${web.port}` })).status, host).toBe(400); // browsers lowercase Origin
+    }
+    const lan = Object.values(networkInterfaces()).flat().find((entry) => entry?.family === "IPv4" && !entry.internal);
+    if (lan) expect((await as(`${lan.address}:${web.port}`)).status).toBe(200); // --host 0.0.0.0 LAN use
   } finally { web.stop(); }
 });
 
@@ -1051,6 +1493,34 @@ test("endpoints are listed, signed in (direct form) and signed out over the wire
     expect(await until(() => received.some((m) => m.type === "command.result" && m.text.startsWith("endpoint removed: added")))).toBe(true);
     expect(namesOf(env)).not.toContain("added");
     expect(agent.model).toBeUndefined();
+    socket.close();
+  } finally { web.stop(); }
+});
+
+test("endpoint policies (disabled, endpoint/model maxActive) are listed and set over the wire", async () => {
+  const env = await testEnv();
+  providerAdd(env, "wire", LoginProtocol);
+  const agent = scripted(env);
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [];
+  /** The newest endpoints packet's policy for one endpoint. */
+  const policy = (name) => received.findLast((m) => m.type === "endpoints")?.policies?.find((entry) => entry.name === name);
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "endpoint.login", scope: "package", name: "budget", provider: "wire", url: "https://budget.test/v1", token: "t" }));
+    expect(await until(() => policy("budget") !== undefined)).toBe(true);
+    expect(policy("budget")).toMatchObject({ disabled: false, models: [{ id: "model-1" }] });
+    socket.send(JSON.stringify({ type: "endpoint.policy", selector: "budget/model-1", change: { maxActive: 2 } }));
+    expect(await until(() => policy("budget")?.models[0].maxActive === 2)).toBe(true);
+    socket.send(JSON.stringify({ type: "endpoint.policy", selector: "budget/model-1", change: { maxActive: null } }));
+    expect(await until(() => policy("budget")?.models[0].maxActive === undefined)).toBe(true);
+    socket.send(JSON.stringify({ type: "endpoint.policy", selector: "budget", change: { disabled: true } }));
+    expect(await until(() => policy("budget")?.disabled === true)).toBe(true);
+    expect(received.findLast((m) => m.type === "endpoints").endpoints.map((entry) => entry.name)).not.toContain("budget");
+    expect(() => env.connection("budget/model-1")).toThrow(/disabled/);
+    socket.send(JSON.stringify({ type: "endpoint.policy", selector: "budget", change: { maxActive: -1 } }));
+    expect(await until(() => received.some((m) => m.type === "error"))).toBe(true);
     socket.close();
   } finally { web.stop(); }
 });

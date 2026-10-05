@@ -178,6 +178,13 @@ describe("skill-resource", () => {
     expect(readFileSync(join(root, "nested/asset.bin"))).toEqual(bytes);
     await expect(skillResource({ name: "web", path: "asset.bin", target: "nested/asset.bin" }, { env })).rejects.toThrow("already exists");
   });
+  test("absolute project export targets produce relative labels", async () => {
+    put("base", "web", "body", "exact bytes");
+    const { skillResource } = await import("../tools/skill-resource.js");
+    const target = resolve(root, "absolute-target.js");
+    expect(await skillResource({ name: "web", path: "example.js", target }, { env })).toBe("Saved skill resource to absolute-target.js");
+    expect(readFileSync(target, "utf8")).toBe("exact bytes");
+  });
   test("binary reads and oversized resources give actionable bounded errors", async () => {
     const folder = put("base", "web", "body");
     writeFileSync(join(folder, "binary.bin"), Buffer.from([0, 255]));
@@ -209,7 +216,8 @@ describe("skill-resource", () => {
   test("the Agent serializes an export before the following workspace read", async () => {
     put("base", "web", "body", "exact bytes");
     const { skillResource, toolDescription } = await import("../tools/skill-resource.js");
-    const host = await testEnv(); host.cwd = resolve(root);
+    env.close();
+    const host = await testEnv({}, { cwd: resolve(root) });
     host.skillResource = (name, path) => env.skillResource(name, path);
     host.toolAdd("skill-resource", skillResource, toolDescription()["skill-resource"]);
     host.toolAdd("inspect", () => readFileSync(join(root, "saved.js"), "utf8"), { safe: true, inputSchema: {} });
