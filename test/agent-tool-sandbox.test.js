@@ -21,12 +21,12 @@ const DONE = { type: "done" };
 
 async function fixtureEnv() {
   // dir AND cwd pinned to the same throwaway folder: the jail's
-  // working folder is env.cwd, so the outside-write probes (HOME —
+  // working folder is env.folder, so the outside-write probes (HOME —
   // the preload redirects it inside ./ai-tmp, outside THIS folder)
   // stay hermetic: denied for the jailed tool, allowed for the
   // control, neither touching anything outside the project.
   const dir = mkdtempSync("./ai-tmp/sandbox-");
-  const env = new Env({ dir, cwd: dir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+  const env = await Env.open(dir, { dir, settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
   await toolsLoad(env, { dirs: [FIXTURES] });
   return env;
 }
@@ -43,7 +43,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
       [...TOOLCALL(0, "c1", "crash", {}), DONE],
       [...TEXT(0, "still alive"), DONE],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const terminal = await agent.run({}); // the test process itself surviving is half the proof
 
     expect(terminal.type).toBe("done");
@@ -92,7 +92,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
       [...TOOLCALL(0, "c1", "guardfail", {}), DONE],
       [...TEXT(0, "ok"), DONE],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.run({});
 
     const [result] = toolResults(agent);
@@ -108,7 +108,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
       [...TOOLCALL(0, "c1", "slow", { ms: 50 }), DONE],
       [...TEXT(0, "ok"), DONE],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.run({});
     const [result] = toolResults(agent);
     expect(result.error).toBeUndefined();
@@ -127,7 +127,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
         [...TOOLCALL(0, "c1", "slow", { ms: 10 }), DONE],
         [...TEXT(0, "ok"), DONE],
       ]);
-      const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
       await agent.run({});
       const [result] = toolResults(agent);
       expect(result.error).toBeUndefined();
@@ -143,7 +143,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
       [...TOOLCALL(0, "c1", "slow", { ms: 30_000 }), DONE],
       [...TEXT(0, "recovered"), DONE],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
       toolCall: { timeout: 300 },
     });
@@ -159,22 +159,21 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
 
   test("timeout accepts unit strings (\"1s\" style durations)", async () => {
     const env = await fixtureEnv();
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => null,
       toolCall: { timeout: "2s" },
     });
     expect(agent._toolCall.timeout).toBe(2000);
   });
 
-  test("toolCall.async cannot overlap unmarked file tools, results append in order", async () => {
+  test("unmarked file tools run in order rather than overlap", async () => {
     const env = await fixtureEnv();
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "slow", { ms: 600 }), ...TOOLCALL(1, "c2", "slow", { ms: 600 }), DONE],
       [...TEXT(0, "both done"), DONE],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
-      toolCall: { async: true },
     });
     const started = Date.now();
     await agent.run({});
@@ -193,7 +192,7 @@ describe("tool sandbox: crash-proof forked tool calls", () => {
       [...TOOLCALL(0, "c1", "slow", { ms: 20 }), DONE],
       [...TEXT(0, "ok"), DONE],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
       toolCall: { fork: false },
     });
@@ -268,7 +267,7 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
       [...TOOLCALL(0, "c1", "jailed", {}), DONE],
       [...TEXT(0, "ok"), DONE],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
       toolCall: { fork: false }, // crash-proofing off — the sandbox still forks
     });
@@ -283,9 +282,9 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     const project = mkdtempSync("./ai-tmp/sandbox-project-");
     const folder = `${project}/agent`;
     mkdirSync(folder);
-    const env = new Env({ dir: project, cwd: project, settings: {} });
+    const env = await Env.open(project, { dir: project, settings: {} });
     await toolsLoad(env);
-    const agent = new Agent({ env, folder: "agent" });
+    const agent = await Agent.create({ env, folder: "agent" });
     const write = (path) => callToolSandboxed({ env, name: "write", file: fileOf(env, "write"),
       args: { path, content: "agent" }, sandbox: true, cwd: agent.folder });
     expect((await write("../sibling.txt")).ok).toBe(false);
@@ -302,9 +301,9 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
   test("disjoint embedded Agent reads Env and own trees but writes only its own tree", async () => {
     const project = mkdtempSync("./ai-tmp/sandbox-env-");
     const folder = mkdtempSync("./ai-tmp/sandbox-agent-");
-    const env = new Env({ dir: project, cwd: project, settings: {} });
+    const env = await Env.open(project, { dir: project, settings: {} });
     await toolsLoad(env);
-    const agent = new Agent({ env, folder: resolve(folder) });
+    const agent = await Agent.create({ env, folder: resolve(folder) });
     const call = (name, args) => callToolSandboxed({ env, name, file: fileOf(env, name),
       args, sandbox: true, cwd: agent.folder });
     const relativeProject = relative(folder, project);
@@ -332,7 +331,7 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
       [...TOOLCALL(0, "c1", "jailed", {}), ...TOOLCALL(1, "c2", "unjailed", {}), DONE],
       [...TEXT(0, "ok"), DONE],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.run({});
     const results = toolResults(agent);
     const jailed = results.find((m) => m.name === "jailed");
@@ -358,7 +357,7 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
       queueMicrotask(() => child.emit("close", 1)); // no result line: ordinary failure
       return child;
     };
-    const root = `${env.cwd}/narrow`;
+    const root = `${env.folder}/narrow`;
     mkdirSync(root);
     const result = await callToolSandboxed({ env, name: "slow", file: fileOf(env, "slow"), args: {}, sandbox: true, cwd: root, spawnImpl });
     expect(result.ok).toBe(false); // the fake child produced no result
@@ -374,7 +373,13 @@ describe("sandbox: true — the shared OS write sandbox for any tool", () => {
     } else {
       expect(call.file).not.toBe(process.execPath); // the sandbox wrapper leads
       expect(call.argv).toContain(process.execPath); // ...with the worker program inside
-      expect(call.argv.join(" ")).toContain(root); // the narrower folder, not env.cwd, is writable
+      expect(call.argv.join(" ")).toContain(root); // the narrower folder, not env.folder, is writable
+      if (kind === "bwrap") {
+        // A later read-only root mount hides earlier device/proc binds and
+        // crashes Bun before the worker can return its result.
+        expect(call.argv.indexOf("--ro-bind")).toBeLessThan(call.argv.indexOf("--dev-bind"));
+        expect(call.argv.indexOf("--ro-bind")).toBeLessThan(call.argv.indexOf("--proc"));
+      }
       if (process.platform !== "win32") expect(call.options.detached).toBe(true); // group kill reaches the jailed child
     }
   });

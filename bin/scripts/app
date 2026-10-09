@@ -1,10 +1,16 @@
 #!/usr/bin/env bun
 /** app — map command-line syntax into normalized application state. */
 import { basename } from "node:path";
-import AI from "../../lib/index_app.js";
+import AI from "../../lib/app.js";
+import Env from "../../lib/env.js";
+import { runMcpLogin } from "../../lib/app/cli/mcp-login.js";
+import { runLoginWizard } from "../../lib/app/cli/login.js";
+import { writeSettingsTemplate } from "../../lib/app/cli/init.js";
+import { listEndpointModels } from "../../lib/app/shared/catalog.js";
 import { formatHelp } from "./help.js";
 
-const { CLI, App, NAMES } = AI;
+const { App, NAMES } = AI;
+const { CLI } = App;
 // The invoked name: argv[1] holds the wrapper's file name; a bare
 // `bun bin/scripts/app` has none, so the app's own command — the bare
 // prefix — fills in (never a stale literal).
@@ -26,14 +32,13 @@ function launchState(args) {
     session: sessionState(args),
     inputFile: args.input,
     timeout: args.timeout,
-    safe: args.safe === true,
+    can: { write: args.safe !== true },
     tools: {
       names: typeof args.tools === "string" && args.tools !== "*"
         ? args.tools.split(",").map((name) => name.trim()).filter(Boolean)
         : args.tools,
-      call: { fork: !args["no-tool-fork"], timeout: args["tool-timeout"], async: args["tool-async"] === true },
+      call: { fork: !args["no-tool-fork"], timeout: args["tool-timeout"] },
     },
-    limits: { maxTurns: args["max-turns"], maxToolCalls: args["max-tool-calls"] },
     input: process.stdin,
     output: process.stdout,
     diagnostics: process.stderr,
@@ -54,25 +59,40 @@ async function administrativeCommand(args) {
           ? { type: "listModels" }
           : null;
   if (!command) return false;
-  const result = await CLI.execute(command);
-  if (result.type === "login") process.stderr.write(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})\n`);
-  if (result.type === "mcpLogin") process.stderr.write(`MCP signed in: ${result.name}\n`);
-  if (result.type === "logout") process.stderr.write(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}\n`);
-  if (result.type === "initialize") process.stderr.write(`wrote ${result.file}\n`);
-  if (result.type === "listModels") {
-    for (const { name, models } of result.endpoints) {
-      for (const model of models) process.stdout.write(`${name}/${model}\n`);
+  const env = await Env.open(process.cwd());
+  try {
+    if (command.type === "login") {
+      const result = await runLoginWizard(env);
+      process.stderr.write(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})\n`);
+    } else if (command.type === "mcpLogin") {
+      const result = await runMcpLogin(env, command.endpoint);
+      process.stderr.write(`MCP signed in: ${result.name}\n`);
+    } else if (command.type === "logout") {
+      const result = env.logout(command.endpoint);
+      process.stderr.write(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}\n`);
+    } else if (command.type === "initialize") {
+      process.stderr.write(`wrote ${writeSettingsTemplate(env, { force: command.force })}\n`);
+    } else if (command.type === "listModels") {
+      await env.modelsReady;
+      for (const { name, models } of listEndpointModels(env)) {
+        for (const model of models) process.stdout.write(`${name}/${model}\n`);
+      }
     }
+    return true;
+  } finally {
+    await CLI.close({ env });
   }
-  return true;
 }
 
 async function main() {
-  const args = CLI.parseFlags(process.argv.slice(2), { flags: valueFlags, bools: booleanFlags });
+  const args = CLI.parseFlags(process.argv.slice(2), { flags: valueFlags, bools: booleanFlags, numbers: ["max-turns", "max-tool-calls"] });
   if (args.session && args.resume) throw new Error("--session and --resume are mutually exclusive");
   if (args.help) {
     process.stdout.write(`${formatHelp(program)}\n`);
     return;
+  }
+  for (const flag of ["max-turns", "max-tool-calls", "tool-async"]) {
+    if (args[flag] !== undefined) throw new Error(`--${flag} is unsupported (no owning implementation)`);
   }
   if (await administrativeCommand(args)) return;
   if (args.serve) {
@@ -80,6 +100,7 @@ async function main() {
     const web = await serve({ ...launchState(args), host: args.host });
     process.stderr.write(`web: ${web.url}\n`);
     await web.done;
+    await web.stop();
     return;
   }
   const result = await App.TUI.run(launchState(args));

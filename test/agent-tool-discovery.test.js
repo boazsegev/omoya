@@ -45,7 +45,7 @@ describe("tool-folder discovery", () => {
       "real-tool.js": TOOL("real", "here"),
       "contest.js": TOOL("contest", "kept"), // contains "test" but no token boundary
     });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: join(ROOT, "empty-pkg"), settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: join(ROOT, "empty-pkg"), init: { tools: false }, settings: {} });
     const names = await toolsLoad(env, { dirs: [dir] });
 
     expect(names).toContain("real");
@@ -74,7 +74,7 @@ ${TOOL("quiet", "ok")}`,
     process.stderr.write = (c, ...r) => { errChunks.push(String(c)); r.find((a) => typeof a === "function")?.(); return true; };
     let env;
     try {
-      env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+      env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: {} });
       await toolsLoad(env, { dirs: [dir] });
     } finally {
       process.stdout.write = outWrite;
@@ -94,7 +94,7 @@ ${TOOL("quiet", "ok")}`,
       "ns/deep.js": `globalThis.__DEEP_IMPORTED = 1; ${TOOL("dig", "namespaced")}`,
       "ns/too/deep.js": TOOL("buried", "never"),
     });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(toolNames(env).sort()).toEqual(["hello", "tool-refresh"]);
     expect(await env.toolCall("hello")).toBe("root");
@@ -114,7 +114,7 @@ ${TOOL("quiet", "ok")}`,
       `,
       "real.js": TOOL("real", 1),
     });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(toolNames(env)).toContain("real");
     expect(toolNames(env)).not.toContain("extend");
@@ -150,7 +150,7 @@ ${TOOL("quiet", "ok")}`,
         export function retired() { return "never published"; }
       `,
     });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: {} });
     await toolsLoad(env, { dirs: [dir] });
     expect(await env.toolCall("viaDescribe")).toBe("from describe");
     expect(await env.toolCall("preferred")).toBe("from toolDescription");
@@ -158,15 +158,14 @@ ${TOOL("quiet", "ok")}`,
     expect(toolExists(env, "retired")).toBe(false); // toolSchema() is not a schema source
   });
 
-  test("tools.folders requires an array of non-empty strings", () => {
-    for (const folders of ["./tool", [null], [""], ["   "], {}]) {
-      const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: { tools: { folders } } });
-      expect(() => toolRoots(env)).toThrow("tools.folders must be an array of non-empty strings");
+  test("tools.folders accepts transitional paths but rejects invalid path values", async () => {
+    for (const folders of [null, [null], [""], ["   "], ["bad\0path"]]) {
+      await expect(Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: { tools: { folders } } })).rejects.toThrow(/tools\.folders/);
     }
   });
 
   test("missing/unreadable roots scan as empty; only built-ins remain", async () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: {} });
     const names = await toolsLoad(env, { dirs: [join(ROOT, "does-not-exist")] });
     expect(names).toEqual(["tool-refresh"]);
   });
@@ -176,7 +175,7 @@ ${TOOL("quiet", "ok")}`,
     const second = makeToolsDir("e", { "two.js": TOOL("two", 2) });
     // the package ./tools ships read/write/edit/question/skill/bash;
     // the settings-folder layer is the test preload's temp folder — empty
-    const env = new Env({ dir: ROOT, cwd: ROOT, settings: { tools: { folders: [first, second] } } });
+    const env = await Env.open(ROOT, { dir: ROOT, init: { tools: false }, settings: { tools: { folders: { [first]: true, [second]: true } } } });
     const roots = toolRoots(env);
     expect(roots[0]).toEndWith(`${sep}tools`); // the package's own tools/ first
     expect(roots.slice(-2)).toEqual([first, second]);
@@ -193,7 +192,7 @@ ${TOOL("quiet", "ok")}`,
     // would let an agent author its own unsandboxed tools. Tools
     // come from the package and the settings folder only.
     makeToolsDir("project-tools", { "evil.js": TOOL("evil", "injected") });
-    const env = new Env({ dir: ROOT, cwd: ROOT, settings: {} });
+    const env = await Env.open(ROOT, { dir: ROOT, init: { tools: false }, settings: {} });
     expect(toolRoots(env).join(sep)).not.toContain("project-tools");
     const names = await toolsLoad(env);
     expect(names).not.toContain("evil");
@@ -202,26 +201,27 @@ ${TOOL("quiet", "ok")}`,
 
   test("a `tools.folders` key in project settings is STRIPPED (same vector)", async () => {
     // SECURITY: the project-scoped settings file is agent-writable —
-    // it must never name tool roots (load.js drops the key before
+    // it must never name tool roots (the source graph drops the key before
     // the merge; package/settings-scoped settings.tools.folders still work)
     const injected = makeToolsDir("injected", { "evil.js": TOOL("evil", "injected") });
     const project = join(ROOT, "project");
     mkdirSync(project, { recursive: true });
-    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ tools: { folders: [injected], concurrency: 2 }, other: 1 }));
-    const env = new Env({ dir: ROOT, cwd: project, settings: {} });
-    expect(env.settings.tools.folders).toEqual([]); // stripped at load: only the default reads
+    writeFileSync(join(project, NAMES.projectSettings), JSON.stringify({ tools: { folders: { [injected]: true }, concurrency: 2 }, other: 1 }));
+    const env = await Env.open(project, { dir: ROOT, init: { tools: false }, settings: {} });
+    await env.ready(); // source discovery of the project settings file is asynchronous
+    expect(env.settings.tools.folders).toEqual({}); // stripped at load: only the default reads
     expect(env.settings.tools.concurrency).toBe(2);
     expect(env.settings.other).toBe(1); // the rest of the file merges normally
     expect(await toolsLoad(env)).not.toContain("evil");
   });
 
-  test("settings.tools.folders array works; package tools/ is the fallback default", async () => {
+  test("settings.tools.folders map works; package tools/ is the fallback default", async () => {
     const dir = makeToolsDir("single", { "one.js": TOOL("one", 1) });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: { tools: { folders: [dir] } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, init: { tools: false }, settings: { tools: { folders: { [dir]: true } } } });
     expect(await toolsLoad(env)).toContain("one");
 
     // no settings.tools.folders -> package ./tools (its tool set is content, not asserted)
-    const fallback = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settings: {} });
+    const fallback = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { init: { tools: false }, settings: {} });
     expect(toolRoots(fallback).join("/")).toContain("tools");
     const names = await toolsLoad(fallback);
     expect(names.length).toBeGreaterThan(0);

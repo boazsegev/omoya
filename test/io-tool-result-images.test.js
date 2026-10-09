@@ -14,7 +14,7 @@ const context = (blocks = [image], calls = ["one"]) => [
   { type: M.Assistant, content: calls.map(call) },
   ...calls.map((id, index) => ({ type: M.ToolResult, callId: id, name: "read", content: index ? [{ type: C.Text, text: "ok" }] : blocks })),
 ];
-const io = (input) => ({ modelCurrent: "test/example", settings: { ...(input ? { models: { example: { input } } } : {}), auth: { type: "oauth", token: "sk-ant-oat-test" } }, tools: () => [] });
+const io = (input) => ({ model: "test/claude-opus-5", settings: { ...(input ? { models: { "claude-opus-5": { input } } } : {}), auth: { type: "oauth", token: "sk-ant-oat-test" } }, tools: () => [] });
 const protocols = [
   ["anthropic", Anthropic, "https://api.anthropic.com/v1"],
   ["claude", Claude, "https://api.anthropic.com/v1"],

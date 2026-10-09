@@ -17,7 +17,7 @@
  * flags) — the note is a JSON store, capped per note.
  *
  * THE CALLS (all INTERACTIVE — they operate on the calling agent's
- * live context through the harness tool context `{agent, env}`,
+ * live context through the harness tool context `{agent, storage, messageSet}`,
  * never in the forked sandbox):
  *   note { action: "set", notes: { title: patch, ... } }
  *     merge-patch (RFC 7386) each note: objects merge recursively,
@@ -66,7 +66,7 @@
  *     context like any other entry.
  *
  * THE STICKY DISPLAY: every call also refreshes the agent's sticky
- * tool MESSAGE (Agent.toolMessageSet — agent-owned, the TUI
+ * tool MESSAGE (context.messageSet — agent-local, the TUI
  * collects it from the viewed agent): every note, one line
  * each, the type's badge emoji heading the bold title with its
  * summary trailing when set — DONE notes trail every open one (still
@@ -180,10 +180,11 @@ function applyNoteCall(notes, args) {
  * the calls were compacted/edited away: the snapshot answers and
  * nothing resurrects. Finally the agent's sticky message refreshes.
  * @param {object} agent
- * @param {object} [storage]
+ * @param {object} [storage] Tool-owned cache (ephemeral).
+ * @param {(text: string|null) => *} [messageSet] Tool-owned display setter.
  * @returns {Map<string, object>}
  */
-function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
+function notesFrom(agent, storage = {}, messageSet) {
   const context = agent.context.messages();
   const owner = agent.context; // the snapshot mirror is keyed by the live Context
   const notes = new Map();
@@ -229,7 +230,7 @@ function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
   if (!context.some((entry) => typeof entry?.type === "number")) {
     notes.clear();
     box.snapshot = undefined;
-    publish(agent, notes);
+    publish(messageSet, notes);
     return notes;
   }
   if (snapshot?.owner === owner && lastRecord !== null &&
@@ -240,10 +241,10 @@ function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
     // fresh; an empty derivation with a NON-empty snapshot keeps the
     // snapshot: the calls were compacted away and nothing resurrects)
     const current = new Map([...snapshot.notes].map(([title, note]) => [title, { ...note }]));
-    publish(agent, current);
+    publish(messageSet, current);
     return current;
   }
-  publish(agent, notes); // the sticky display follows the store
+  publish(messageSet, notes); // the sticky display follows the store
   return notes;
 }
 
@@ -252,7 +253,7 @@ function notesFrom(agent, storage = agent.toolStorage?.("note") ?? {}) {
  *  records), and the note tool's storage mirrors it ({owner, record,
  *  notes}) so the next derivation can prefer it over the record's own
  *  replay. Only set/remove call this — the mutation actions. */
-function persist(agent, storage, notes) {
+function persist(agent, storage, notes, messageSet) {
   const record = { type: RECORD_TYPE, notes: Object.fromEntries(notes) };
   // the Context append: the record joins the context AND its session file
   agent.context.append(record);
@@ -263,7 +264,7 @@ function persist(agent, storage, notes) {
       notes: new Map([...notes].map(([title, note]) => [title, structuredClone(note)])),
     };
   }
-  publish(agent, notes); // the sticky display follows the store
+  publish(messageSet, notes); // the sticky display follows the store
 }
 
 /** The type's badge prefix ("" when untyped; the 📂 fallback for an
@@ -288,10 +289,10 @@ function clip(text, max = MAX_EXTRA) {
  * longer truncates its own message; the display decides how many
  * lines actually fit). An empty result clears the message.
  */
-function publish(agent, notes) {
-  if (typeof agent.toolMessageSet !== "function") return; // a bare context (tests)
+function publish(messageSet, notes) {
+  if (typeof messageSet !== "function") return; // a bare context (tests)
   if (notes.size === 0) {
-    agent.toolMessageSet("note", null);
+    messageSet(null);
     return;
   }
   const open = [...notes.entries()].filter(([, note]) => note.type !== "done");
@@ -300,7 +301,7 @@ function publish(agent, notes) {
     const summary = typeof note.summary === "string" ? note.summary.trim() : "";
     return `${badge(note.type)}**${title}**${summary ? ` — ${clip(summary)}` : ""}`;
   });
-  agent.toolMessageSet("note", lines.join("\n"));
+  messageSet(lines.join("\n"));
 }
 
 /** Validate a title; returns the trimmed key. */
@@ -326,7 +327,7 @@ function fieldsCheck(note) {
 /** set: validate the patch map and simulate the merge (the store caps
  *  and field bounds are enforced BEFORE this call joins the context —
  *  a failed call applies nothing). */
-function setAction(notesMap, agent, storage) {
+function setAction(notesMap, agent, storage, messageSet) {
   if (Array.isArray(notesMap)) {
     throw new Error('note: "set" needs a title → patch map ({notes: {"my title": {content: "…"}}}) — an array of titles selects notes for get/remove only');
   }
@@ -339,7 +340,7 @@ function setAction(notesMap, agent, storage) {
   // apply to a WORKING COPY of the derived store: validate the whole
   // map first (a failed call applies nothing), then persist the
   // post-call snapshot
-  const sim = notesFrom(agent, storage);
+  const sim = notesFrom(agent, storage, messageSet);
   for (const [title, patch] of entries) {
     const key = titleField(title);
     if (patch === null) continue; // a deletion (missing notes delete silently)
@@ -356,16 +357,16 @@ function setAction(notesMap, agent, storage) {
   for (const [title, patch] of entries) {
     if (patch === null) sim.delete(title.trim());
   }
-  persist(agent, storage, sim);
+  persist(agent, storage, sim, messageSet);
   const n = entries.length;
   return n === 1 ? "note saved" : `${n} notes saved`;
 }
 
 /** get: read notes; returns a uniform title → note map (missing
  *  titles reported in-line, never an error). */
-function getAction(titles, only, agent, storage) {
-  const list = selector(titles, agent, storage);
-  const notes = notesFrom(agent, storage);
+function getAction(titles, only, agent, storage, messageSet) {
+  const list = selector(titles, agent, storage, messageSet);
+  const notes = notesFrom(agent, storage, messageSet);
   if (only !== undefined && (!Array.isArray(only) || only.some((f) => typeof f !== "string" || f === ""))) {
     throw new Error('note: "only" must be an array of field names');
   }
@@ -386,29 +387,29 @@ function getAction(titles, only, agent, storage) {
 }
 
 /** remove: delete notes by selector (["*"] deletes every note). */
-function removeAction(titles, agent, storage) {
-  const notes = notesFrom(agent, storage);
+function removeAction(titles, agent, storage, messageSet) {
+  const notes = notesFrom(agent, storage, messageSet);
   if (Array.isArray(titles) && titles.includes("*")) {
     if (notes.size === 0) return "no notes to remove";
     const n = notes.size;
-    persist(agent, storage, new Map()); // the empty snapshot: a full clear stays cleared
+    persist(agent, storage, new Map(), messageSet); // the empty snapshot: a full clear stays cleared
     return `removed all ${n} note${n === 1 ? "" : "s"}`;
   }
-  const list = selector(titles, agent, storage);
+  const list = selector(titles, agent, storage, messageSet);
   if (list.length > MAX_BATCH) throw new Error(`note: ${list.length} notes in one call — the cap is ${MAX_BATCH}`);
   if (list.length === 0) return "no notes to remove";
   const missing = list.filter((key) => !notes.has(key));
   const n = list.length - missing.length;
   const verb = n === 1 ? "note removed" : `removed ${n} notes`;
   const reply = missing.length === 0 ? verb : `${verb} (no note: ${missing.join(", ")})`;
-  if (n > 0) persist(agent, storage, new Map([...notes].filter(([key]) => !list.includes(key))));
+  if (n > 0) persist(agent, storage, new Map([...notes].filter(([key]) => !list.includes(key))), messageSet);
   return reply;
 }
 
 /** list: every OPEN note (type badge + title) — DONE notes are hidden
  *  here (a footer counts them) but stay reachable via get/search. */
-function listAction(agent, storage) {
-  const notes = notesFrom(agent, storage);
+function listAction(agent, storage, messageSet) {
+  const notes = notesFrom(agent, storage, messageSet);
   const shown = [...notes.entries()].filter(([, note]) => note.type !== "done");
   const done = notes.size - shown.length;
   if (shown.length === 0) {
@@ -420,7 +421,7 @@ function listAction(agent, storage) {
 
 /** search: regex over the title and every field (non-string values
  *  search their JSON). */
-function searchAction(pattern, field, max, agent, storage) {
+function searchAction(pattern, field, max, agent, storage, messageSet) {
   if (typeof pattern !== "string" || pattern.trim() === "") {
     throw new Error('note: "search" requires "pattern" (a regular expression, case-insensitive)');
   }
@@ -434,7 +435,7 @@ function searchAction(pattern, field, max, agent, storage) {
     throw new Error(`note: invalid regular expression — ${err.message}`);
   }
   const cap = Math.max(1, Math.min(MAX_MATCHES, Number(max) || 20));
-  const notes = notesFrom(agent, storage);
+  const notes = notesFrom(agent, storage, messageSet);
   const hits = [];
   for (const [title, note] of notes) {
     const candidates = field === "title" || field === undefined ? [["title", title]] : [];
@@ -460,9 +461,9 @@ function searchAction(pattern, field, max, agent, storage) {
  *  strings trim and validate; the map form's KEYS are the selector
  *  (tolerance — the shapes route by type, so a map here is the model
  *  handing over a patch map for a read/delete). */
-function selector(titles, agent, storage) {
+function selector(titles, agent, storage, messageSet) {
   const all = titles === "*" || (Array.isArray(titles) && titles.includes("*"));
-  if (all) return [...notesFrom(agent, storage).keys()];
+  if (all) return [...notesFrom(agent, storage, messageSet).keys()];
   const list = Array.isArray(titles) ? titles
     : titles !== null && typeof titles === "object" ? Object.keys(titles) // the map form: its keys
     : undefined;
@@ -480,13 +481,13 @@ function selector(titles, agent, storage) {
  */
 function note({ action, notes, pattern, field, max, only } = {}, context) {
   const agent = anchor(context);
-  const storage = agent.toolStorage?.("note"); // the note tool's own box (undefined for a bare context)
+  const { storage = {}, messageSet } = context;
   switch (action) {
-    case "set": return setAction(notes, agent, storage);
-    case "get": return getAction(notes, only, agent, storage);
-    case "list": return listAction(agent, storage);
-    case "remove": return removeAction(notes, agent, storage);
-    case "search": return searchAction(pattern, field, max, agent, storage);
+    case "set": return setAction(notes, agent, storage, messageSet);
+    case "get": return getAction(notes, only, agent, storage, messageSet);
+    case "list": return listAction(agent, storage, messageSet);
+    case "remove": return removeAction(notes, agent, storage, messageSet);
+    case "search": return searchAction(pattern, field, max, agent, storage, messageSet);
     default:
       throw new Error(`note: "action" must be one of set, get, list, remove, search${typeof action === "string" ? ` (got "${action}")` : ""}`);
   }
@@ -511,7 +512,7 @@ export function toolDescription() {
       // Session startup/resume needs the same context-derived sticky state
       // before any new note call occurs; the detector is harness-only.
       storage: "note",
-      detect: ({ agent }) => notesFrom(agent, agent.toolStorage("note")),
+      detect: ({ agent, storage, messageSet }) => notesFrom(agent, storage, messageSet),
       description: "Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use [\"*\"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.",
       inputSchema: {
         type: "object",

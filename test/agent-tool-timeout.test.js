@@ -29,23 +29,23 @@ function register(env, name, fn, { onTimeout } = {}) {
 }
 
 describe("Agent-owned tool timeout policy", () => {
-  test("each Agent resolves duration-parsed tool timeouts once, when created; the callback grace is fixed", () => {
-    const defaults = new Agent({ env: new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} }) });
-    expect(defaults.policy.tools).toMatchObject({ timeout: 120_000, timeoutLimit: 1_200_000 });
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: "3s", timeoutLimit: "7m" } } });
-    const agent = new Agent({ env });
-    expect(agent.policy.tools).toMatchObject({ timeout: 3000, timeoutLimit: 420_000 });
+  test("each Agent resolves duration-parsed tool timeouts once, when created; the callback grace is fixed", async () => {
+    const defaults = await Agent.create({ env: await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: {} }) });
+    expect(defaults._policyCurrent.tools).toMatchObject({ timeout: 120_000, timeoutLimit: 1_200_000 });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: "3s", timeoutLimit: "7m" } } });
+    const agent = await Agent.create({ env });
+    expect(agent._policyCurrent.tools).toMatchObject({ timeout: 3000, timeoutLimit: 420_000 });
     env.settings.tools.timeout = "9s"; // a later settings edit applies to the NEXT Agent
-    expect(agent.policy.tools.timeout).toBe(3000);
-    expect(new Agent({ env }).policy.tools.timeout).toBe(9000);
+    expect(agent._policyCurrent.tools.timeout).toBe(3000);
+    expect((await Agent.create({ env }))._policyCurrent.tools.timeout).toBe(9000);
     expect(TOOL_ON_TIMEOUT_LIMIT).toBe(60_000);
     for (const a of [defaults, agent]) a.close();
   });
 
   test("tools receive the actual resolved deadline including per-call overrides", async () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: "30s", timeoutLimit: "40s" } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: "30s", timeoutLimit: "40s" } } });
     register(env, "deadline", (_args, context) => context.deadline);
-    const agent = new Agent({ env });
+    const agent = await Agent.create({ env });
     for (const [args, duration] of [[{}, 30_000], [{ timeout: 5_000 }, 5_000], [{ timeout: 90_000 }, 40_000]]) {
       const startedAt = Date.now();
       const deadline = await agent._callTool("deadline", args, call("deadline", args));
@@ -55,7 +55,7 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("a declared timeout is extracted, capped, and onTimeout may return the final result", async () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 100, timeoutLimit: 35 } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: 100, timeoutLimit: 35 } } });
     let invokedArgs;
     let timeoutContext;
     register(env, "timed-final", async (args) => {
@@ -69,7 +69,7 @@ describe("Agent-owned tool timeout policy", () => {
         return "final from timeout";
       },
     });
-    const agent = new Agent({ env, context: [] });
+    const agent = await Agent.create({ env, context: [] });
     const started = Date.now();
     const outcome = await agent._execute(call("timed-final", { value: "kept", timeout: 5000 }));
     expect(Date.now() - started).toBeLessThan(140);
@@ -82,12 +82,12 @@ describe("Agent-owned tool timeout policy", () => {
   });
 
   test("cleanup-only onTimeout keeps the ordinary timeout error", async () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 25, timeoutLimit: 100 } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: 25, timeoutLimit: 100 } } });
     let cleaned = 0;
     register(env, "timed-cleanup", () => new Promise(() => {}), {
       onTimeout: () => { cleaned++; },
     });
-    const agent = new Agent({ env, context: [] });
+    const agent = await Agent.create({ env, context: [] });
     const outcome = await agent._execute(call("timed-cleanup", {}));
     expect(cleaned).toBe(1);
     expect(outcome.message).toMatchObject({ type: 4, error: true, name: "timed-cleanup" });
@@ -97,9 +97,9 @@ describe("Agent-owned tool timeout policy", () => {
     // The interactive 5-minute first window (prepareToolTimeout's
     // question-capable fallback) must never extend a call past
     // toolTimeoutLimit: a tight limit caps the boost too.
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 50, timeoutLimit: 150 } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: 50, timeoutLimit: 150 } } });
     register(env, "asking", () => new Promise(() => {})); // never settles
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, context: [],
       question: { ask: async () => null }, // bridge present: the boost applies
     });
@@ -109,17 +109,17 @@ describe("Agent-owned tool timeout policy", () => {
     expect(textOf(outcome)).toContain('tool "asking" timed out after 150ms');
 
     // Room under the limit: the full 5-minute first window applies.
-    const roomy = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 50 } } });
+    const roomy = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: 50 } } });
     register(roomy, "asking-roomy", () => new Promise(() => {}));
-    const roomyAgent = new Agent({ env: roomy, context: [], question: { ask: async () => null } });
+    const roomyAgent = await Agent.create({ env: roomy, context: [], question: { ask: async () => null } });
     const prepared = (await import("../lib/agent/tool-timeout.js")).prepareToolTimeout(
       roomyAgent, toolEntry(roomy, "asking-roomy"), {});
     expect(prepared.timeout).toBe(300_000);
   });
 
   test("clears the ordinary deadline after a fast tool settles", async () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { tools: { timeout: 100_000 } } });
-    const agent = new Agent({ env, context: [] });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { tools: { timeout: 100_000 } } });
+    const agent = await Agent.create({ env, context: [] });
     let cleared = 0;
     const outcome = await runWithToolTimeout({
       agent, entry: null, name: "fast", args: {}, call: call("fast"), timeout: 100_000,
@@ -129,8 +129,27 @@ describe("Agent-owned tool timeout policy", () => {
     expect(cleared).toBe(1);
   });
 
-  test("onTimeout is validated and stripped from the provider catalog", () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} });
+  test("the question bridge receives an owned reset capability only during dispatch", async () => {
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: {} });
+    const prior = () => {};
+    const bridge = { ask: async () => [], resetTimeout: prior };
+    const agent = await Agent.create({ env, question: bridge });
+    const run = (invoke) => runWithToolTimeout({ agent, entry: null, name: "bridge", args: {}, call: call("bridge"), timeout: 1000, invoke });
+    expect(await run(() => {
+      expect(bridge.resetTimeout).not.toBe(prior);
+      bridge.resetTimeout();
+      return "ok";
+    })).toBe("ok");
+    expect(bridge.resetTimeout).toBe(prior);
+    await expect(run(() => { throw new Error("failed"); })).rejects.toThrow("failed");
+    expect(bridge.resetTimeout).toBe(prior);
+    agent.question = Object.freeze({ ask: async () => [] });
+    expect(await run(() => "frozen bridge works")).toBe("frozen bridge works");
+    agent.close(); env.close();
+  });
+
+  test("onTimeout is validated and stripped from the provider catalog", async () => {
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: {} });
     const hook = () => "done";
     register(env, "private-timeout-hook", () => "ok", { onTimeout: hook });
     expect(toolEntry(env, "private-timeout-hook").onTimeout).toBe(hook);

@@ -31,7 +31,7 @@ function write(rel, content, mtimeSec) {
 describe("refreshTools()", () => {
   test("changed module code is used by the next call (cache-busted re-import)", async () => {
     write("ver.js", VERSION(1), 1000);
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [DIR] });
     expect(await env.toolCall("ver", {})).toBe("v1");
 
@@ -52,7 +52,7 @@ const { value } = await import(\`./helper/value.js?now=\${toolRevision()}\`);
 export function toolDescription() { return { wrapped: { description: "w", inputSchema: {} } }; }
 export function wrapped() { return value(); }
 `, 1000);
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [DIR] });
     expect(toolNames(env)).toContain("wrapped");
     expect(toolExists(env, "helper-value")).toBe(false); // sub-folders are NOT scanned
@@ -65,7 +65,7 @@ export function wrapped() { return value(); }
 
   test("added and removed tools rebuild the schema and callable indexes", async () => {
     write("ver.js", VERSION(1), 1000);
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [DIR] });
     expect(toolNames(env).sort()).toEqual(["tool-refresh", "ver"]);
 
@@ -80,7 +80,7 @@ export function wrapped() { return value(); }
 
   test("built-in tools survive rebuilds", async () => {
     write("ver.js", VERSION(1), 1000);
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, settings: {} });
     await toolsLoad(env, { dirs: [DIR] });
     await toolsRefresh(env);
     expect(toolExists(env, "tool-refresh")).toBe(true);
@@ -88,7 +88,7 @@ export function wrapped() { return value(); }
 
   test("the model drives refresh: tool-refresh call -> next tool call uses the rebuilt registry", async () => {
     write("ver.js", VERSION(1), 1000);
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: ROOT, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: ROOT, settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env, { dirs: [DIR] });
     expect(await env.toolCall("ver", {})).toBe("v1");
     write("ver.js", VERSION(2), 2000); // module changes BEFORE the refresh call
@@ -101,7 +101,7 @@ export function wrapped() { return value(); }
       // turn 3: final answer
       [...TEXT(0, "done"), { type: "done" }],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [USER("refresh then read")],
       createIO: () => io,
     });

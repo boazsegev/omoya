@@ -1,5 +1,5 @@
 // test/agent-cancel.test.js — proof for cancellation + session:
-// aiio.close() emits a terminal partial, Agent persists it (synced
+// aiio.cancel() emits a terminal partial, Agent persists it (synced
 // onDone), resume restores it — the Agent-side half of the pattern
 // proven for stores in test/test-wiki-store.test.js.
 import { NAMES } from "../lib/namespace.js";
@@ -25,8 +25,8 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 const lines = (file) => readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
   .filter((record) => record?.type !== "session-metadata"); // the first, origin line
 
-/** A fake IO that streams a partial then blocks until kill();
- *  `streaming` resolves once the partial is out (cancel after that). */
+/** A fake IO that streams a partial then blocks until interrupted.
+ *  `streaming` resolves for the first partial; nextStreaming() arms another. */
 function hangingIO(partialText) {
   let started;
   const streaming = new Promise((resolve) => { started = resolve; });
@@ -46,14 +46,15 @@ function hangingIO(partialText) {
     });
   });
   io.streaming = streaming;
+  io.nextStreaming = () => new Promise((resolve) => { started = resolve; });
   return io;
 }
 
-describe("Agent cancellation: kill → partial persisted → resume restores", () => {
+describe("Agent cancellation: interrupt → partial persisted → resume restores", () => {
   test("partial assistant message lands in the session log and replays", async () => {
     const env = await testEnv({ sessions: resolve(ROOT) });
     const io = hangingIO("partial ans");
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", contextId: "cancel", context: [USER("long question")], createIO: () => io,
     });
 
@@ -63,7 +64,10 @@ describe("Agent cancellation: kill → partial persisted → resume restores", (
     const terminal = await runPromise;
 
     expect(terminal).toMatchObject({ type: "error", kind: "cancelled", cancelled: true });
-    expect(io.state).toBe("closed"); // killed IO is permanently closed
+    expect(io.state).toBe("idle"); // interruption leaves the same IO reusable
+    expect(io.cancels).toBe(1);
+    expect(io.closes).toBe(0);
+    expect(agent.io).toBe(io);
 
     // persisted WITHOUT manual flush (Agent syncs on the terminal)
     const file = agent.context.file;
@@ -80,33 +84,56 @@ describe("Agent cancellation: kill → partial persisted → resume restores", (
     });
   });
 
-  test("the run after a kill uses a reconstructed IO", async () => {
+  test("the run after cancellation reuses the same IO and re-arms interruption", async () => {
     const env = await testEnv();
     let made = 0;
-    const ios = [];
-    let onMade;
-    const nextIO = () => new Promise((resolve) => { onMade = resolve; });
-    const agent = new Agent({
+    const io = hangingIO("part");
+    const agent = await Agent.create({
       env, model: "p/m", context: [USER("q")],
-      createIO: () => {
-        made++;
-        const io = hangingIO(`part ${made}`);
-        ios.push(io);
-        onMade?.(io);
-        return io;
-      },
+      createIO: () => { made++; return io; },
     });
-    const firstIO = nextIO();
     const first = agent.run();
-    await (await firstIO).streaming;
+    await io.streaming;
     await agent.cancel();
-    await first;
-    // second run: new instance (kill closed the first) — cancel it too
-    const secondIO = nextIO();
+    expect(await first).toMatchObject({ type: "error", kind: "cancelled", cancelled: true });
+    expect(io.state).toBe("idle");
+    const secondStreaming = io.nextStreaming();
+    agent.context.append(USER("continue"));
     const second = agent.run();
-    await (await secondIO).streaming;
+    await secondStreaming;
     await agent.cancel();
-    await second;
+    expect(await second).toMatchObject({ type: "error", kind: "cancelled", cancelled: true });
+    expect(made).toBe(1);
+    expect(io.writes).toHaveLength(2);
+    expect(io.cancels).toBe(2);
+    expect(io.closes).toBe(0);
+    expect(io.state).toBe("idle");
+  });
+
+  test("explicit IO.close interrupts permanently; the next run constructs a replacement", async () => {
+    const env = await testEnv();
+    const firstIO = hangingIO("partial");
+    const replacement = scriptedIO([[...TEXT(0, "continued"), { type: "done" }]]);
+    let made = 0;
+    const agent = await Agent.create({
+      env, model: "p/m", context: [USER("q")],
+      createIO: () => ++made === 1 ? firstIO : replacement,
+    });
+    const first = agent.run();
+    await firstIO.streaming;
+    await firstIO.close();
+    expect(await first).toMatchObject({ type: "error", kind: "cancelled", cancelled: true });
+    expect(firstIO.state).toBe("closed");
+    expect(firstIO.cancels).toBe(0);
+    expect(firstIO.closes).toBe(1);
+    await firstIO.close();
+    await firstIO.cancel();
+    expect(firstIO.state).toBe("closed");
+    expect(firstIO.closes).toBe(1);
+    await expect(firstIO.write(agent.context)).rejects.toThrow("closed");
+    agent.context.append(USER("continue"));
+    expect((await agent.run()).type).toBe("done");
+    expect(agent.io).toBe(replacement);
     expect(made).toBe(2);
   });
 });
@@ -125,19 +152,24 @@ describe("CLI-level: SIGINT persists the partial into --session", () => {
     const stale = Context.fileOf({ dir: dir, id: sessionId });
     if (stale) rmSync(stale, { force: true });
 
+    let requestStarted;
+    const started = new Promise((resolveStarted) => { requestStarted = resolveStarted; });
     server = Bun.serve({
       port: 0,
-      fetch: () => new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(
-              JSON.stringify({ message: { role: "assistant", content: "par" }, done: false }) + "\n",
-            ));
-            release.push(() => { try { controller.close(); } catch { /* client gone */ } }); // hang until afterEach
-          },
-        }),
-        { headers: { "content-type": "application/x-ndjson" } },
-      ),
+      fetch: () => {
+        requestStarted();
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(
+                JSON.stringify({ message: { role: "assistant", content: "par" }, done: false }) + "\n",
+              ));
+              release.push(() => { try { controller.close(); } catch { /* client gone */ } }); // hang until afterEach
+            },
+          }),
+          { headers: { "content-type": "application/x-ndjson" } },
+        );
+      },
     });
 
     const proc = Bun.spawn(
@@ -148,7 +180,9 @@ describe("CLI-level: SIGINT persists the partial into --session", () => {
     );
     proc.stdin.write("stream me");
     proc.stdin.end();
-    await Bun.sleep(700); // partial frame arrives, stream hangs
+    // Wait for the CLI's actual request instead of guessing startup latency.
+    await Promise.race([started, Bun.sleep(5000).then(() => { throw new Error("CLI request did not start"); })]);
+    await Bun.sleep(50); // let the delivered partial frame reach the client
     proc.kill("SIGINT");
     const [stdout, stderr, exit] = await Promise.all([
       new Response(proc.stdout).text(),
@@ -174,7 +208,7 @@ describe("CLI-level: SIGINT persists the partial into --session", () => {
 describe("Agent cancellation: in-flight TOOL children", () => {
   const FIXTURES = "./test/tool-fixtures";
   const fixtureEnv = async () => {
-    const env = new Env({ dir: mkdtempSync("./ai-tmp/cancel-tool-"), settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/cancel-tool-"), { dir: mkdtempSync("./ai-tmp/cancel-tool-"), settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env, { dirs: [FIXTURES] });
     return env;
   };
@@ -186,7 +220,7 @@ describe("Agent cancellation: in-flight TOOL children", () => {
       [...TOOLCALL(0, "c1", "slow", { ms: 2_000 }), { type: "done" }],
       [...TEXT(0, "should never stream"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const run = agent.run({});
     await Bun.sleep(200); // the forked "slow" tool is in flight
     await agent.cancel(); // SIGINT (a BUN worker shrugs it off; the loop still stops)
@@ -206,7 +240,7 @@ describe("Agent cancellation: in-flight TOOL children", () => {
       [...TOOLCALL(0, "c1", "stubborn", { ms: 30_000 }), { type: "done" }], // ignores SIGINT
       [...TEXT(0, "should never stream"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const run = agent.run({});
     await Bun.sleep(300); // the forked tool is in flight, SIGINT-proof
     await agent.cancel();
@@ -224,7 +258,7 @@ describe("Agent cancellation: in-flight TOOL children", () => {
       [...TOOLCALL(0, "c1", "unkillable", { ms: 30_000 }), { type: "done" }], // ignores SIGINT+SIGTERM
       [...TEXT(0, "should never stream"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const run = agent.run({});
     await Bun.sleep(300);
     await agent.cancel();
@@ -237,12 +271,12 @@ describe("Agent cancellation: in-flight TOOL children", () => {
   }, 15000);
 
   test("cancel kills the sandboxed bash process group before it can stream again", async () => {
-    const env = new Env({ dir: mkdtempSync("./ai-tmp/cancel-bash-"), settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/cancel-bash-"), { dir: mkdtempSync("./ai-tmp/cancel-bash-"), settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env, { dirs: ["./tools"] });
     expect(toolEntry(env, "bash")).toMatchObject({ sandbox: true });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "bash", { command: "printf 'first\\n'; sleep 2; printf 'late\\n'" }), { type: "done" }]]);
     const chunks = [];
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     agent.onEvent(Agent.EVENT.TOOL_DATA, ({ chunk }) => chunks.push(chunk));
     const run = agent.run({});
     await Bun.sleep(200);
@@ -257,7 +291,7 @@ describe("Agent cancellation: in-flight TOOL children", () => {
   test("a fresh run re-arms the cancel path (no stale cancel flag)", async () => {
     const env = await fixtureEnv();
     const io = scriptedIO([[...TEXT(0, "fine"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.cancel(); // outside a run: only the flag sets
     const terminal = await agent.run({});
     expect(terminal.type).toBe("done");

@@ -1,5 +1,6 @@
 // Outgoing request sanitizer and normalized response validation.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { Context } from "../lib/context.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
@@ -8,9 +9,9 @@ import { sanitizeRequest } from "../lib/io/sanitize.js";
 import { providerAdd } from "./env-internals.js";
 
 let dir, env;
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "io-sv-")));
-  env = new Env({ dir, cwd: dir });
+  env = await Env.open(dir, { dir });
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -45,18 +46,18 @@ function providerWithEvents(events) {
 }
 function makeIO(events) {
   providerAdd(env, "fake", providerWithEvents(events));
-  env._endpoints.fake = { provider: "fake", url: "test://fake" };
+  env.settings.providers.fake = { provider: "fake", url: "test://fake" };
   return new IO({ env, model: "fake/m" });
 }
 
 describe("response validator", () => {
   test("invalid events become classified malformed terminals", async () => {
-    const terminal = await makeIO([{ type: "bogus" }]).write([{ type: 2, content: [] }]);
+    const terminal = await makeIO([{ type: "bogus" }]).write(new Context({ messages: [{ type: 2, content: [] }] }));
     expect(terminal).toMatchObject({ type: "error", kind: "malformed" });
     expect(terminal.error).toMatch(/invalid connector event/);
   });
   test("indexed events require contentIndex", async () => {
-    const terminal = await makeIO([{ type: "text_delta", text: "x" }]).write([{ type: 2, content: [] }]);
+    const terminal = await makeIO([{ type: "text_delta", text: "x" }]).write(new Context({ messages: [{ type: 2, content: [] }] }));
     expect(terminal.kind).toBe("malformed");
   });
   test("metadata passes through valid events", async () => {
@@ -64,13 +65,13 @@ describe("response validator", () => {
     const terminal = await makeIO([
       { type: "text_delta", contentIndex: 0, text: "ok", native: { id: "msg_1" } },
       { type: "done", providerTag: "xyz", usage: { inputTokens: 1, outputTokens: 1 } },
-    ]).write([{ type: 2, content: [] }], { onTextDelta: (event) => seen.push(event) });
+    ]).write(new Context({ messages: [{ type: 2, content: [] }] }), { onTextDelta: (event) => seen.push(event) });
     expect(seen[0].native).toEqual({ id: "msg_1" });
     expect(terminal.providerTag).toBe("xyz");
     expect(terminal.usage.source).toBe("provider");
   });
   test("nil translator results are skipped", async () => {
-    const terminal = await makeIO([null, false, undefined, { type: "text_delta", contentIndex: 0, text: "ok" }]).write([{ type: 2, content: [] }]);
+    const terminal = await makeIO([null, false, undefined, { type: "text_delta", contentIndex: 0, text: "ok" }]).write(new Context({ messages: [{ type: 2, content: [] }] }));
     expect(terminal.type).toBe("done");
   });
 });

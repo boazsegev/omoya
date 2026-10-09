@@ -12,7 +12,7 @@ describe("delayed continuation", () => {
       [{ type: "error", kind: "provider", status: 429, retryAfterMs: 30, error: "Rate limit reached" }],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const events = [];
     agent.onEvent(Agent.EVENT.THROTTLED, (value) => events.push(value));
     try {
@@ -30,7 +30,7 @@ describe("delayed continuation", () => {
     env.settings.retry = { attempts: 1 };
     const error = new HttpStatusError(429, "Too Many Requests", JSON.stringify({ error: { message: "Rate limit reached. Please try again in 0.025s." } }));
     const io = scriptedIO([[{ type: "error", kind: "provider", status: error.status, retryAfterMs: retryAfterMs(error), error: error.message }], [{ type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     try {
       await agent.run();
       await Bun.sleep(75);
@@ -41,7 +41,7 @@ describe("delayed continuation", () => {
   it("send overrides the pending timer with an immediate turn", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     try {
       const scheduled = agent.run({ after: 90 });
       await agent.send(USER("new input"));
@@ -56,7 +56,7 @@ describe("delayed continuation", () => {
     it(`${action} cancels a scheduled continuation without a provider request`, async () => {
       const env = await testEnv();
       const io = scriptedIO([[{ type: "done" }]]);
-      const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
       try {
         const scheduled = agent.run({ after: 40 });
         expect(agent.throttledUntil).toBeGreaterThan(Date.now());
@@ -72,7 +72,7 @@ describe("delayed continuation", () => {
   it("an immediate run cancels a delayed run without a duplicate timer", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     try {
       agent.run({ after: 80 });
       await agent.run();

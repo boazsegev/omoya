@@ -20,7 +20,7 @@ function setup() {
   mkdirSync(folder, { recursive: true });
   const file = resolve(project, "file with spaces.txt");
   writeFileSync(file, "old\n");
-  return { project, folder, file, context: { env: { cwd: project }, agent: { folder } } };
+  return { project, folder, file, context: { env: { folder: project }, agent: { folder } } };
 }
 
 function contentText(result) {
@@ -83,15 +83,15 @@ describe("material path policy and tool-owned labels", () => {
 
   test("Agent preserves tool-owned arguments, including refused originals", async () => {
     const { project, file } = setup();
-    const env = await Env.create({ cwd: project, dir: project, settingsDir: project, settings: {
+    const env = await Env.open(project, { dir: project, settingsDir: project, settings: {
       providers: { fixture: { provider: "test", url: "test://script" } },
-    } }, { providers: false, models: false });
+    }, init: { providers: false, models: false } });
     const calls = [file, resolve(ROOT, "outside.txt")];
     const io = scriptedIO([
       [...calls.flatMap((path, index) => TOOLCALL(index, `path-${index}`, "read", { path, annotate: false })), { type: "done" }],
       [...TEXT(0, "done"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "fixture/m", contextId: "path-policy", createIO: () => io });
+    const agent = await Agent.create({ env, model: "fixture/m", contextId: "path-policy", createIO: () => io });
     const callPaths = (messages) => messages.flatMap((message) => message.content ?? []).filter((block) => block.type === "toolCall").map((block) => block.arguments.path);
     try {
       await agent.run();

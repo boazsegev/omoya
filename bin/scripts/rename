@@ -51,6 +51,10 @@ function fail(message) {
 }
 
 const argv = process.argv.slice(2);
+if (argv.length === 1 && ["--help", "-h"].includes(argv[0])) {
+  console.log(`Usage: bun bin/scripts/rename <namespace> [shortName]\n\nRename the product namespace and regenerate bin wrappers and package.json's bin map.\n<namespace> uses a leading letter followed by letters, digits, _ or -.\n[shortName] is an optional lowercase wrapper prefix (defaults to namespace).\n--help, -h  Show this text and exit.`);
+  process.exit(0);
+}
 const positional = [];
 for (const arg of argv) {
   if (arg.startsWith("-")) fail(`unknown option: ${arg}`);
@@ -82,18 +86,12 @@ const pkgForName = JSON.parse(readFileSync(PACKAGE_FILE, "utf8"));
 pkgForName.name = namespace.toLowerCase();
 writeFileSync(PACKAGE_FILE, `${JSON.stringify(pkgForName, null, 2)}\n`);
 
-// 2. no library export sweep: index.js / index_app.js export ONE default
-//    and never restate the namespace (only lib/namespace.js holds it).
-//    Guard them anyway: refuse a tree whose entry points grow a named
-//    export or lose the default, instead of renaming into an inconsistent
-//    library surface.
-for (const entry of ["index.js", "index_app.js"]) {
+// 2. Both actual entry points offer named and default imports; neither
+//    repeats the project namespace spelling (only lib/namespace.js owns it).
+for (const entry of ["agent.js", "app.js"]) {
   const file = join(ROOT, "lib", entry);
   const text = readFileSync(file, "utf8");
   if (!/export default/.test(text)) fail(`lib/${entry} lost its default export`);
-  if (/^export (const|let|var|class|function) /m.test(text) || /export \{/m.test(text)) {
-    fail(`lib/${entry} must export the default ONLY — named export keys are static literals`);
-  }
 }
 
 // 3. remove the files directly in the bin folder (folders stay intact)

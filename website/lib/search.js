@@ -4,6 +4,7 @@
  * The browser loads this JSON once and scores it locally — no external
  * service, no dependencies.
  */
+import { publicMembers } from "../../test/api-reference.js";
 
 /** Collapse whitespace and cap length so the index stays small. */
 function clean(text, max = 1500) {
@@ -31,17 +32,15 @@ export function searchIndex(pageEntries, data, generated) {
       // Class members are API points too: a module-namesake class's member
       // is addressable as Module.member (Agent.onEvent), any other class's
       // as Module.Class.member (Env.HttpStatusError.constructor).
-      const seen = new Set();
-      for (const member of symbol.members ?? []) {
-        if (!member.doc?.description || seen.has(member.name)) continue;
-        seen.add(member.name);
-        const title = symbol.name === mod.name
+      for (const member of publicMembers(mod, symbol)) {
+        if (!member.doc?.description) continue;
+        const title = symbol.name === mod.name.split(".").at(-1)
           ? `${mod.name}.${member.name}`
           : `${mod.name}.${symbol.name}.${member.name}`;
         const anchor = `${symbol.name}-${member.name}`;
         entries.push({
           t: title, u: `${base}#${anchor}`, p: base,
-          s: `${mod.name}.${symbol.name}`, x: clean(`${member.signature ?? ""} ${member.doc.description}`, 400),
+          s: `${mod.name}.${symbol.name}`, x: clean(`${member.signature ?? ""} ${member.doc.description} ${Object.values(member.accessors ?? {}).map((accessor) => `${accessor.signature} ${accessor.doc?.description ?? ""} ${accessor.doc?.params?.map((param) => param.description).join(" ") ?? ""} ${accessor.doc?.returns?.description ?? ""}`).join(" ")}`, 400),
         });
       }
     }

@@ -30,7 +30,7 @@ function escapesRoot(token, root) {
   if (/^~[\\/]/.test(token)) return true;
   const absolute = token.startsWith("/");
   const target = absolute ? resolve(token) : resolve(root, token);
-  return target !== root && !target.startsWith(root + sep);
+  return target !== root && !target.startsWith(root === sep ? root : root + sep);
 }
 
 function isTraversalToken(token, root) {
@@ -127,9 +127,10 @@ function refusalText(path, violations, askable) {
 }
 
 export async function enforceContentPolicy({ path, content, ask = false, context, askable = true, cwd, lax = false } = {}) {
+  if (ask === true && context?.agent?.can?.interact === false) throw new Error("tool unavailable");
   const violations = lax ? await findWriteTraversal(content, { cwd }) : findTraversal(content, { cwd });
   if (violations.length === 0) return;
-  const bridge = askable && typeof context?.question?.ask === "function" ? context.question.ask : null;
+  const bridge = askable && context?.agent?.can?.interact !== false && typeof context?.question?.ask === "function" ? context.question.ask : null;
   if (ask !== true || bridge === null) throw policyError(refusalText(path, violations, askable));
   const preview = violations.map((item) => traversalSnippet(content, item.line)).join("\n\n");
   const reference = violations[0].kind === "absolute" ? "absolute project reference" : "existing outside-tree path";

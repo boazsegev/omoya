@@ -1,5 +1,5 @@
 // test/agent-autocompact.test.js — proof for auto-compaction
-// (settings.context.autocompact → agent.policy.context.autocompact,
+// (settings.context.autocompact → agent._policyCurrent.context.autocompact,
 // compactAuto in lib/agent/compact.js): before any provider request whose
 // context usage reached the threshold, the run loop compacts, holding the
 // not-yet-answered user tail out of the summary and re-attaching it in
@@ -18,10 +18,11 @@ const INSTRUCTION = "Create a detailed summary";
 
 /** Env with a 200-token window and auto-compaction at `autocompact` — set BEFORE the Agent exists. */
 async function windowEnv({ context = { autocompact: 0.3 }, contextWindow = 200, tools = {} } = {}) {
-  const env = await testEnv();
+  const env = await testEnv({ context, providers: {
+    p: { provider: "test", models: { m: {} }, ...(contextWindow === null ? {} : { contextWindow }) },
+  } });
+  await env.ready();
   for (const [name, fn] of Object.entries(tools)) env.toolAdd(name, fn, { description: name, inputSchema: {} });
-  if (contextWindow !== null) env.settings.p = { ...env.settings.p, contextWindow };
-  env.settings.context = context;
   return env;
 }
 
@@ -38,13 +39,13 @@ function logs(agent) {
 
 describe("auto-compaction: triggers before the next request", () => {
   test("after a tool call — the tool result pushes usage over the threshold", async () => {
-    const env = await windowEnv({ tools: { t: () => LONG } });
+    const env = await windowEnv({ context: { autocompact: 0.3, turn: 1 }, tools: { t: () => LONG } });
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
       [...TEXT(0, "the summary"), { type: "done" }],
       [...TEXT(0, "final answer"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const lines = logs(agent);
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
@@ -67,7 +68,7 @@ describe("auto-compaction: triggers before the next request", () => {
       [...TEXT(0, "the summary"), { type: "done" }],
       [...TEXT(0, "reply"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     await agent.send(USER("next question"));
     expect(io.writes).toHaveLength(2);
     expect(isCompactRequest(io.writes[0])).toBe(true);
@@ -85,7 +86,7 @@ describe("auto-compaction: triggers before the next request", () => {
       [...TEXT(0, "the summary"), { type: "done" }],
       [...TEXT(0, "reply"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     const worker = { ...USER("[Message from worker: \"w\"]\nworker result"), worker: "w" };
     agent.context.append(USER("first"), { merge: false });
     agent.context.append(worker, { merge: false });
@@ -100,7 +101,7 @@ describe("auto-compaction: triggers before the next request", () => {
 
   test("messages queued during the tool round and the compact turn stay pending, then follow the summary", async () => {
     let agent;
-    const env = await windowEnv({ tools: { t: () => { agent.send(USER("during tools")); return LONG; } } });
+    const env = await windowEnv({ context: { autocompact: 0.3, turn: 1 }, tools: { t: () => { agent.send(USER("during tools")); return LONG; } } });
     const io = fakeIO(async (self, callbacks) => {
       const n = self.writes.length;
       if (n === 1) return emitScript([...TOOLCALL(0, "c1", "t", {}), { type: "done" }], callbacks);
@@ -110,7 +111,7 @@ describe("auto-compaction: triggers before the next request", () => {
       }
       return emitScript([...TEXT(0, "reply"), { type: "done" }], callbacks);
     });
-    agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
     expect(io.writes).toHaveLength(3);
     expect(isCompactRequest(io.writes[1])).toBe(true);
@@ -129,51 +130,135 @@ describe("auto-compaction: when it does not run", () => {
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
       [...TEXT(0, "final"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     expect(agent.contextUsage.total).toBe(null);
     await agent.run();
     expect(io.writes).toHaveLength(2);
     expect(io.writes.some(isCompactRequest)).toBe(false);
   });
 
-  for (const autocompact of [undefined, false]) {
-    test(`the setting is ${autocompact === undefined ? "missing" : "false"}`, async () => {
+  for (const autocompact of [0, false]) {
+    test(`the setting is ${autocompact === 0 ? "zero" : "false"}`, async () => {
       // cap/turn at 100%: the runaway guard stays out of it
-      const context = autocompact === undefined ? { cap: 1, turn: 1 } : { cap: 1, turn: 1, autocompact };
+      const context = { cap: 1, turn: 1, autocompact };
       const env = await windowEnv({ context, tools: { t: () => LONG } });
       const io = scriptedIO([
         [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
         [...TEXT(0, "final"), { type: "done" }],
       ]);
-      const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
-      expect(agent.policy.context.autocompact).toBe(false);
+      const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+      expect(agent._policyCurrent.context.autocompact).toBe(false);
       await agent.run();
       expect(io.writes).toHaveLength(2);
       expect(io.writes.some(isCompactRequest)).toBe(false);
     });
   }
 
-  test("the compact turn never auto-compacts itself; dropping its stale usage report keeps the runaway guard quiet", async () => {
+  test("a compact turn never auto-compacts itself, but the guard retains pre-compaction usage", async () => {
     const env = await windowEnv();
     const io = scriptedIO([
       [...TEXT(0, "the summary"), { type: "done" }],
       [...TEXT(0, "reply"), { type: "done" }],
-    ]);
+    ], { onRequest: (activeIO) => { activeIO.context.contextUsage = { used: 185, total: 200 }; } });
     // 92.5% reported for every request, the compact one included: over
     // the runaway guard's 90% cap until compaction drops the report
-    io.contextUsage = { used: 185, total: 200 };
-    const agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT("a1")], createIO: () => io });
-    agent._contextReport = { used: 185, total: 200 };
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT("a1")], createIO: () => io });
+    agent.context.contextUsage = { used: 185, total: 200 };
     const terminal = await agent.send(USER("next"));
-    expect(terminal.type).toBe("done");
-    expect(io.writes).toHaveLength(2); // one compaction, then the request — no compaction of the compaction
+    expect(terminal.type).toBe("error");
+    expect(terminal.error).toContain("runaway guard");
+    expect(io.writes).toHaveLength(1); // one compaction, no unsafe continuation
     expect(isCompactRequest(io.writes[0])).toBe(true);
-    expect(isCompactRequest(io.writes[1])).toBe(false);
-    expect(io.writes[1].context.at(-1)).toEqual(USER("next"));
+  });
+});
+
+describe("auto-compaction: guard survives compaction", () => {
+  test("a continuing turn charges growth across successive compactions", async () => {
+    const env = await windowEnv({ context: { autocompact: 0.1, turn: 0.4, cap: 1 }, tools: { t: () => "word ".repeat(35) } });
+    const io = scriptedIO([
+      [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
+      [...TEXT(0, "summary one"), { type: "done" }],
+      [...TOOLCALL(0, "c2", "t", {}), { type: "done" }],
+      [...TEXT(0, "summary two"), { type: "done" }],
+      [...TEXT(0, "must not continue"), { type: "done" }],
+    ]);
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const terminal = await agent.run();
+    expect(io.writes.map(isCompactRequest)).toEqual([false, true, false, true]);
+    expect(terminal.type).toBe("error");
+    expect(terminal.error).toContain("this turn alone");
+  });
+});
+
+describe("auto-compaction: absolute token ceiling", () => {
+  test("the lower of percentage and token ceiling triggers, including at the boundary", async () => {
+    for (const [used, max, shouldCompact] of [[29, 30, false], [30, 30, true], [79, 0, false], [80, 0, true]]) {
+      const env = await windowEnv({ context: { autocompact: 0.4, autocompactMax: max, cap: 1, turn: 1 } });
+      const io = scriptedIO([[...TEXT(0, "summary"), { type: "done" }], [...TEXT(0, "answer"), { type: "done" }]]);
+      const agent = await Agent.create({ env, model: "p/m", context: [USER("q"), ASSISTANT("a")], createIO: () => io });
+      agent.context.contextUsage = { used, total: 200 };
+      await agent.run();
+      expect(isCompactRequest(io.writes[0])).toBe(shouldCompact);
+      if (shouldCompact) expect(io.writes).toHaveLength(2); // resumes after summary
+      await agent.close();
+      await env.close();
+    }
+  });
+
+  test("absolute token ceiling triggers even without a known window", async () => {
+    const env = await windowEnv({ contextWindow: null, context: { autocompactMax: 30 } });
+    const io = scriptedIO([[...TEXT(0, "summary"), { type: "done" }], [...TEXT(0, "answer"), { type: "done" }]]);
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q"), ASSISTANT("a")], createIO: () => io });
+    agent.context.contextUsage = { used: 30, total: null };
+    await agent.run();
+    expect(isCompactRequest(io.writes[0])).toBe(true);
+    expect(io.writes).toHaveLength(2);
   });
 });
 
 describe("auto-compaction: failure and cancellation", () => {
+  test("an errored partial summary does not replace the original conversation", async () => {
+    const env = await windowEnv();
+    env.settings.retry = { attempts: 1 };
+    const io = scriptedIO([
+      [...TEXT(0, "partial summary"), { type: "error", error: "transport broke", kind: "provider" }],
+      [...TEXT(0, "reply"), { type: "done" }],
+    ]);
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    agent.context.append(USER("next"), { merge: false });
+    const original = structuredClone(agent.context.messages());
+    const terminal = await agent.run();
+    expect(terminal.type).toBe("done");
+    expect(io.writes).toHaveLength(2);
+    expect(io.writes[1].context).toEqual(original);
+    await agent.close();
+  });
+
+  test("an errored partial summary during manual compaction leaves the context intact", async () => {
+    const env = await windowEnv();
+    env.settings.retry = { attempts: 1 };
+    const io = scriptedIO([[...TEXT(0, "partial summary"), { type: "error", error: "transport broke", kind: "provider" }]]);
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT("a1")], createIO: () => io });
+    const original = structuredClone(agent.context.messages());
+    const result = await agent.compact();
+    expect(result.ok).toBe(false);
+    expect(agent.context.messages()).toEqual(original);
+    await agent.close();
+  });
+
+  test("a rejected compact request restores the history and waiting messages", async () => {
+    const env = await windowEnv();
+    const io = fakeIO(async () => { throw new Error("transport broke"); });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    agent.context.append(USER("next"), { merge: false });
+    agent._pending.push(USER("queued"));
+    const original = structuredClone(agent.context.messages());
+    await expect(agent.run()).rejects.toThrow("transport broke");
+    expect(agent.context.messages()).toEqual(original);
+    expect(agent.pending).toEqual([USER("queued")]);
+    await agent.close();
+  });
+
   test("a failed compaction leaves the context intact and the request proceeds", async () => {
     const env = await windowEnv();
     env.settings.retry = { attempts: 1 };
@@ -182,7 +267,7 @@ describe("auto-compaction: failure and cancellation", () => {
       [...TEXT(0, "reply"), { type: "done" }],
     ]);
     const before = [USER("q1"), ASSISTANT(LONG)];
-    const agent = new Agent({ env, model: "p/m", context: before, createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: before, createIO: () => io });
     const lines = logs(agent);
     agent.context.append(USER("a"), { merge: false });
     agent.context.append(USER("b"), { merge: false });
@@ -199,11 +284,13 @@ describe("auto-compaction: failure and cancellation", () => {
   test("a cancel during the compact turn ends the run with the tail re-attached", async () => {
     let agent;
     const env = await windowEnv();
-    const io = fakeIO(async () => {
-      await agent.cancel();
+    const io = fakeIO(async (self) => {
+      const cancelled = new Promise((resolve) => { self._onKill = resolve; });
+      queueMicrotask(() => { void agent.cancel(); }); // wait until fakeIO owns the active request
+      await cancelled;
       return { type: "error", error: "cancelled", kind: "cancelled", cancelled: true };
     });
-    agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     agent.context.append(USER("next"), { merge: false });
     const original = agent.context.messages().map((m) => structuredClone(m));
     const terminal = await agent.run();
@@ -218,7 +305,7 @@ describe("auto-compaction: a waiting manual /compact joins the automatic round",
   test("a /compact in the tail is removed, its focus guides the summary, and the turn ends there", async () => {
     const env = await windowEnv();
     const io = scriptedIO([[...TEXT(0, "the summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     agent.context.append(USER("/compact keep the API names"), { merge: false });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
@@ -236,7 +323,7 @@ describe("auto-compaction: a waiting manual /compact joins the automatic round",
       if (self.writes.length === 1) return emitScript([...TEXT(0, "the summary"), { type: "done" }], callbacks);
       return emitScript([...TEXT(0, "reply"), { type: "done" }], callbacks);
     });
-    agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     agent.context.append(USER("/compact first focus"), { merge: false });
     agent.context.append(USER("next question"), { merge: false });
     agent._pending.push(USER("/compact queued focus"));
@@ -252,7 +339,7 @@ describe("auto-compaction: a waiting manual /compact joins the automatic round",
     const env = await windowEnv();
     env.settings.retry = { attempts: 1 };
     const io = scriptedIO([[{ type: "error", error: "boom", kind: "provider" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("q1"), ASSISTANT(LONG)], createIO: () => io });
     agent.context.append(USER("/compact tail focus"), { merge: false });
     agent._pending.push(USER("/compact queued focus"));
     // the round alone (the run loop would go on to the manual /compact)

@@ -50,9 +50,10 @@ test("the production wiring preserves the short terminal title", () => {
 });
 
 async function harness(mode) {
-  const env = await testEnv();
+  const env = await testEnv({ providers: { p: { provider: "test", url: "test://script", models: { m: {} } } } });
+  await env.ready();
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi there"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const app = createApp(agent, { env });
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -238,7 +239,7 @@ for (const mode of ["inline", "alt"]) {
       const io = fakeIO((ioSelf) => new Promise((resolve) => {
         ioSelf._onKill = () => resolve({ type: "error", error: "cancelled", kind: "cancelled", cancelled: true });
       }));
-      const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
       const app = createApp(agent, { env });
       const input = new FakeInput();
       const output = new FakeOutput();
@@ -263,7 +264,7 @@ for (const mode of ["inline", "alt"]) {
       const io = fakeIO((ioSelf) => new Promise((resolve) => {
         ioSelf._onKill = () => resolve({ type: "error", error: "cancelled", kind: "cancelled", cancelled: true });
       }));
-      const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
       const app = createApp(agent, { env });
       const input = new FakeInput();
       const output = new FakeOutput();

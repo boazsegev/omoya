@@ -19,7 +19,7 @@ async function complete(app, result) {
 test("TUI catalog precedes real system blocks without entering the transcript or context", async () => {
   const env = await testEnv();
   env.toolAdd("reader", () => "ok", { safe: true, description: "Read", inputSchema: { type: "object" } });
-  const agent = new Agent({ env, safe: true });
+  const agent = await Agent.create({ env, can: { write: false } });
   agent.context.append({ type: 1, content: [{ type: "text", text: "real system" }] });
   agent.context.append(USER("hello"));
   const app = createApp(agent, { env });
@@ -37,7 +37,7 @@ test("TUI catalog precedes real system blocks without entering the transcript or
     expect(Array.isArray(tools)).toBe(false);
     expect(copied).toBe(toolCatalogText(tools));
     expect(copied).toContain("## `reader`\n\nRead\n\n```json\n{");
-    expect(JSON.parse(copied.match(/```json\n([\s\S]*?)\n```/)[1])).toEqual(tools.get("reader"));
+    expect(copied).toContain(JSON.stringify(tools.get("reader"), null, 2));
     expect(JSON.stringify(app.view(model))).toContain("virtual system block");
     expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["real system", "hello"]);
     model = key(app, model, "escape").model;
@@ -47,11 +47,11 @@ test("TUI catalog precedes real system blocks without entering the transcript or
 
 test("TUI publication refreshes on reopen, filters/searches, and rejects stale safety results", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env, safe: true });
+  const agent = await Agent.create({ env, can: { write: false } });
   const app = createApp(agent, { env });
   try {
     let model = await complete(app, key(app, app.init().model, "ctrl+o"));
-    expect(key(app, model, "c").effects[0].text).toContain("Published tools (0)");
+    expect(key(app, model, "c").effects[0].text).toContain("Published tools (1)");
     model = key(app, model, "escape").model;
     env.toolAdd("late", () => "ok", { safe: true, description: "Late reader", inputSchema: { type: "object" } });
     model = await complete(app, key(app, model, "ctrl+o"));
@@ -72,8 +72,8 @@ test("TUI agent switching discards the previous catalog and late viewer task res
   const env = await testEnv();
   env.toolAdd("one", () => "ok", { safe: true, description: "one", inputSchema: {} });
   env.toolAdd("two", () => "ok", { safe: true, description: "two", inputSchema: {} });
-  const first = new Agent({ env, tools: ["one"], safe: true });
-  const second = new Agent({ env, tools: ["two"], safe: true });
+  const first = await Agent.create({ env, tools: ["one"], can: { write: false } });
+  const second = await Agent.create({ env, tools: ["two"], can: { write: false } });
   const app = createApp(first, { env });
   try {
     let model = await complete(app, key(app, app.init().model, "ctrl+o"));
@@ -91,7 +91,7 @@ test("TUI agent switching discards the previous catalog and late viewer task res
 
 test("TUI catalog errors are visible and virtual fork preserves all real messages", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env, safe: true });
+  const agent = await Agent.create({ env, can: { write: false } });
   agent.context.append(USER("keep"));
   Object.defineProperty(agent, "tools", { get: () => Promise.reject(new Error("catalog failed")) });
   const app = createApp(agent, { env });

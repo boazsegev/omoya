@@ -17,7 +17,7 @@ const CANCELLED = { type: "error", error: "cancelled", kind: "cancelled" };
 /** The Moonshot wire view of a context: every tool_call id answered? */
 function kimiWire(context) {
   const provider = new KimiProvider("https://api.kimi.com/coding/v1", {
-    modelCurrent: "test/kimi-for-coding",
+    model: "test/kimi-for-coding",
     settings: {},
     tools: () => [],
   });
@@ -34,7 +34,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
       [...TOOLCALL(0, "bash:1", "bash", { command: "ls" }), CANCELLED], // kill-partial keeps the call
       [...TEXT(0, "after"), DONE],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("hi")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("hi")], createIO: () => io });
 
     const first = await agent.run({});
     expect(first.type).toBe("error"); // the cancelled turn
@@ -55,7 +55,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     expect(kimiWire(sent).orphans).toEqual([]); // the exact Moonshot 400 is gone
   });
 
-  test("the answer window spans tool payloads: the synthetic result lands before the next user message", async () => {
+  test("the open answer window puts repaired results and queued input before guidance", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "ok"), DONE]]);
     const context = [
@@ -68,16 +68,67 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
       { type: 1, content: [{ type: "text", text: "skill payload" }] }, // a tool's System payload
       USER("next"),
     ];
-    const agent = new Agent({ env, model: "p/m", context, createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context, createIO: () => io });
     await agent.run({});
 
     const sent = io.writes[0].context;
     const userAt = sent.findIndex((m, i) => i > 0 && m.type === 2 && m.content?.[0]?.text === "next");
     const synthetic = sent[userAt - 1];
-    expect(synthetic.type).toBe(4); // the repair sits at the window's END...
+    expect(synthetic.type).toBe(4);
     expect(synthetic.callId).toBe("bash:1");
-    expect(sent[userAt - 2].type).toBe(1); // ...after the System payload
+    expect(sent[userAt + 1]).toEqual({ type: 1, content: [{ type: "text", text: "skill payload" }] });
+    expect(sent.map((message) => message.type)).toEqual([2, 3, 4, 4, 2, 1]);
     expect(kimiWire(sent).orphans).toEqual([]);
+  });
+
+  test("an empty failed assistant response does not hide the still-unanswered tool batch", async () => {
+    const env = await testEnv();
+    const io = scriptedIO([TEXT(0, "recovered")]);
+    const agent = await Agent.create({ env, model: "p/m", context: [
+      USER("go"),
+      { type: 3, content: [
+        { type: "toolCall", callId: "skill", name: "skill", arguments: {} },
+        { type: "toolCall", callId: "read", name: "read", arguments: {} },
+      ] },
+      { type: 4, callId: "skill", content: [{ type: "text", text: "loaded" }] },
+      { type: 1, content: [{ type: "text", text: "skill guidance" }] },
+      { type: 4, callId: "read", content: [{ type: "text", text: "result" }] },
+      { type: 3, content: [], error: "HTTP 400 invalid placement" },
+      USER("continue"),
+    ], createIO: () => io });
+    try {
+      await agent.run();
+      const sent = io.writes[0].context.filter((message) => message.content?.length > 0);
+      expect(sent.map((message) => message.type)).toEqual([2, 3, 4, 4, 2, 1]);
+      expect(sent.at(-1).content[0].text).toBe("skill guidance");
+    } finally { await agent.close(); await env.close(); }
+  });
+
+  test("open-batch ordering never moves guidance in a previously answered prefix", async () => {
+    const env = await testEnv();
+    const io = scriptedIO([TEXT(0, "reply")]);
+    const context = [
+      USER("old"),
+      { type: 3, content: [{ type: "toolCall", callId: "old", name: "read", arguments: {} }] },
+      { type: 4, callId: "old", content: [{ type: "text", text: "old result" }] },
+      { type: 1, content: [{ type: "text", text: "old guidance" }] },
+      { type: 3, content: [{ type: "thinking", text: "old plan", signature: "preserve" }, { type: "text", text: "old answer" }] },
+      USER("new"),
+      { type: 3, content: [{ type: "toolCall", callId: "new", name: "read", arguments: {} }] },
+      { type: 4, callId: "new", content: [{ type: "text", text: "new result" }] },
+      { type: 1, content: [{ type: "text", text: "new guidance" }] },
+      USER("queued"),
+    ];
+    const prefix = structuredClone(context.slice(0, 7));
+    const agent = await Agent.create({ env, model: "p/m", context, createIO: () => io });
+    try {
+      await agent.run();
+      expect(io.writes[0].context.slice(0, prefix.length)).toEqual(prefix);
+      expect(io.writes[0].context.slice(prefix.length).map((message) => message.type)).toEqual([4, 2, 1]);
+      const settled = structuredClone(agent.context.messages());
+      await agent.run();
+      expect(io.writes[1].context).toEqual(settled);
+    } finally { await agent.close(); await env.close(); }
   });
 
   test("a detached result is preserved as System JSON; duplicate results are detached too", async () => {
@@ -93,7 +144,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
       { type: 4, callId: "new-call", name: "read", content: [{ type: "text", text: "duplicate output" }] },
       USER("next"),
     ];
-    const agent = new Agent({ env, model: "p/m", context, createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context, createIO: () => io });
     await agent.run({});
 
     const sent = io.writes[0].context;
@@ -113,7 +164,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "ok"), DONE]]);
     const block = { type: "toolCall", name: "write", arguments: {} }; // no callId at all
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m",
       context: [USER("q"), { type: 3, content: [block] }, USER("next")],
       createIO: () => io,
@@ -151,7 +202,7 @@ describe("tool-call repair: unanswered calls never reach the wire", () => {
     const io = scriptedIO([[...TEXT(0, "ok"), DONE]]);
     const orphan = freezeDeep({ type: 3, content: [{ type: "toolCall", name: "write", arguments: {} }] });
     // the ARRAY stays caller-owned and mutable; messages/blocks are frozen
-    const agent = new Agent({ env, model: "p/m", context: [freezeDeep(USER("q")), orphan, freezeDeep(USER("next"))], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [freezeDeep(USER("q")), orphan, freezeDeep(USER("next"))], createIO: () => io });
     await agent.run({});
 
     const storedBlock = agent.context.messages().flatMap((m) => m.content ?? []).find((b) => b?.type === "toolCall");

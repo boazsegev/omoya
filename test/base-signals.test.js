@@ -1,7 +1,7 @@
 // test/base-signals.test.js — proof for lib/signals.js
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
-import { armCancelSignals } from "../lib/cli.js";
+import { armCancelSignals } from "../lib/app/cli.js";
 import { assemblerCreate } from "../lib/context.js";
 
 const fakeProc = () => new EventEmitter();

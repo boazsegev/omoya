@@ -102,6 +102,7 @@ function answerText(answer) {
  * @returns {Promise<string>} the questions with their answers
  */
 export async function question({ questions } = {}, context) {
+  if (context?.agent?.can?.interact === false) throw new Error("tool unavailable");
   const list = normalizeQuestions(questions);
   const bridge = typeof context?.question?.ask === "function" ? context.question.ask : null;
   if (bridge === null) {

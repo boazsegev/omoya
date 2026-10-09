@@ -1,5 +1,5 @@
 // test/tui-app-theme.test.js — proof for Phase 03 step 5 (Theme
-// settings): tui.theme/tui.themes are discoverable in the settings
+// settings): tui.theme/themes are discoverable in the settings
 // schema (lib/env/settings-schema.js, discovery-only per that file's
 // own contract — never enforcement there), and lib/app/tui/theme-data.js
 // resolves them into tokens ready for GTUI's theme mechanism (Phase 02,
@@ -15,11 +15,11 @@ import { DEFAULT_THEME, resolveTheme, themePreviewRows } from "../lib/app/tui/th
 describe("bundled themes", () => {
   test("all named themes provide light and dark palettes with their own background and text", () => {
     for (const file of readdirSync("themes").filter((name) => name.endsWith(".json"))) {
-      const entry = Object.values(JSON.parse(readFileSync(`themes/${file}`, "utf8")).tui.themes)[0];
+      const entry = Object.values(JSON.parse(readFileSync(`themes/${file}`, "utf8")))[0];
       for (const mode of ["light", "dark"]) {
         expect(entry[mode]?.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
         expect(entry[mode]?.text?.fg).toMatch(/^#[0-9a-f]{6}$/i);
-        const resolved = createTheme(resolveTheme({ tui: { theme: "sample", themes: { sample: entry } } }), { dark: mode === "dark" });
+        const resolved = createTheme(resolveTheme({ tui: { theme: "sample" }, themes: { sample: entry } }), { dark: mode === "dark" });
         expect(resolved.resolve("background").bg).toBe(entry[mode].background.bg);
         expect(resolved.resolve("text").fg).toBe(entry[mode].text.fg);
       }
@@ -30,7 +30,7 @@ describe("bundled themes", () => {
     expect(files.length).toBeGreaterThan(0);
     for (const file of files) {
       const parsed = JSON.parse(readFileSync(`themes/${file}`, "utf8"));
-      const theme = Object.values(parsed.tui.themes)[0];
+      const theme = Object.values(parsed)[0];
       if (theme.light || theme.dark) {
         expect(theme.light?.background?.bg ?? theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
         expect(theme.dark?.background?.bg ?? theme.background?.bg).toMatch(/^#[0-9a-f]{6}$/i);
@@ -39,13 +39,14 @@ describe("bundled themes", () => {
   });
 });
 
-describe("tui.theme / tui.themes: discoverable in the settings schema", () => {
-  test("both keys default and describe themselves, before any tool loads", () => {
+describe("tui.theme / themes: discoverable in the settings schema", () => {
+  test("both keys default and describe themselves, before any tool loads", async () => {
     const dir = mkdtempSync("./ai-tmp/theme-schema-");
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {} });
     const schema = env.settingsSchema();
     expect(schema.tui.default.theme).toBe("default");
-    expect(schema.tui.default.themes).toEqual({});
+    expect(schema.themes.default).toEqual({});
+    expect(schema.themes.description).toEqual(expect.any(String));
     expect(schema.tui.description).toEqual(expect.any(String));
   });
 });
@@ -57,17 +58,17 @@ describe("resolveTheme: fallback and reject", () => {
   });
 
   test("a named theme LAYERS over the default — untouched roles survive", () => {
-    const resolved = resolveTheme({ tui: { theme: "solar", themes: { solar: { "message.user": { fg: 220 } } } } });
+    const resolved = resolveTheme({ tui: { theme: "solar" }, themes: { solar: { "message.user": { fg: 220 } } } });
     expect(resolved["message.user"]).toEqual({ fg: 220 });
     expect(resolved["tool.call"]).toEqual(DEFAULT_THEME["tool.call"]); // every other role: untouched
   });
 
   test("themes recursively inherit parents, then override roles", () => {
-    const resolved = resolveTheme({ tui: { theme: "child", themes: {
+    const resolved = resolveTheme({ tui: { theme: "child" }, themes: {
       base: { accent: { fg: 12 }, "message.user": { fg: 220 } },
       middle: { parent: "base", accent: { fg: 13 } },
       child: { parent: "middle", error: { fg: 9 } },
-    } } });
+    } });
     expect(resolved.accent).toEqual({ fg: 13 });
     expect(resolved.error).toEqual({ fg: 9 });
     expect(resolved["message.user"]).toEqual({ fg: 220 });
@@ -76,10 +77,10 @@ describe("resolveTheme: fallback and reject", () => {
   });
 
   test("mode qualifiers layer shared roles and inherit parent modes without losing role details", () => {
-    const tokens = resolveTheme({ tui: { theme: "child", themes: {
+    const tokens = resolveTheme({ tui: { theme: "child" }, themes: {
       parent: { "message.user": { bold: true, decoration: { left: { glyph: "▌", role: "accent" } } }, light: { "message.user": { fg: "#123456" }, background: { bg: "#ffffff" } } },
       child: { parent: "parent", "message.user": { italic: true }, light: { "message.user": { bg: "#eeeeee" } }, dark: { "message.user": { fg: "#abcdef" } } },
-    } } });
+    } });
     expect(createTheme(tokens, { dark: false }).resolve("message.user")).toMatchObject({ fg: "#123456", bg: "#eeeeee" });
     expect(createTheme(tokens, { dark: true }).resolve("message.user")).toMatchObject({ fg: "#abcdef" });
     expect(createTheme(tokens, { dark: false }).resolve("message.user").attrs).not.toBe(0);
@@ -88,10 +89,10 @@ describe("resolveTheme: fallback and reject", () => {
   });
 
   test("theme parents reject missing names, malformed values, and cycles", () => {
-    expect(() => resolveTheme({ tui: { theme: "child", themes: { child: { parent: "missing" } } } })).toThrow(/parent "missing" does not exist/);
-    expect(() => resolveTheme({ tui: { theme: "child", themes: { child: { parent: 7 } } } })).toThrow(/parent must be a non-empty theme name/);
-    expect(() => resolveTheme({ tui: { theme: "a", themes: { a: { parent: "b" }, b: { parent: "a" } } } })).toThrow(/parent cycle: a -> b -> a/);
-    expect(() => resolveTheme({ tui: { theme: "bad", themes: { bad: { light: [] } } } })).toThrow(/\.light must be an object/);
+    expect(() => resolveTheme({ tui: { theme: "child" }, themes: { child: { parent: "missing" } } })).toThrow(/parent "missing" does not exist/);
+    expect(() => resolveTheme({ tui: { theme: "child" }, themes: { child: { parent: 7 } } })).toThrow(/parent must be a non-empty theme name/);
+    expect(() => resolveTheme({ tui: { theme: "a" }, themes: { a: { parent: "b" }, b: { parent: "a" } } })).toThrow(/parent cycle: a -> b -> a/);
+    expect(() => resolveTheme({ tui: { theme: "bad" }, themes: { bad: { light: [] } } })).toThrow(/\.light must be an object/);
   });
 
   // Contract only: the shape of the caps map and that custom theme values
@@ -100,21 +101,21 @@ describe("resolveTheme: fallback and reject", () => {
   test("preview row caps expose the semantic map and layer custom values through named themes", () => {
     const rows = themePreviewRows(resolveTheme());
     expect(Object.keys(rows).sort()).toEqual(["display", "draft", "system", "text", "thinking", "toolcall", "toolerror", "toolresult", "user"]);
-    const tokens = resolveTheme({ tui: { theme: "compact", themes: { compact: {
+    const tokens = resolveTheme({ tui: { theme: "compact" }, themes: { compact: {
       "tool.preview": { maxRows: 3 }, "message.thinking.preview": { maxRows: 5 },
-    } } } });
+    } } });
     const layered = themePreviewRows(tokens);
     expect(layered).toMatchObject({ toolcall: 3, toolresult: 3, toolerror: 3, thinking: 5 });
     expect(layered.system).toBe(rows.system); // untouched caps survive layering
   });
 
   test("invalid preview row caps are rejected at the app theme boundary", () => {
-    const tokens = resolveTheme({ tui: { theme: "bad", themes: { bad: { "tool.preview": { maxRows: 0 } } } } });
+    const tokens = resolveTheme({ tui: { theme: "bad" }, themes: { bad: { "tool.preview": { maxRows: 0 } } } });
     expect(() => themePreviewRows(tokens)).toThrow(/tool.preview.maxRows must be false or a positive integer/);
   });
 
   test("an UNKNOWN theme name falls back to default — never throws", () => {
-    const resolved = resolveTheme({ tui: { theme: "nonexistent", themes: { solar: {} } } });
+    const resolved = resolveTheme({ tui: { theme: "nonexistent" }, themes: { solar: {} } });
     expect(resolved).toBe(DEFAULT_THEME);
   });
 
@@ -123,10 +124,10 @@ describe("resolveTheme: fallback and reject", () => {
     expect(() => resolveTheme({ tui: { theme: "" } })).toThrow(/tui.theme must be a non-empty string/);
   });
 
-  test("a malformed tui.themes (or theme entry) is rejected", () => {
-    expect(() => resolveTheme({ tui: { themes: ["not", "an", "object"] } })).toThrow(/tui.themes must be an object/);
-    expect(() => resolveTheme({ tui: { themes: null } })).toThrow(/tui.themes must be an object/);
-    expect(() => resolveTheme({ tui: { theme: "solar", themes: { solar: "not an object" } } })).toThrow(/tui.themes\["solar"\] must be an object/);
+  test("a malformed themes map (or theme entry) is rejected", () => {
+    expect(() => resolveTheme({ themes: ["not", "an", "object"] })).toThrow(/themes must be an object/);
+    expect(() => resolveTheme({ themes: null })).toThrow(/themes must be an object/);
+    expect(() => resolveTheme({ tui: { theme: "solar" }, themes: { solar: "not an object" } })).toThrow(/themes\["solar"\] must be an object/);
   });
 });
 
@@ -140,7 +141,7 @@ describe("resolved tokens feed GTUI's own theme mechanism (Phase 02) end to end"
   });
 
   test("createTheme itself still rejects an invalid color value in a custom theme (Phase 02's own validation, not re-implemented here)", () => {
-    const tokens = resolveTheme({ tui: { theme: "bad", themes: { bad: { "message.user": { fg: "not-a-color" } } } } });
+    const tokens = resolveTheme({ tui: { theme: "bad" }, themes: { bad: { "message.user": { fg: "not-a-color" } } } });
     expect(() => createTheme(tokens, { dark: true }).resolve("message.user")).toThrow();
   });
 

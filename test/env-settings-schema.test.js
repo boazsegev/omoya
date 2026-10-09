@@ -10,17 +10,17 @@ import { Env } from "../lib/env.js";
 import { toolsLoad } from "./env-internals.js";
 
 describe("env.settingsSchema()", () => {
-  test("seeds the core keys with a default and a description, before any tool loads", () => {
+  test("seeds the core keys with a default and a description, before any tool loads", async () => {
     const dir = mkdtempSync("./ai-tmp/schema-");
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {}, init: { providers: false, tools: false, detect: false, models: false } });
     const schema = env.settingsSchema();
     // every core key pairs a defined default with a description — the
     // default VALUES (timeouts, fractions, screen mode) are content
-    for (const key of ["tools", "web", "context", "retry", "tui"]) {
+    for (const key of ["tools", "web", "providers", "mcp", "tui"]) {
       expect(schema[key]?.default, key).toBeDefined();
       expect(schema[key]?.description, key).toEqual(expect.any(String));
     }
-    expect(schema.tools.default).toEqual({ folders: [], timeout: 120_000, timeoutLimit: 1_200_000, concurrency: 3 });
+    expect(schema.tools.default).toEqual({ folders: {}, timeout: 120_000, timeoutLimit: 1_200_000, concurrency: 3 });
     for (const retired of ["tool", "toolTimeout", "toolTimeoutLimit", "contextGuardCap", "contextGuardTurnCap", "maxAttempts", "retryBase", "retryMax"]) expect(schema[retired]).toBeUndefined();
     expect(schema.mcp).toEqual({ default: {}, layers: ["package", "user"], description: expect.any(String) }); // core: Env owns MCP
     expect(schema.read).toBeUndefined(); // owned by tools/read.js, not core — absent until it loads
@@ -28,7 +28,7 @@ describe("env.settingsSchema()", () => {
 
   test("a loaded tool's settingsSchema() merges in (tools/read.js contributes `read`)", async () => {
     const dir = mkdtempSync("./ai-tmp/schema-");
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {}, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env, { dirs: ["./tools"] });
     const schema = env.settingsSchema();
     expect(schema.read).toEqual({ default: expect.any(Object), description: expect.any(String) });
@@ -37,7 +37,7 @@ describe("env.settingsSchema()", () => {
 
   test("dropping the contributing tool and refreshing drops its schema entry too", async () => {
     const dir = mkdtempSync("./ai-tmp/schema-");
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {}, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env, { dirs: ["./tools"] });
     expect(env.settingsSchema().read).toBeDefined();
     const empty = mkdtempSync("./ai-tmp/schema-empty-");

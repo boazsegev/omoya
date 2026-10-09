@@ -25,7 +25,7 @@ if (!endpoint || args.some((arg) => !["--endpoint", "--model", endpoint, request
   usage(); process.exit(1);
 }
 
-const env = await Env.create(undefined, { tools: false });
+const env = await Env.open(process.cwd(), { init: { tools: false } });
 const settings = env.endpointSettings(endpoint);
 if (!settings?.provider || !settings?.url || !settings?.auth?.token) {
   throw new Error(`endpoint ${JSON.stringify(endpoint)} needs provider, url, and stored auth`);

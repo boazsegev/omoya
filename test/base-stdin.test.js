@@ -1,7 +1,7 @@
 // test/base-stdin.test.js — proof for lib/stdin.js (shared CLI grammar)
 import { describe, expect, test } from "bun:test";
 import { messagesParse } from "../lib/context.js";
-import { readStdin } from "../lib/cli.js";
+import { readStdin } from "../lib/app/cli.js";
 
 describe("messagesParse — whole-input JSON first", () => {
   test("a complete JSON context array passes through as-is", () => {
@@ -68,7 +68,7 @@ describe("readStdin — buffers to EOF", () => {
     // A child that uses the real helper; parent keeps the pipe OPEN until
     // after a delay, proving the helper does not resolve before EOF.
     const child = Bun.spawn(
-      ["bun", "-e", `import { readStdin } from "${import.meta.dir}/../lib/cli.js";
+      ["bun", "-e", `import { readStdin } from "${import.meta.dir}/../lib/app/cli.js";
         process.stdout.write(await readStdin());`],
       { stdin: "pipe", stdout: "pipe" },
     );

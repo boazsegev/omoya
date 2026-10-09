@@ -31,7 +31,7 @@ test("Web async catalog results cannot overwrite a newer request or a switched A
   const sent = [];
   const sendContext = new Function("toolCatalogText", "send", `${code}; return sendContext;`)(toolCatalogText, (_entry, packet) => sent.push(packet));
   const releases = [];
-  const agent = { model: "p/m", safe: true, get tools() { return new Promise((resolve) => releases.push(resolve)); } };
+  const agent = { model: "p/m", can: { write: false }, get tools() { return new Promise((resolve) => releases.push(resolve)); } };
   const entry = { agent, session: { contextSnapshot: () => [] } };
   const old = sendContext(entry);
   const current = sendContext(entry);
@@ -54,7 +54,7 @@ test("Web context inspection publishes filtered schemas separately and preserves
   env.toolAdd("reader", () => "ok", schema);
   env.toolAdd("other", () => "ok", schema);
   env.toolAdd("hidden", () => "ok", { ...schema, secret: true });
-  const agent = new Agent({ env, safe: true, tools: ["reader", "hidden"] });
+  const agent = await Agent.create({ env, can: { write: false }, tools: ["reader", "hidden"] });
   agent.context.append(USER("before"));
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const packets = [];
@@ -88,5 +88,8 @@ test("Web context inspection publishes filtered schemas separately and preserves
     expect(failed.tools.text).toContain("catalog error");
     expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["after"]);
     expect(packets.find((packet) => packet.type === "hello").history).not.toContain("Published tools");
-  } finally { socket.close(); web.stop(); await agent.close(); }
+    const rolledBack = await request({ type: "context.rollback", messageIndex: 0 });
+    expect(rolledBack.blocks).toEqual([]);
+    expect(rolledBack.history).toEqual([]);
+  } finally { socket.close(); await web.stop(); await agent.close(); }
 }, 10_000);

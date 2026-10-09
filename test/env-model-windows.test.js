@@ -76,9 +76,9 @@ describe("contextWindowsLoad: one background models.dev download per process", (
   test("a pair's caps.contextWindow never fetches: settings/cache first, registry fallback once loaded", async () => {
     let fetches = 0;
     globalThis.fetch = async () => { fetches++; return Response.json(registryBody); };
-    const env = new Env({ ...isolated("model-windows-"), settings: { providers: {
+    const env = await Env.open(process.cwd(), { ...isolated("model-windows-"), settings: { providers: {
       openai: { provider: "openai", url: "http://127.0.0.1:1/v1", models: { "gpt-6-sol": {}, "local-custom": { contextWindow: 400000 } } },
-    } } });
+    } }, init: { providers: false, tools: false, detect: false, models: false } });
     expect(contextWindow(env, "openai", "gpt-6-sol")).toBeNull();
     expect(fetches).toBe(0);
     expect(await contextWindowsLoad()).toBe(true);
@@ -89,7 +89,7 @@ describe("contextWindowsLoad: one background models.dev download per process", (
 
   test("a loaded registry replaces stale OpenAI API cache for user-named endpoints, not overrides or account catalogs", async () => {
     globalThis.fetch = async () => Response.json(registryBody);
-    const env = new Env({ ...isolated("model-windows-"), settings: { providers: {
+    const env = await Env.open(process.cwd(), { ...isolated("model-windows-"), settings: { providers: {
       jimmy: { provider: "openai", url: "https://api.openai.com/v1", models: { "gpt-6-sol": { contextWindow: 262144 } } },
       subscription: { provider: "openai", url: "https://chatgpt.com/backend-api/codex", models: { "gpt-6-sol": { contextWindow: 262144, maxContextWindow: 1050000 } } },
     } } });
@@ -98,7 +98,7 @@ describe("contextWindowsLoad: one background models.dev download per process", (
     expect(await contextWindowsLoad()).toBe(true);
     expect(contextWindow(env, "jimmy", "gpt-6-sol")).toBe(1050000);
     expect(contextWindow(env, "subscription", "gpt-6-sol")).toBe(1050000); // account catalog wins
-    env.settings.jimmy = { ...env.settings.jimmy, contextWindow: 32768 };
+    env.settings.providers.jimmy.contextWindow = 32768;
     expect(contextWindow(env, "jimmy", "gpt-6-sol")).toBe(32768);
   });
 });

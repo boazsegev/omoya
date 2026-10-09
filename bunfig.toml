@@ -4,3 +4,6 @@
 # explicit `--preload ./test/preload.js` loads the same file.
 [test]
 preload = ["./test/preload.js"]
+# Bare `bun test` runs only the suite, never scratch *.test.js copies
+# under ai-cache/, ai-tasks/ or other transient folders.
+root = "./test"

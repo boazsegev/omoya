@@ -1,12 +1,13 @@
 import { mkdtempSync } from "node:fs";
 import { test, expect } from "bun:test";
+import { Context } from "../lib/context.js";
 import Env from "../lib/env.js";
 import IO from "../lib/io.js";
 import TestPlugin from "../providers/test.js";
 import { providerAdd, toolEntry, toolSchemas } from "./env-internals.js";
 
 test("dynamic eligibility refreshes before every real IO request while ordinary tools remain unchanged", async () => {
-  const env = new Env({ cwd: process.cwd(), settingsDir: null, settings: { providers: { fixture: { provider: "fixture", url: "test://script" } } } });
+  const env = await Env.open(process.cwd(), { settingsDir: null, settings: { providers: { fixture: { provider: "fixture", url: "test://script" } } } });
   let enabled = true, checks = 0;
   const seen = [];
   class Probe extends TestPlugin {
@@ -16,11 +17,12 @@ test("dynamic eligibility refreshes before every real IO request while ordinary 
   const ordinary = () => "ordinary";
   env.toolAdd("ordinary", ordinary, { description: "ordinary", inputSchema: {} });
   env.toolAdd("dynamic", () => "dynamic", { description: "dynamic", inputSchema: {}, available: async () => { checks++; return enabled; } });
-  const io = new IO({ env, model: "fixture/test-model", settings: { script: [[{ text: "done" }]] } });
+  env.settings.providers.fixture.script = [[{ text: "done" }]];
+  const io = new IO({ env, model: "fixture/test-model" });
   const context = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-  expect((await io.write(context)).type).toBe("done");
-  enabled = false; expect((await io.write(context)).type).toBe("done");
-  enabled = true; expect((await io.write(context)).type).toBe("done");
+  expect((await io.write(new Context({ messages: context }))).type).toBe("done");
+  enabled = false; expect((await io.write(new Context({ messages: context }))).type).toBe("done");
+  enabled = true; expect((await io.write(new Context({ messages: context }))).type).toBe("done");
   expect(seen.map((names) => names.includes("dynamic"))).toEqual([true, false, true]);
   expect(seen.every((names) => names.includes("ordinary"))).toBe(true);
   expect(checks).toBe(3); expect(toolEntry(env, "ordinary").fn).toBe(ordinary);

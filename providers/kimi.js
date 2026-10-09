@@ -106,7 +106,7 @@ function context2msg(context, aiio = this.aiio) {
   const headers = { "content-type": "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
   const body = {
-    model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1),
+    model: aiio?.model?.slice(aiio.model.indexOf("/") + 1),
     messages: [],
     stream: true,
     stream_options: { include_usage: true },
@@ -317,7 +317,7 @@ async function uploadFile(connection, headers, file) {
     method: "POST",
     headers: uploadHeaders,
     body: form,
-    signal: connection.aiio?.requestSignal,
+    signal: connection.signal,
   });
   if (!response.ok) throw await statusError(response);
   const result = await response.json();
@@ -334,7 +334,7 @@ async function uploadFile(connection, headers, file) {
 async function fetchExtractedContent(connection, headers, fileId) {
   const response = await fetch(`${connection.baseUrl}/files/${fileId}/content`, {
     headers,
-    signal: connection.aiio?.requestSignal,
+    signal: connection.signal,
   });
   if (!response.ok) throw await statusError(response);
   return response.text();
@@ -449,15 +449,12 @@ function msg2events(msg, state = {}, aiio) {
     closeCalls();
     // the exact context consumption the endpoint measured
     if (Number.isFinite(msg.usage.prompt_tokens)) {
-      (io && (io.contextUsage = { used: msg.usage.prompt_tokens }));
+      (io?.context && (io.context.contextUsage = { used: msg.usage.prompt_tokens }));
     }
     events.push({
       type: "done",
       doneReason: state.finishReason,
-      usage: {
-        inputTokens: msg.usage.prompt_tokens,
-        outputTokens: msg.usage.completion_tokens,
-      },
+      usage: Context.usageNormalize({ service_tier: msg.service_tier, inference_geo: msg.inference_geo, ...msg.usage }),
       native: { id: msg.id, model: msg.model },
     });
   }
@@ -588,24 +585,29 @@ const KIMI_USAGE_TTL = 60 * 1000;
  * @param {object} connection - the Provider instance (for baseUrl)
  * @param {object} aiio
  */
+const balanceCache = new WeakMap();
+const usageCache = new WeakMap();
+
 async function reportBalance(connection, aiio) {
-  if (!aiio) return;
-  const cache = aiio._kimiBalance;
-  if (cache && Date.now() - cache.fetchedAt < KIMI_BALANCE_TTL) return;
-  aiio._kimiBalance = { fetchedAt: Date.now() }; // claim the slot before awaiting — one fetch in flight at a time
+  const context = aiio?.context;
+  if (!context) return;
+  const cache = balanceCache.get(context);
+  if (cache && Date.now() - cache < KIMI_BALANCE_TTL) return;
+  balanceCache.set(context, Date.now()); // claim the slot before awaiting — one fetch in flight at a time
   const token = aiio.settings?.auth?.token;
   if (!token) return;
   try {
     const response = await fetch(`${connection.baseUrl}/users/me/balance`, {
       headers: { authorization: `Bearer ${token}`, ...ONE_SHOT },
-      signal: aiio.requestSignal,
+      signal: connection.signal,
     });
     if (!response.ok) return;
     const body = await response.json();
     const balance = Number(body?.data?.available_balance);
     if (!Number.isFinite(balance)) return;
     const unit = String(connection.baseUrl ?? "").includes(".cn") ? "cny" : "usd";
-    (aiio && (aiio.planUsage = { quotas: { balance: { remaining: balance, unit } } }));
+    const { data, booster_wallet, boosterWallet, user_id, userId, ...extensions } = body;
+    context.planUsage = { quotas: { balance: { remaining: balance, unit } }, details: Context.usageDetails(extensions) };
   } catch { /* best-effort — a failed balance fetch never breaks the turn */ }
 }
 
@@ -631,27 +633,30 @@ async function reportBalance(connection, aiio) {
  * can't escape unhandled — not that this one ever rejects).
  */
 async function reportSubscriptionUsage(connection, aiio) {
-  if (!aiio) return;
-  const cache = aiio._kimiUsage;
-  if (cache && Date.now() - cache.fetchedAt < KIMI_USAGE_TTL) return;
-  aiio._kimiUsage = { fetchedAt: Date.now() }; // claim before awaiting
+  const context = aiio?.context;
+  if (!context) return;
+  const cache = usageCache.get(context);
+  if (cache && Date.now() - cache < KIMI_USAGE_TTL) return;
+  usageCache.set(context, Date.now()); // claim before awaiting
   const token = aiio.settings?.auth?.token;
   if (!token) return;
   try {
     const response = await fetch(`${connection.baseUrl}/usages`, {
-      headers: { authorization: `Bearer ${token}`, ...ONE_SHOT }, signal: aiio.requestSignal,
+      headers: { authorization: `Bearer ${token}`, ...ONE_SHOT }, signal: connection.signal,
     });
     if (!response.ok) return;
     const body = await response.json();
     const quota = (value) => {
-      const total = Number(value?.limit);
-      const used = Number(value?.used);
-      const remaining = Number(value?.remaining);
+      const number = (item) => (typeof item === "number" || typeof item === "string" && item.trim() !== "") && Number.isFinite(Number(item)) && Number(item) >= 0 ? Number(item) : undefined;
+      const total = number(value?.limit);
+      const used = number(value?.used);
+      const remaining = number(value?.remaining);
       const reset = value?.resetTime ?? value?.reset_time;
       const report = {
         ...(Number.isFinite(total) ? { total } : {}),
         ...(Number.isFinite(used) ? { used } : {}),
-        ...(Number.isFinite(remaining) ? { remaining } : {}),
+        ...(Number.isFinite(remaining) ? { remaining } : Number.isFinite(total) && Number.isFinite(used) ? { remaining: Math.max(0, total - used) } : {}),
+        ...(!Number.isFinite(used) && Number.isFinite(total) && Number.isFinite(remaining) ? { used: Math.max(0, total - remaining) } : {}),
         ...(typeof reset === "string" && reset !== "" ? { reset } : {}),
       };
       return Object.keys(report).length > 0 ? report : null;
@@ -661,20 +666,74 @@ async function reportSubscriptionUsage(connection, aiio) {
     // actionable subscription limits; booster-wallet internals are money
     // ledger data, not a quota, so deliberately stay unpublished.
     const quotas = {};
+    const periodOf = (value) => {
+      const raw = value?.windowSeconds ?? value?.window_seconds;
+      const seconds = (typeof raw === "number" || typeof raw === "string" && raw.trim() !== "") ? Number(raw) : undefined;
+      return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
+    };
+    const periodLabel = (seconds) => {
+      const pair = [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]].find(([, size]) => seconds % size === 0);
+      return pair ? `${seconds / pair[1]}${pair[0]}` : undefined;
+    };
     const weekly = quota(body?.usage);
-    if (weekly) quotas["7d"] = weekly;
-    for (const item of body?.limits ?? []) {
-      const minutes = Number(item?.window?.duration);
-      if (item?.window?.timeUnit !== "TIME_UNIT_MINUTE" || !Number.isFinite(minutes) || minutes <= 0) continue;
+    const weeklySeconds = periodOf(body?.usage) ?? 604800; // documented weekly shape when no duration is supplied
+    if (weekly) quotas[periodLabel(weeklySeconds)] = { ...weekly, windowSeconds: weeklySeconds };
+    const unitSeconds = { TIME_UNIT_SECOND: 1, TIME_UNIT_MINUTE: 60, TIME_UNIT_HOUR: 3600, TIME_UNIT_DAY: 86400 };
+    for (const item of (Array.isArray(body?.limits) ? body.limits.slice(0, 32) : [])) {
+      const duration = Number(item?.window?.duration);
+      const size = unitSeconds[item?.window?.timeUnit ?? item?.window?.time_unit];
+      if (!size || !Number.isFinite(duration) || duration <= 0) continue;
+      const seconds = duration * size;
+      const pair = [["d", 86400], ["h", 3600], ["m", 60], ["s", 1]].find(([, size]) => seconds % size === 0);
       const limit = quota(item.detail);
-      if (limit) quotas[`${minutes / 60}h`] = limit;
+      if (limit && pair) quotas[`${seconds / pair[1]}${pair[0]}`] = { ...limit, windowSeconds: seconds };
     }
-    if (Object.keys(quotas).length > 0) (aiio && (aiio.planUsage = { quotas }));
+    // Explicit published counts are authoritative. Ratios fill absent windows,
+    // never overwrite a count-based quota, and retain fractional precision.
+    const unconsumedUsages = Context.usageDetails(body?.usages) ?? {};
+    for (const [wire, value] of Object.entries(body?.usages ?? {}).slice(0, 32)) {
+      const match = /^limit_(\d+)([dhms])$/i.exec(wire);
+      const seconds = periodOf(value) ?? (match ? Number(match[1]) * { d: 86400, h: 3600, m: 60, s: 1 }[match[2].toLowerCase()] : undefined);
+      if (!Number.isSafeInteger(seconds) || seconds <= 0) continue;
+      const key = periodLabel(seconds);
+      const ratio = value?.used_ratio ?? value?.usedRatio;
+      if ((typeof ratio !== "number" && (typeof ratio !== "string" || ratio.trim() === "")) || !Number.isFinite(Number(ratio)) || Number(ratio) < 0) continue;
+      const used = Math.min(100, Math.max(0, Number(ratio) * 100));
+      const reset = value.reset_time ?? value.resetTime;
+      const explicit = quotas[key] ?? {};
+      if (!Number.isFinite(explicit.used) && !Number.isFinite(explicit.remaining)) {
+        const total = Number.isFinite(explicit.total) ? explicit.total : 100;
+        const count = total * used / 100;
+        quotas[key] = { ...explicit, total, used: count, remaining: total - count, ...(!Number.isFinite(explicit.total) ? { unit: "percent" } : {}), windowSeconds: seconds };
+      }
+      if (!quotas[key].reset && typeof reset === "string" && reset) quotas[key].reset = reset;
+      const { used_ratio, usedRatio, reset_time, resetTime, windowSeconds, window_seconds, ...extra } = value;
+      quotas[key] = { ...Context.usageDetails(extra), ...quotas[key] };
+      delete unconsumedUsages[wire];
+    }
+    // Only explicit cent-denominated budget fields have a known money scale.
+    // Wallet balance UNIT_CURRENCY has no published scale here: never convert it.
+    const wallet = body?.booster_wallet ?? body?.boosterWallet;
+    const budget = wallet?.monthly_charge_limit ?? wallet?.monthlyChargeLimit;
+    const spent = wallet?.monthly_used ?? wallet?.monthlyUsed;
+    const currency = budget?.currency?.toLowerCase?.();
+    const enabled = wallet?.monthly_charge_limit_enabled ?? wallet?.monthlyChargeLimitEnabled;
+    const cents = (value) => value?.price_in_cents ?? value?.priceInCents;
+    if (enabled === true && ["usd", "cny"].includes(currency) && currency === spent?.currency?.toLowerCase?.() && Number.isFinite(cents(budget)) && cents(budget) >= 0 && Number.isFinite(cents(spent)) && cents(spent) >= 0) {
+      const total = cents(budget) / 100;
+      const used = cents(spent) / 100;
+      quotas.boosterMonthlySpend = { total, used, remaining: Math.max(0, total - used), unit: currency };
+    }
+    const { usage, limits, usages, booster_wallet, boosterWallet, user_id, userId, ...extensions } = body;
+    if (Object.keys(unconsumedUsages).length > 0) extensions.usages = unconsumedUsages;
+    if (Object.keys(quotas).length > 0 || Object.keys(extensions).length > 0) context.planUsage = { quotas, details: Context.usageDetails(extensions) };
   } catch { /* best-effort — account usage never breaks a turn */ }
 }
 
 function reportPlanUsage(headers, aiio = this?.aiio) {
-  const get = (name) => headers?.get?.(name) ?? undefined;
+  const context = aiio?.context;
+  const represented = [];
+  const get = (name) => { represented.push(name); return headers?.get?.(name) ?? undefined; };
   const num = (name) => {
     const value = Number(get(name));
     return get(name) !== undefined && Number.isFinite(value) ? value : undefined;
@@ -697,8 +756,9 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     };
     if (Object.keys(bare).length > 0) quotas.requests = bare;
   }
-  if (Object.keys(quotas).length > 0) {
-    (aiio && (aiio.planUsage = { quotas }));
+  const details = Context.usageHeaders(headers, { exclude: represented });
+  if (Object.keys(quotas).length > 0 || Object.keys(details).length > 0) {
+    if (context) context.planUsage = { quotas, details };
     return;
   }
   if (supportsFiles(this)) return reportBalance(this, aiio);
@@ -895,7 +955,7 @@ export default class KimiProvider {
     },
   ];
 
-  static async detect({ endpoints = {} } = {}) {
+  static async detectEnvironment({ endpoints = {} } = {}) {
     const found = {};
     for (const { name, env, url, urlEnv } of ENV_ENDPOINTS) {
       if (endpoints[name]) continue;
@@ -910,6 +970,9 @@ export default class KimiProvider {
     }
     return found;
   }
+
+  static detectEnvironmentOnly = true;
+  static detect(options) { return this.detectEnvironment(options); }
 
   static async models(options) { return models.call(this, options); }
 

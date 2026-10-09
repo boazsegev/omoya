@@ -22,7 +22,7 @@
  *
  * DIFF + ROLLBACK: every applied edit is RECORDED under its tool
  * call's id in the CALLING AGENT's session store (tools/edit/diff.js
- * — context.agent.toolStorage("edit"); one agent can never roll back
+ * — context.storage; one agent can never roll back
  * another's edit) and returned as a git-style unified patch in the
  * result's DISPLAY payload — shown to the user, never appended to the
  * conversation (the {result, display} contract,
@@ -198,7 +198,7 @@ async function rollbackEdit(rollback, path, context) {
   if (!entry) {
     throw new Error("Use an edit id returned by a recent successful edit, or make a new targeted edit.");
   }
-  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
+  const writeCwd = context?.agent?.folder ?? context?.env?.folder ?? context?.agent?.env?.folder ?? process.cwd();
   const requested = resolveCwdPath(path, { cwd: writeCwd });
   if (resolveCwdPath(entry.path, { cwd: writeCwd }) !== requested) {
     throw new Error("Use the `path` matching the `rollback` id you want to roll back, or make a targeted edit.");
@@ -249,8 +249,8 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new TypeError("Give one or more edits, each with oldText and newText.");
   }
-  // Mutations stay in the agent folder even when Env.cwd is elsewhere.
-  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
+  // Mutations stay in the agent folder even when Env.folder is elsewhere.
+  const writeCwd = context?.agent?.folder ?? context?.env?.folder ?? context?.agent?.env?.folder ?? process.cwd();
   const contentCwd = writeCwd;
   const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd: writeCwd }), { cwd: writeCwd }); // filename guard
   path = relativeCwdPath(path, { cwd: writeCwd });

@@ -3,24 +3,31 @@ import { mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import Env from "../lib/env.js";
 import Agent from "../lib/agent.js";
-import { process as processTool, toolDescription as processDescription } from "../tools/process.js";
+import Sandbox from "../lib/sandbox.js";
+import { processList, processOutput, processStop, toolDescription as processDescription } from "../tools/process.js";
 import { scriptedIO } from "./fakes.js";
 
 const ROOT = `./ai-tmp/procs/${process.pid}`;
 const instances = [];
-afterEach(() => {
-  for (const [agent, env] of instances.splice(0)) { agent.close(); env.close(); }
+afterEach(async () => {
+  for (const [agent, env] of instances.splice(0)) { await agent.close(); await env.close(); }
   rmSync(ROOT, { recursive: true, force: true });
 });
 
 async function setup(name) {
   mkdirSync(`${ROOT}/${name}`, { recursive: true });
   const cwd = resolve(`${ROOT}/${name}`);
-  const env = await Env.create({ dir: cwd, cwd, settingsDir: cwd, settings: { providers: { fixture: { provider: "test", url: "test://script" } } } }, { providers: false, models: false });
-  const agent = new Agent({ env, model: "fixture/m", createIO: () => scriptedIO([]) });
+  const env = await Env.open(cwd, { dir: cwd, settingsDir: cwd, settings: { providers: { fixture: { provider: "test", url: "test://script" } } }, init: { providers: false, models: false } });
+  const agent = await Agent.create({ env, model: "fixture/m", createIO: () => scriptedIO([]) });
   instances.push([agent, env]);
   return { agent, env };
 }
+
+const backgroundFor = (agent) => ({
+  list: () => Sandbox.backgroundList(agent),
+  output: (id, from) => Sandbox.backgroundOutput(agent, id, from),
+  stop: (id) => Sandbox.backgroundStop(agent, id),
+});
 
 async function invoke(agent, name, args) {
   return agent._callTool(name, args, { name, callId: "test" });
@@ -36,12 +43,14 @@ describe("Agent-owned background bash", () => {
     const first = await started(agent, "printf 'begin\\n'; sleep 2; printf 'end\\n'; exit 3");
     expect(first.id).toBe("1");
     expect(first.output).toContain("begin");
-    expect((await processTool({ action: "list" }, { agent }))[0].state).toBe("running");
-    const output = agent.backgroundOutput(first.id, first.next);
+    expect((await processList({}, { agent, background: backgroundFor(agent) }))[0].state).toBe("running");
+    expect((await invoke(agent, "process-list", {}))[0].id).toBe(first.id);
+    expect((await invoke(agent, "process-output", { id: first.id, from: first.next })).output).toBe("");
+    const output = Sandbox.backgroundOutput(agent, first.id, first.next);
     expect(output.output).toBe("");
     await Bun.sleep(2200);
-    expect(agent.backgroundOutput(first.id, first.next).output).toContain("end");
-    expect(agent.backgroundList()[0].state).toBe("exited(3)");
+    expect(Sandbox.backgroundOutput(agent, first.id, first.next).output).toContain("end");
+    expect(Sandbox.backgroundList(agent)[0].state).toBe("exited(3)");
   });
 
   test("inherits foreground cwd and filtered child environment", async () => {
@@ -49,7 +58,7 @@ describe("Agent-owned background bash", () => {
     const previous = process.env[key];
     process.env[key] = "secret";
     const { agent, env } = await setup("child-env");
-    env.settings["env-refuse"] = [key];
+    env.settings.env[key] = false;
     try {
       const result = await started(agent, `printf '%s:%s' "$PWD" "\${${key}-absent}"`);
       expect(result.output).toContain(`${resolve(`${ROOT}/child-env`)}:absent`);
@@ -64,29 +73,56 @@ describe("Agent-owned background bash", () => {
     const result = await started(agent, "head -c 300000 /dev/zero | tr '\\0' X");
     expect(result.previewTruncated).toBe(true);
     expect(Buffer.byteLength(result.output)).toBeLessThanOrEqual(4000);
-    const output = agent.backgroundOutput(result.id);
+    const output = Sandbox.backgroundOutput(agent, result.id);
     expect(output.next).toBe(300000);
     expect(output.dropped).toBe(300000 - 256 * 1024);
     expect(Buffer.byteLength(output.output)).toBe(256 * 1024);
-    expect(agent.backgroundOutput(result.id, output.next).output).toBe("");
+    expect(Sandbox.backgroundOutput(agent, result.id, output.next).output).toBe("");
   });
 
   test("stop kills process group, and Agent and Env close stop retained commands", async () => {
     const { agent, env } = await setup("lifecycle");
     const child = await started(agent, "sleep 30 & wait");
-    await agent.backgroundStop(child.id);
-    expect(agent.backgroundList()[0].state).not.toBe("running");
+    await processStop({ id: child.id }, { agent, background: backgroundFor(agent) });
+    expect(Sandbox.backgroundList(agent)[0].state).not.toBe("running");
+    const managed = await started(agent, "sleep 30 & wait");
+    await invoke(agent, "process-stop", { id: managed.id });
+    expect(Sandbox.backgroundList(agent).find((item) => item.id === managed.id).state).not.toBe("running");
     const second = await started(agent, "sleep 30 & wait");
-    const pid = agent.backgroundList()[1].id;
+    const pid = Sandbox.backgroundList(agent)[2].id;
     expect(pid).toBe(second.id);
-    agent.close();
-    await Bun.sleep(1200);
+    await agent.close();
     const another = await setup("envclose");
     const third = await started(another.agent, "sleep 30");
-    another.env.close();
-    await Bun.sleep(1200);
-    expect(another.agent.backgroundList().find((item) => item.id === third.id).state).not.toBe("running");
-    env.close();
+    await another.env.close();
+    expect(Sandbox.backgroundList(another.agent).find((item) => item.id === third.id)?.state).not.toBe("running");
+    await env.close();
+  }, 12000);
+
+  test("backgroundStopAll never signals an exited leader's stale process group", async () => {
+    const { agent } = await setup("exited-group");
+    const finished = await started(agent, "printf done");
+    expect(Sandbox.backgroundList(agent).find((item) => item.id === finished.id)?.state).not.toBe("running");
+    const originalKill = process.kill;
+    const signalled = [];
+    process.kill = (pid, signal) => { signalled.push([pid, signal]); return true; };
+    try { await Sandbox.backgroundStopAll(agent); }
+    finally { process.kill = originalKill; }
+    expect(signalled).toEqual([]);
+  });
+
+  test("backgroundStopAll exposes the pending process close barrier", async () => {
+    const { agent } = await setup("close-barrier");
+    const child = await started(agent, "trap '' TERM; while :; do sleep 1; done");
+    const stopped = Sandbox.backgroundStopAll(agent);
+    expect(stopped).toBeInstanceOf(Promise);
+    let complete = false;
+    void stopped.then(() => { complete = true; });
+    expect(complete).toBe(false);
+    await stopped;
+    expect(complete).toBe(true);
+    expect(Sandbox.backgroundList(agent)).toEqual([]);
+    expect(child.id).toBe("1");
   }, 12000);
 
   test("limits eight running commands and isolates ids by Agent", async () => {
@@ -96,24 +132,32 @@ describe("Agent-owned background bash", () => {
     expect(results.map((r) => r.id)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"]);
     await expect(started(agent, "sleep 30")).rejects.toThrow(/limit/);
     expect((await started(other.agent, "printf other")).id).toBe("1");
-    await expect(processTool({ action: "output", id: "8" }, { agent: other.agent })).rejects.toThrow(/Unknown process/);
+    await expect(processOutput({ id: "8" }, { agent: other.agent, background: backgroundFor(other.agent) })).rejects.toThrow(/Unknown process/);
   });
 
   test("safe mode rejects background bash and stop but allows list/output", async () => {
-    expect(processDescription().process.readOnly({ action: "stop" })).toBe(false);
-    expect(processDescription().process.readOnly({ action: "output" })).toBe(true);
-    const { agent } = await setup("safe");
+    expect(processDescription()["process-stop"].safe).not.toBe(true);
+    expect(processDescription()["process-output"].safe).toBe(true);
+    expect(processDescription()["process-list"].safe).toBe(true);
+    expect(processDescription()["process-output"].inputSchema.required).toEqual(["id"]);
+    expect(processDescription()["process-stop"].inputSchema.required).toEqual(["id"]);
+    expect(processDescription().process).toBeUndefined();
+    const { agent, env } = await setup("safe");
     const startedProcess = await started(agent, "sleep 30");
-    await expect(processTool({ action: "stop", id: startedProcess.id }, { agent, safe: true })).rejects.toThrow(/safe mode/);
-    expect((await processTool({ action: "list" }, { agent, safe: true })).length).toBe(1);
-    expect((await processTool({ action: "output", id: startedProcess.id }, { agent, safe: true })).next).toBe(0);
-    const previous = agent.safe;
-    agent.safe = true;
+    await expect(processStop({ id: startedProcess.id }, { agent, background: backgroundFor(agent), safe: true })).rejects.toThrow(/safe mode/);
+    expect((await processList({}, { agent, background: backgroundFor(agent), safe: true })).length).toBe(1);
+    expect((await processOutput({ id: startedProcess.id }, { agent, background: backgroundFor(agent), safe: true })).next).toBe(0);
+    const previous = agent.can.write;
+    agent.can.write = false;
     try {
       await expect(started(agent, "echo bad")).rejects.toThrow(/safe mode/);
-      const refused = await agent._execute({ name: "process", callId: "safe-stop", arguments: { action: "stop", id: startedProcess.id } });
+      const safeTools = await env.tools(true, agent.model);
+      expect(safeTools.has("process-stop")).toBe(false);
+      expect(safeTools.has("process-list")).toBe(true);
+      expect(safeTools.has("process-output")).toBe(true);
+      const refused = await agent._execute({ name: "process-stop", callId: "safe-stop", arguments: { id: startedProcess.id } });
       expect(refused.message.error).toBe(true);
-      expect(agent.backgroundList()[0].state).toBe("running");
-    } finally { agent.safe = previous; }
+      expect(Sandbox.backgroundList(agent)[0].state).toBe("running");
+    } finally { agent.can.write = previous; }
   });
 });

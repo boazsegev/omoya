@@ -42,7 +42,7 @@ listener binds `127.0.0.1` only; browsers resolve `localhost` to loopback.
 The build automatically generates these deployment-root files from the current source/docs:
 
 - `/llms.txt` — concise documentation directory with canonical links to the site and generated API pages.
-- `/llms-full.txt` — one-fetch corpus containing the project README and generated API reference.
+- `/llms-full.txt` — one-fetch corpus containing the project README, GUIDE, and generated API reference.
 - `/robots.txt` and `/sitemap.xml` — crawler discovery for all generated canonical HTML pages.
 
 They are build artifacts, not manually maintained files. The page shell also advertises the LLM directory and sitemap with `<link>` metadata.

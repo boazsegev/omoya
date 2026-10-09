@@ -14,8 +14,8 @@ afterEach(() => {
 describe("namespace migration startup", () => {
   test("importing the library and loading package tools stays below 256 MiB RSS", async () => {
     const script = `
-      import API from "./lib/index.js";
-      const env = await API.Env.create({ dir: "./ai-tmp", cwd: "./ai-tmp", settingsDir: null, settings: {} }, { models: false });
+      import API from "./lib/agent.js";
+      const env = await API.Env.open("./ai-tmp", { dir: "./ai-tmp", settingsDir: null, settings: {}, init: { models: false } });
       process.stdout.write(JSON.stringify({ rss: process.memoryUsage().rss, tools: (await env.tools()).size }));
     `;
     const proc = Bun.spawn([process.execPath, "-e", script], {
@@ -39,7 +39,7 @@ describe("namespace migration startup", () => {
     const saved = process.env[strayName];
     process.env[strayName] = root;
     try {
-      const env = new Env({ dir: "./ai-tmp", cwd: "./ai-tmp", settingsDir: null, settings: {} });
+      const env = await Env.open("./ai-tmp", { dir: "./ai-tmp", settingsDir: null, settings: {} });
       expect(toolRoots(env)).not.toContain(root);
       // contract: the package's own tools load (which tools exist is content)
       await expect(toolsLoad(env)).resolves.not.toHaveLength(0);

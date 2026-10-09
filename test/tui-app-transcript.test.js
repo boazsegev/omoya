@@ -17,6 +17,23 @@ import { createApp, msg } from "../lib/app/tui/app.js";
 import { Context } from "../lib/context.js";
 import { scriptedIO, fakeIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
 
+test("context blocks number repeated sections independently within multipart groups", () => {
+  const messages = [
+    { type: Context.MessageType.Assistant, content: [
+      { type: Context.ContentType.Text, text: "first" },
+      { type: Context.ContentType.Thinking, text: "thought" },
+      { type: Context.ContentType.Text, text: "second" },
+    ] },
+    { type: Context.MessageType.Assistant, content: [{ type: Context.ContentType.ToolCall, callId: "x", name: "read", arguments: "{}" }] },
+    { type: Context.MessageType.ToolResult, callId: "x", content: [{ type: Context.ContentType.Text, text: "ok" }], display: "shown" },
+  ];
+  const blocks = contextBlocks(messages);
+  expect(blocks.slice(0, 3).map(({ section, ordinal, messagePart }) => [section, ordinal, messagePart]))
+    .toEqual([["Message", 0, 1], ["Thinking", 0, 2], ["Message", 1, 3]]);
+  expect(blocks.slice(3).map(({ section, ordinal, messagePart }) => [section, ordinal, messagePart]))
+    .toEqual([["Call", 0, 1], ["Result", 0, 2], ["Display", 0, 3]]);
+});
+
 const tick = () => new Promise((resolve) => queueMicrotask(resolve));
 async function until(fn, timeout = 2000) {
   const end = Date.now() + timeout;
@@ -191,7 +208,7 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
     // no result and no running turn: the call was never run
     expect(items[0].node.children[0].content.map((s) => s.text).join("")).toBe("– read  x");
     const memory = GTUI.host.memory({ width: 80 });
-    const ui = new GTUI({ host: memory, theme: createApp({ context: new Context({ id: "stub", messages: [] }), pending: [], model: undefined, questionInstall() { return () => {}; }, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
+    const ui = new GTUI({ host: memory, theme: createApp({ context: new Context({ id: "stub", messages: [] }), pending: [], model: undefined, toolMessages: () => [], contextUsage: {}, usage: {}, thinking: "" }, { sources: {} }).theme });
     ui.run({ init: () => ({ model: {}, effects: [] }), update: (m) => ({ model: m, effects: [] }), view: () => GTUI.view.feed({ items }) });
     expect(memory.snapshot().lines[0]).toContain("▌   – read  x");
     ui.stop();
@@ -350,7 +367,7 @@ describe("transcript.js: context blocks -> GTUI feed items", () => {
 describe("the app end to end: transcript, links, and notices", () => {
   test("request completion drops the streamed preview and reads the authoritative context", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(agent, { env });
     const event = (model, type, fields = {}) => app.update(model, { type: "agent.turn.event", origin: agent, event: { type, ...fields } }).model;
     let model = event(app.init().model, "start");
@@ -376,7 +393,7 @@ describe("the app end to end: transcript, links, and notices", () => {
         release = () => resolve({ type: "done", message: { type: 3, content: [{ type: "text", text: "**final** and $x^2$" }] } });
       });
     });
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 80, height: 20 });
     const ui = new GTUI({ host: memory });
@@ -395,7 +412,7 @@ describe("the app end to end: transcript, links, and notices", () => {
   test("a turn's exchange lands in the transcript with the right roles", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi there"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory({ width: 80 });
     const ui = new GTUI({ host: memory });
@@ -418,7 +435,7 @@ describe("the app end to end: transcript, links, and notices", () => {
   test("a markdown link in the assistant's reply carries its href and a reconstructable source offset", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "see [docs](http://example.com)"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory({ width: 80 });
     const ui = new GTUI({ host: memory });
@@ -441,7 +458,7 @@ describe("the app end to end: transcript, links, and notices", () => {
   test("clicking each code footer copies its body without fences or neighboring text", async () => {
     const env = await testEnv();
     const raw = "before\n```js\nconst a = 1;\n```\nbetween\n~~~sh\necho hi\n~~~";
-    const agent = new Agent({ env, model: "p/m", context: [{ type: 3, content: [{ type: "text", text: raw }] }], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [{ type: 3, content: [{ type: "text", text: raw }] }], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const memory = GTUI.host.memory({ width: 80, height: 22 });
     const controls = createControls((event) => memory.send(event));
     const ui = new GTUI({ host: memory });
@@ -472,7 +489,7 @@ describe("the app end to end: transcript, links, and notices", () => {
 
   test("mouse-selected message text copies through the app in logical source order", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [USER("copy שלום")], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("copy שלום")], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const memory = GTUI.host.memory({ width: 80, height: 12 });
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(agent, { env }));
@@ -493,7 +510,7 @@ describe("the app end to end: transcript, links, and notices", () => {
   test("a turn-level error becomes a notice; a cancelled turn's notice says the partial response is kept", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "error", error: "boom" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory({ width: 80 });
     const ui = new GTUI({ host: memory });
@@ -511,7 +528,7 @@ describe("the app end to end: transcript, links, and notices", () => {
 test("a selected diff line copies its original source text", async () => {
   const raw = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new";
   const env = await testEnv();
-  const agent = new Agent({ env, model: "p/m", context: [{ type: 3, content: [{ type: "text", text: raw }] }], createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const agent = await Agent.create({ env, model: "p/m", context: [{ type: 3, content: [{ type: "text", text: raw }] }], createIO: () => scriptedIO([[{ type: "done" }]]) });
   const memory = GTUI.host.memory({ width: 80, height: 12 });
   const ui = new GTUI({ host: memory });
   const running = ui.run(createApp(agent, { env }));

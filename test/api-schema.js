@@ -1,24 +1,24 @@
 /** test/api-schema.js — LIBRARY for the doc tests: generate the quiet
  *  public-contract schema reference (API-schema.md). No CLI —
  *  test/api-docs.test.js rewrites the file on every `bun test` run. */
-import { collect, toolCatalog, toolContract } from "./api-reference.js";
+import { collect, publicMembers, toolCatalog, toolContract } from "./api-reference.js";
 
 const tick = String.fromCharCode(96);
 const fence = `${tick}${tick}${tick}`;
 const TYPE_FENCE = "ts";
 const shapes = {
-  "env-allow": "string[]",
-  "env-refuse": "string[]",
-  extensions: "string[]",
-  prompts: "string | string[]",
-  providerPaths: "string | string[]",
-  skills: "string | string[]",
-  "tools.folders": "string[]",
+  "context.autocompact": "boolean | number (default 0.4; true = 0.4; fractions < 1 or percentages > 1; false/0/1/100 disable)",
+  "context.autocompactMax": "nonnegative safe integer (tokens; default 200000; 0 disables)",
+  projects: { "<absolute folder or name alias>": { folder: "absolute folder", name: "shortest unique folder suffix", "models?": "<endpoint>/<model> -> ISO timestamp", "groups?": "<group> -> boolean", "description?": "string" } },
+  env: { "<NAME>": "false | true | string" },
+  extensions: { "<package-or-folder>": "boolean" },
+  prompts: { "<path>": "boolean" },
+  skills: { "<path>": "boolean" },
+  "tools.folders": { "<path>": "boolean" },
   "tui.keys": { "<key>": "key binding" },
-  "providerTools": { "<tool>": "boolean" },
   mcp: { "<server>": { command: "string", args: "string[]", env: "object", timeout: "number", safe: "boolean", description: "string" } },
-  providers: { "<endpoint>": { provider: "string", url: "string", model: "string", timeout: "number", contextWindow: "number", models: "object" } },
-  "tui.themes": { "<theme>": {
+  providers: { tools: { "<tool>": "boolean" }, "<endpoint>": { provider: "string", url: "string", model: "string", timeout: "number", contextWindow: "number", models: "object" } },
+  themes: { "<theme>": {
     parent: "theme name | default",
     "<role>": { fg: "color | {dark, light, default}", bg: "color | {dark, light, default}", bold: "boolean", dim: "boolean", italic: "boolean", underline: "boolean", reverse: "boolean", strike: "boolean" },
     "tool.preview": { maxRows: "positive integer" },
@@ -69,14 +69,20 @@ function returnType(symbol) {
 }
 function functionType(symbol) { return `(${parameters(symbol)}) => ${returnType(symbol)}`; }
 function memberType(member) {
+  if (member.kind === "property") return returnType(member.accessors.get ?? member.accessors.set);
   if (member.kind === "getter") return returnType(member);
   if (member.kind === "constructor") return `constructor(${parameters(member)})`;
-  if (member.kind === "field") return returnType(member);
+  if (member.kind === "field" || member.kind === "class") return returnType(member);
   return functionType(member);
 }
 function memberDeclaration(member) {
   const prefix = member.static ? "static " : "";
   if (member.kind === "constructor") return memberType(member);
+  if (member.kind === "property") {
+    const read = member.accessors.get && `read: ${returnType(member.accessors.get)}`;
+    const write = member.accessors.set && `write: (${parameters(member.accessors.set)}) => void`;
+    return `${prefix}${member.name}: { ${[read, write].filter(Boolean).join("; ")} }`;
+  }
   if (member.kind === "getter") return `${prefix}get ${member.name}(): ${returnType(member)}`;
   if (member.kind === "setter") return `${prefix}set ${member.name}(${parameters(member)})`;
   return `${prefix}${member.name}: ${memberType(member)}`;
@@ -101,25 +107,20 @@ function publicSchemas(data) {
   const renderedClasses = new Set();
   let out = "";
   for (const module of data.modules) {
-    const exports = module.exports.filter((symbol) => symbol.kind !== "class");
-    if (exports.length > 0) {
-      const lines = exports
-        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
-        .map((symbol) => symbol.kind === "function"
-          ? `export const ${symbol.name}: ${functionType(symbol)};`
-          : `export const ${symbol.name}: unknown;`);
-      out += typeSection(`${module.name} module`, lines.join("\n"));
-      for (const symbol of exports.filter((symbol) => symbol.members?.length)) {
-        out += typeSection(`${module.name}.${symbol.name}`, symbol.members.map((member) => `${memberDeclaration(member)};`).join("\n"));
-      }
-    }
     for (const symbol of module.exports) {
-      if (symbol.kind !== "class" || renderedClasses.has(symbol.name)) continue;
-      renderedClasses.add(symbol.name);
-      const lines = (symbol.members || [])
-        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
-        .map((member) => `  ${memberDeclaration(member)};`);
-      out += typeSection(symbol.name, `export class ${symbol.name} {\n${lines.join("\n")}\n}`);
+      if (symbol.kind === "class") {
+        if (renderedClasses.has(symbol.name)) continue;
+        renderedClasses.add(symbol.name);
+        const lines = publicMembers(module, symbol).map((member) => `  ${memberDeclaration(member)};`);
+        out += typeSection(module.name === symbol.name || module.name.endsWith(`.${symbol.name}`) ? module.name : `${module.name}.${symbol.name}`, `export class ${symbol.name} {\n${lines.join("\n")}\n}`);
+        continue;
+      }
+      const declaration = symbol.kind === "function"
+        ? `export const ${symbol.name}: ${functionType(symbol)};`
+        : `export const ${symbol.name}: unknown;`;
+      out += typeSection(`${module.name}.${symbol.name}`, declaration);
+      const members = publicMembers(module, symbol);
+      if (members.length) out += typeSection(`${module.name}.${symbol.name} members`, members.map((member) => `${memberDeclaration(member)};`).join("\n"));
     }
   }
   return out;
@@ -151,7 +152,7 @@ function typedefSchemas(data) {
   let out = "";
   for (const source of context?.sources || []) for (const type of source.typedefs || []) {
     const value = type.properties.length ? Object.fromEntries(type.properties.map((property) => [property.name, property.type || "unknown"])) : type.type || "object";
-    out += schemaSection(`Context.${type.name}`, value);
+    out += schemaSection(`Agent.Context.${type.name}`, value);
   }
   return out;
 }
@@ -171,4 +172,4 @@ function contracts(data) {
   }
   return out;
 }
-export async function generate() { const data = await collect(); return "# API schema\n\nCompact contract notation, not executable TypeScript or a validation schema. Getters and setters are listed separately; the full API reference contains their effects and ownership rules.\n\n" + settingsSchemas(data) + typedefSchemas(data) + contracts(data) + publicSchemas(data); }
+export async function generate() { const data = await collect(); return "# API schema\n\nCompact contract notation, not executable TypeScript or a validation schema. Accessors share one published property with separate read and write contracts. The full API reference contains their effects and ownership rules.\n\n" + settingsSchemas(data) + typedefSchemas(data) + contracts(data) + publicSchemas(data); }

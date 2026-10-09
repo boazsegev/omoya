@@ -39,7 +39,7 @@ for (const name of ["lstat", "open", "opendir"]) {
 try {
   const { read } = await import("../tools/read/read.js");
   const { executeReadQuery } = await import("../tools/read/engine.js");
-  const ctx = { env: { cwd: root, settings: {} } };
+  const ctx = { env: { folder: root, settings: {} } };
   if (["count", "bulk-count"].includes(mode)) {
     await executeReadQuery(mode === "count" ? { path: "", recursive: true, glob: ["**/README.md"], info: true }
       : { path: "large.txt", search: { text: "absent" } }, ctx);

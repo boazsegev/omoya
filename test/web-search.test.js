@@ -44,6 +44,97 @@ const mojeekHtml = `
 describe("packageSearch", () => {
   beforeEach(() => __resetPackageSearchForTest());
 
+  test("bounds response bodies by the search timeout and cancels stalled streams", async () => {
+    let cancelled = false;
+    let timer;
+    const fetchImpl = async () => response(new ReadableStream({
+      start(controller) {
+        timer = setTimeout(() => { controller.enqueue(new TextEncoder().encode(ddgHtml)); controller.close(); }, 120);
+      },
+      cancel() { cancelled = true; clearTimeout(timer); },
+    }));
+    const context = { env: { settings: { web: { search: { timeout: 30, cacheSeconds: 0, backends: [], engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } };
+    await expect(packageSearch({ query: "slow body", limit: 5 }, context, { fetchImpl, env: {} })).rejects.toThrow(/timed out/);
+    expect(cancelled).toBe(true);
+  });
+
+  test("returns successful engine results when another response body stalls", async () => {
+    let cancelled = false;
+    const fetchImpl = async (url) => url.hostname === "mojeek.test"
+      ? response(new ReadableStream({ cancel() { cancelled = true; } }))
+      : response(ddgHtml);
+    const context = { env: { settings: { web: { search: { timeout: 50, cacheSeconds: 0, backends: [], engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }, { type: "mojeek-html", url: "https://mojeek.test/search" }] } } } } };
+    const markdown = await packageSearch({ query: "partial body", limit: 5 }, context, { fetchImpl, env: {} });
+    expect(markdown).toContain("Alpha DDG");
+    expect(cancelled).toBe(true);
+  });
+
+  test("bounds requests by the caller deadline even when a custom fetch ignores abort", async () => {
+    const context = { deadline: Date.now() + 30, env: { settings: { web: { search: { cacheSeconds: 0, backends: [], engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } };
+    await expect(packageSearch({ query: "caller deadline", limit: 5 }, context, { fetchImpl: () => new Promise(() => {}), env: {} })).rejects.toThrow(/timed out/);
+  });
+
+  test("cancels redirect bodies without waiting for them to complete", async () => {
+    let cancelled = false;
+    const fetchImpl = async (url) => url.hostname === "redirect.test"
+      ? response(new ReadableStream({ cancel() { cancelled = true; } }), { status: 302, headers: { location: "https://duck.test/search" } })
+      : response(ddgHtml);
+    const context = { env: { settings: { web: { search: { timeout: 100, cacheSeconds: 0, backends: [], engines: [{ type: "duckduckgo-html", url: "https://redirect.test/search" }] } } } } };
+    const markdown = await packageSearch({ query: "redirect body", limit: 5 }, context, { fetchImpl, env: {} });
+    expect(markdown).toContain("Alpha DDG");
+    expect(cancelled).toBe(true);
+  });
+
+  test("leaves time for direct engines when a SearXNG response body stalls", async () => {
+    let cancelled = false;
+    const fetchImpl = async (url) => url.hostname === "stalled-searx.test"
+      ? response(new ReadableStream({ cancel() { cancelled = true; } }))
+      : response(ddgHtml);
+    const context = { env: { settings: { web: { search: { cacheSeconds: 0, backends: [{ type: "searxng", url: "https://stalled-searx.test/search" }], engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } };
+    const markdown = await packageSearch({ query: "fallback body", limit: 5 }, context, { fetchImpl, env: {} });
+    expect(markdown).toContain("Alpha DDG");
+    expect(cancelled).toBe(true);
+  }, 20_000);
+
+  test("honors caller cancellation throughout the response body", async () => {
+    const controller = new AbortController();
+    let cancelled = false;
+    let timer;
+    const fetchImpl = async () => response(new ReadableStream({
+      start(stream) {
+        setTimeout(() => controller.abort(new Error("caller cancelled search")), 20);
+        timer = setTimeout(() => { stream.enqueue(new TextEncoder().encode(ddgHtml)); stream.close(); }, 120);
+      },
+      cancel() { cancelled = true; clearTimeout(timer); },
+    }));
+    const context = { signal: controller.signal, env: { settings: { web: { search: { cacheSeconds: 0, backends: [], engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } };
+    await expect(packageSearch({ query: "cancel body", limit: 5 }, context, { fetchImpl, env: {} })).rejects.toThrow("caller cancelled search");
+    expect(cancelled).toBe(true);
+  });
+
+  test("parses Mojeek results-standard rows without result classes, using heading titles and p.s snippets", async () => {
+    const html = '<ul class="results-standard"><li><a class="ob" href="https://bun.sh/">bun.sh</a><h2><a href="https://bun.sh/">Bun Runtime</a></h2><p class="s">Fast JavaScript runtime</p></li></ul>';
+    const context = { env: { settings: { web: { search: { backends: [], cacheSeconds: 0, engines: [{ type: "mojeek-html", url: "https://mojeek.test/search" }] } } } } };
+    const markdown = await packageSearch({ query: "Bun", limit: 5 }, context, { fetchImpl: async () => response(html), env: {} });
+    expect(markdown).toContain("**Bun Runtime**");
+    expect(markdown).toContain("Fast JavaScript runtime");
+  });
+
+  test("does not treat Mojeek CAPTCHA navigation as usable search results", async () => {
+    const html = '<title>Captcha</title><li class="pr"><a href="https://www.mojeek.com/">Home</a></li><div class="captcha-wrap">JavaScript is required to complete this challenge</div><ul class="search-pages"><li><a href="https://blog.mojeek.com/">Blog</a></li></ul>';
+    const context = { env: { settings: { web: { search: { backends: [], cacheSeconds: 0, engines: [{ type: "mojeek-html", url: "https://mojeek.test/search" }] } } } } };
+    await expect(packageSearch({ query: "Bun", limit: 5 }, context, { fetchImpl: async () => response(html), env: {} })).rejects.toThrow("recognized challenge page");
+  });
+
+  test("parses DuckDuckGo class tokens and attributes in any order without choosing thumbnail links", async () => {
+    const html = '<div class="web-result results_links result"><a href="https://thumbnail.test/"><img src="thumb.png"></a><h2><a href="/l/?uddg=https%3A%2F%2Fbun.sh%2F" class="result__a">Bun Runtime</a></h2><a class="result__snippet">Fast runtime</a></div>';
+    const context = { env: { settings: { web: { search: { backends: [], cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } };
+    const markdown = await packageSearch({ query: "Bun", limit: 5 }, context, { fetchImpl: async () => response(html), env: {} });
+    expect(markdown).toContain("**Bun Runtime**");
+    expect(markdown).toContain("URL: https://bun.sh/");
+    expect(markdown).not.toContain("thumbnail.test");
+  });
+
   test("falls through an unresponsive SearXNG backend to engines after the connect timeout", async () => {
     const calls = [];
     const fetchImpl = async (url, init = {}) => {
@@ -287,6 +378,47 @@ describe("packageSearch", () => {
       .rejects.toThrow(/all configured search engines failed/);
   });
 
+  test("does not label keyword mentions or inert challenge markup as a challenge or start a cooldown", async () => {
+    const pages = [
+      '<html><title>CAPTCHA documentation</title><main><a href="https://docs.test/">Guide to unusual traffic and how to verify you are human</a></main></html>',
+      '<html><title>Search for captcha</title><main>No results for "captcha enable JavaScript"</main></html>',
+      '<html><title>CAPTCHA documentation</title><!-- <form id="challenge-form"></form> --><main>Guide</main></html>',
+      '<html><script>const example = \'<form id="challenge-form"></form>\';</script><main>Guide to captcha</main></html>',
+      '<html><style>/* <form id="challenge-form"></form> */</style><main>CAPTCHA documentation</main></html>',
+      '<html><form data-id="challenge-form"><input name="q" value="captcha"></form><main>Guide</main></html>',
+      '<html><textarea><form id="challenge-form"></form></textarea><main>CAPTCHA documentation</main></html>',
+    ];
+    for (const html of pages) {
+      __resetPackageSearchForTest();
+      const calls = [];
+      const fetchImpl = createFetch([
+        ["https://duck.test/", () => response(html)],
+        ["https://mojeek.test/", () => response(mojeekHtml)],
+      ], calls);
+      const context = { env: { settings: { web: { debug: true, search: { backends: [], cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }, { type: "mojeek-html", url: "https://mojeek.test/search" }] } } } } };
+      const first = await packageSearch({ query: "captcha", limit: 5 }, context, { fetchImpl, env: {} });
+      const next = await packageSearch({ query: "runtime", limit: 5 }, context, { fetchImpl, env: {} });
+      expect(first).toContain("mojeek: success");
+      expect(first).not.toContain("recognized challenge page");
+      expect(next).not.toContain("cooldown");
+      expect(calls.filter((call) => call.url.startsWith("https://duck.test/"))).toHaveLength(2);
+    }
+  });
+
+  test("backs off Mojeek only when actual challenge UI is present", async () => {
+    const calls = [];
+    const fetchImpl = createFetch([
+      ["https://duck.test/", () => response(ddgHtml)],
+      ["https://mojeek.test/", () => response('<title>Captcha</title><div class="captcha-wrap"><p>JavaScript is required to complete this challenge. Please enable it and reload the page.</p></div>')],
+    ], calls);
+    const context = { env: { settings: { web: { debug: true, search: { backends: [], cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }, { type: "mojeek-html", url: "https://mojeek.test/search" }] } } } } };
+    const first = await packageSearch({ query: "first", limit: 5 }, context, { fetchImpl, env: {} });
+    const next = await packageSearch({ query: "next", limit: 5 }, context, { fetchImpl, env: {} });
+    expect(first).toContain("mojeek: failed (recognized challenge page)");
+    expect(next).toContain("mojeek: failed (challenge cooldown)");
+    expect(calls.filter((call) => call.url.startsWith("https://mojeek.test/"))).toHaveLength(1);
+  });
+
   test("does not mistake search-result text mentioning CAPTCHA or JavaScript for a challenge", async () => {
     const duck = ddgHtml.replace("Second duck", "How to enable JavaScript and verify you are human after unusual traffic or a captcha");
     const mojeek = mojeekHtml.replace("Third", "Guide to captcha and unusual traffic");
@@ -325,18 +457,28 @@ describe("packageSearch", () => {
     expect(calls.filter((call) => call.url.startsWith("https://html.duckduckgo.com/"))).toHaveLength(1);
   });
 
-  test("backs off on rate limits without repeatedly contacting the throttled HTML engine", async () => {
-    const calls = [];
-    const fetchImpl = createFetch([
-      ["https://html.duckduckgo.com/html/", () => response("slow down", { status: 429 })],
-      ["https://www.mojeek.com/search", () => response(mojeekHtml)],
-    ], calls);
-    const context = { env: { settings: { web: { debug: true, search: { cacheSeconds: 0 } } } } };
-    await packageSearch({ query: "one", limit: 5 }, context, { fetchImpl, env: {} });
-    const next = await packageSearch({ query: "two", limit: 5 }, context, { fetchImpl, env: {} });
-    expect(next).toContain("duckduckgo: failed (challenge cooldown)");
-    expect(calls.filter((call) => call.url.startsWith("https://html.duckduckgo.com/"))).toHaveLength(1);
+  test("parsed results win even when structural challenge markup is present elsewhere", async () => {
+    const markdown = await packageSearch({ query: "captcha", limit: 5 },
+      { env: { settings: { web: { search: { backends: [], cacheSeconds: 0, engines: [{ type: "duckduckgo-html", url: "https://duck.test/search" }] } } } } },
+      { fetchImpl: async () => response(`${ddgHtml}<form id="challenge-form"></form>`), env: {} });
+    expect(markdown).toContain("Alpha DDG");
   });
+
+  for (const status of [403, 429]) {
+    test(`backs off HTTP ${status} without claiming a CAPTCHA or repeatedly contacting the engine`, async () => {
+      const calls = [];
+      const fetchImpl = createFetch([
+        ["https://html.duckduckgo.com/html/", () => response("slow down", { status })],
+        ["https://www.mojeek.com/search", () => response(mojeekHtml)],
+      ], calls);
+      const context = { env: { settings: { web: { debug: true, search: { cacheSeconds: 0 } } } } };
+      await packageSearch({ query: "one", limit: 5 }, context, { fetchImpl, env: {} });
+      const next = await packageSearch({ query: "two", limit: 5 }, context, { fetchImpl, env: {} });
+      expect(next).toContain(`duckduckgo: failed (HTTP ${status} cooldown)`);
+      expect(next).not.toContain("challenge cooldown");
+      expect(calls.filter((call) => call.url.startsWith("https://html.duckduckgo.com/"))).toHaveLength(1);
+    });
+  }
 
   test("returns aggregate errors after partial group failure only when all engines fail", async () => {
     const fetchImpl = createFetch([

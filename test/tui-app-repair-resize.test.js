@@ -10,7 +10,7 @@ test("production interactive wrapper forwards resize and removes its handler on 
   const input = new TerminalInput();
   const output = new TerminalScreen(30, 8);
   const resizeEmitter = new EventEmitter();
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
   const repl = createInteractiveRepl({ agent, input, output, resizeEmitter, mode: "alt", cwd: "project", env });
 
   const running = repl.start();

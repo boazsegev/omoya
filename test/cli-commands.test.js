@@ -10,12 +10,30 @@ import { join } from "node:path";
 import { createCommands as createAppCommands, COMMANDS } from "../lib/app/tui/commands.js";
 import { createApp } from "../lib/app/tui/app.js";
 import { Agent } from "../lib/agent.js";
-import { endpointOf, namesOf, toolEntry, toolStatusSet } from "./env-internals.js";
+import { createAgentSlot } from "../lib/app/tui/agent-slot.js";
+import { conversationCreate, conversationActivate } from "../lib/app/host/conversation.js";
+import { toolEntry, toolStatusSet } from "./env-internals.js";
 
 /** copy defaults to a harmless stub — createCommands requires one
  *  injected (parity with app.js's own production wiring); tests that
  *  care about the clipboard path pass their own and override it. */
-const createCommands = (options) => createAppCommands({ copy: () => false, ...options });
+const createCommands = (options) => {
+  const slot = createAgentSlot(options.agent);
+  const replace = async (kind, id) => {
+    const previous = slot.current();
+    const fresh = await conversationCreate(previous, { kind, id });
+    await previous.close();
+    conversationActivate(fresh);
+    slot.switchTo(fresh);
+    return fresh.context;
+  };
+  const commands = createAppCommands({ copy: () => false, ...options, agent: slot.agent,
+    onReseat: (id) => replace("new", id),
+    onFork: (id) => replace("fork", id),
+    onResume: (id) => replace("resume", id),
+    onRestart: (id) => replace("new", id) });
+  return { ...commands, agent: slot.agent };
+};
 import { Context } from "../lib/context.js";
 import { testEnv } from "./fakes.js";
 
@@ -26,6 +44,7 @@ const ASSISTANT = (text, extra = {}) => ({ type: 3, content: [{ type: "text", te
 async function setup(context, { session = false } = {}) {
   const dir = mkdtempSync("./ai-tmp/commands-");
   const env = await testEnv({ sessions: resolve(dir) });
+  await env.ready();
   const lines = [];
   const options = { env, model: "fake/m", context };
   if (session) {
@@ -35,10 +54,10 @@ async function setup(context, { session = false } = {}) {
       messages: context,
     });
   }
-  const agent = new Agent(options);
+  const agent = await Agent.create(options);
   agent.context.flush();
   const commands = createCommands({ agent, log: (l) => lines.push(l) });
-  return { agent, commands, lines };
+  return { agent: commands.agent, commands, lines };
 }
 
 const events = (agent) =>
@@ -221,26 +240,23 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
   const setupEndpoints = async (context = []) => {
     const { mkdtempSync } = await import("node:fs");
     const { Env } = await import("../lib/env.js");
-    const { readLastCombo } = await import("../lib/cli.js");
+    const { readLastCombo } = await import("../lib/app/shared/catalog.js");
     const dir = mkdtempSync("./ai-tmp/commands-model-");
     class Wire {
       static provider = {};
       static async models() { return { "live-1": null }; }
     }
-    // Env.create collects every endpoint's live list in the background
-    const env = await Env.create({ dir, cwd: dir, settingsDir: dir, providers: { wire: Wire }, settings: {
+    // Env.open collects every endpoint's live list in the background.
+    // This fixture explicitly owns an isolated embedding Env.
+    const env = await Env.open(dir, { dir, settingsDir: dir, providers: { wire: Wire }, settings: {
       providers: {
         fake: { provider: "wire", url: "http://fake", models: { m1: {} } },
-        fake2: { provider: "wire", url: "http://fake2" },
+        fake2: { provider: "wire", url: "http://fake2", models: { "cached-2": {}, "ns/lyricist": {}, "custom:m": {} } },
       },
-      fake2: { models: { "cached-2": null, "ns/lyricist": null } },
-    } }, { tools: false, detect: false });
+    }, init: { tools: false, detect: false } });
     await env.modelsReady;
-    // A populated catalog is authoritative: selection must reject ids outside
-    // it, while the test's intended explicit selections remain valid.
-    env._endpoints.fake2.models = { "cached-2": {}, "ns/lyricist": {}, "custom:m": {} };
     const lines = [];
-    const agent = new Agent({ env, model: "fake/m1", context });
+    const agent = await Agent.create({ env, model: "fake/m1", context });
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     return { agent, commands, lines, env, readLastCombo };
   };
@@ -264,7 +280,6 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
 
   test("keeps slashes within a model ID when selecting a qualified combo", async () => {
     const { agent, commands, env, lines } = await setupEndpoints();
-    env._endpoints.fake2.models["ns/lyricist"] = {};
     await commands.handle("/endpoint-model fake2/ns/lyricist");
     expect(agent.model).toBe("fake2/ns/lyricist");
     expect(lines.at(-1)).toBe("endpoint: fake2, model: ns/lyricist");
@@ -272,11 +287,19 @@ describe("cli-commands: /endpoint-model endpoint+model switching", () => {
 
   test("refuses unknown models and persists only verified explicit combos", async () => {
     const { agent, commands, env, readLastCombo, lines } = await setupEndpoints();
-    env._endpoints.fake.models = { m1: {} };
+    env.settings.providers.fake.models = { m1: {} };
     await commands.handle("/endpoint-model whatever:9b");
     expect(agent.model).toBe("fake/m1");
     expect(lines.at(-1)).toContain("unknown model");
+    const remembered = new Promise((resolve) => {
+      const handle = env.onEvent(env.constructor.EVENT.MODELS_CHANGED, () => {
+        if (readLastCombo(env) !== "fake2/custom:m") return;
+        env.offEvent(handle);
+        resolve();
+      });
+    });
     await commands.handle("/endpoint-model fake2/custom:m");
+    await remembered;
     expect(readLastCombo(env)).toBe("fake2/custom:m");
   });
 
@@ -406,7 +429,7 @@ describe("cli-commands: /agent-thinking", () => {
 
   test("setThinking propagates to live provider connections (think option)", async () => {
     const { agent } = await setup([]);
-    const io = { state: "idle", options: {}, settingsSet(k, v) { this.options[k] = v; }, async write() { return { type: "done" }; }, async kill() {} };
+    const io = { state: "idle", options: {}, settingsSet(k, v) { this.options[k] = v; }, async write() { return { type: "done" }; }, async cancel() {}, async close() {} };
     agent._io.set("fake", io);
     (agent.thinking = "low");
     expect(io.options.think).toBe("low");
@@ -454,13 +477,14 @@ describe("cli-commands: every claimed command is truly wired", () => {
   // false), and /context-compact's onCompact went unwired in app.js.
   test("no COMMANDS entry resolves to the unknown-command or not-available fallback", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("seed")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("seed")] });
     const lines = [];
     const noop = async () => {};
     const commands = createCommands({
       agent, log: (l) => lines.push(l),
       onExit: noop, onMenu: noop, onReload: noop, onFillInput: noop,
-      onContinue: noop, onCompact: noop, onLogin: noop, onReseat: (id) => agent.contextNew(id),
+      onContinue: noop, onCompact: noop, onLogin: noop,
     });
     for (const command of COMMANDS) {
       lines.length = 0;
@@ -530,7 +554,8 @@ describe("cli-commands: command line routing", () => {
 describe("cli-commands: /continue (top-level — never /context-continue)", () => {
   test("routes to onContinue with no arguments", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     let called = 0;
     const commands = createCommands({ agent, onContinue: async () => { called++; } });
     expect(await commands.handle("/continue")).toBe(true);
@@ -559,8 +584,9 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
 
   test("//<name> fills the input with the prompt body, never submitting a turn", async () => {
     const env = await testEnv();
+    await env.ready();
     writePrompt(env, "greet.md", "name: greet\ndescription: d", "hello there");
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     let filled = null;
     const commands = createCommands({ agent, onFillInput: (text) => { filled = text; } });
     expect(await commands.handle("//greet")).toBe(true);
@@ -570,8 +596,9 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
 
   test("//<name> <data> appends the trailing text as its own line", async () => {
     const env = await testEnv();
+    await env.ready();
     writePrompt(env, "greet.md", "name: greet\ndescription: d", "hello there");
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     let filled = null;
     const commands = createCommands({ agent, onFillInput: (text) => { filled = text; } });
     expect(await commands.handle("//greet please and thank you")).toBe(true);
@@ -580,8 +607,9 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
 
   test("bare // lists the prompt catalog via log()", async () => {
     const env = await testEnv();
+    await env.ready();
     writePrompt(env, "greet.md", "name: greet\ndescription: a greeting", "hi");
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     const lines = [];
     const commands = createCommands({ agent, log: (l) => lines.push(l) });
     expect(await commands.handle("//")).toBe(true);
@@ -597,8 +625,9 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
 
   test("without an onFillInput hook, prints the expanded text instead", async () => {
     const env = await testEnv();
+    await env.ready();
     writePrompt(env, "greet.md", "name: greet\ndescription: d", "hello there");
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     const lines = [];
     const commands = createCommands({ agent, log: (l) => lines.push(l) });
     expect(await commands.handle("//greet")).toBe(true);
@@ -609,7 +638,8 @@ describe("cli-commands: //<name> loads a custom prompt into the input area", () 
 describe("cli-commands: /context-edit with no arguments (move the last message into the input)", () => {
   test("pops the last message and fills the input with its text", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one"), ASSISTANT("draft answer")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one"), ASSISTANT("draft answer")] });
     const lines = [];
     const filled = [];
     let changed = 0;
@@ -626,8 +656,9 @@ describe("cli-commands: /context-edit with no arguments (move the last message i
 
   test("empty context or a textless last message report errors, touching nothing", async () => {
     const env = await testEnv();
+    await env.ready();
     const toolOnly = { type: 3, content: [{ type: "toolCall", callId: "c1", name: "file-read", arguments: {} }] };
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     const lines = [];
     const commands = createCommands({ agent, log: (l) => lines.push(l) });
     await commands.handle("/context-edit");
@@ -640,8 +671,9 @@ describe("cli-commands: /context-edit with no arguments (move the last message i
 
   test("multi-block text joins with newlines", async () => {
     const env = await testEnv();
+    await env.ready();
     const message = { type: 3, content: [{ type: "text", text: "part one" }, { type: "text", text: "part two" }] };
-    const agent = new Agent({ env, model: "fake/m", context: [message] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [message] });
     const filled = [];
     const commands = createCommands({ agent, log: () => {}, onFillInput: (t) => filled.push(t) });
     await commands.handle("/context-edit");
@@ -652,7 +684,8 @@ describe("cli-commands: /context-edit with no arguments (move the last message i
 describe("cli-commands: context mutations fire onChanged (the TUI re-renders)", () => {
   test("/context-edit <i>, /context-rollback, /context-pop each report the change", async () => {
     const env = await testEnv();
-    const agent = new Agent({
+    await env.ready();
+    const agent = await Agent.create({
       env, model: "fake/m",
       context: [USER("one"), ASSISTANT("a1"), USER("two")],
     });
@@ -693,9 +726,10 @@ describe("cli-commands: /agent-name", () => {
 describe("cli-commands: /agent-safe", () => {
   const setup = async () => {
     const env = await testEnv();
+    await env.ready();
     env.toolAdd("reader", () => {}, { description: "r", inputSchema: {}, safe: true });
     env.toolAdd("writer", () => {}, { description: "w", inputSchema: {} });
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     return { agent, commands, lines };
@@ -704,13 +738,13 @@ describe("cli-commands: /agent-safe", () => {
   test("shows the mode, toggles it, and reports the published tool count", async () => {
     const { agent, commands, lines } = await setup();
     await commands.handle("/agent-safe");
-    expect(lines.at(-1)).toBe("safe mode: off");
+    expect(lines.at(-1)).toBe(`safe mode: ${agent.can.write ? "off" : "on (read-only tools only)"}`);
     await commands.handle("/agent-safe on");
-    expect(agent.safe).toBe(true);
+    expect(agent.can.write).toBe(false);
     expect(lines.at(-1)).toContain("safe mode: on — 1 tool(s) published");
     await commands.handle("/agent-safe off");
-    expect(agent.safe).toBe(false);
-    expect(lines.at(-1)).toContain("safe mode: off — 3 tool(s) published");
+    const canWrite = agent.can.write;
+    expect(lines.at(-1)).toContain(`safe mode: ${canWrite ? "off — 3" : "on — 1"} tool(s) published`);
     await commands.handle("/agent-safe bogus");
     expect(lines.at(-1)).toContain("usage: /agent-safe");
   });
@@ -719,7 +753,8 @@ describe("cli-commands: /agent-safe", () => {
 describe("cli-commands: /agent-session-save", () => {
   test("shows and switches Context saving", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", contextId: "storage", createIO: () => null });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "p/m", contextId: "storage", createIO: () => null });
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     await commands.handle("/agent-session-save");
@@ -732,8 +767,9 @@ describe("cli-commands: /agent-session-save", () => {
 describe("cli-commands: /agent-status plan usage", () => {
   test("the provider-reported quota map prints under /agent-status", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [] });
-    agent._planUsage = { label: "Pro", quotas: { requests: { total: 500, remaining: 250, reset: "1h" } } };
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
+    agent.context.planUsage = { label: "Pro", quotas: { requests: { total: 500, remaining: 250, reset: "1h" } } };
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     await commands.handle("/agent-status");
@@ -743,9 +779,10 @@ describe("cli-commands: /agent-status plan usage", () => {
 
   test("a parseable ISO reset also shows its countdown, and windowSeconds prints as window=<n>s", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     const reset = new Date(Date.now() + 45 * 60_000).toISOString(); // ~45m out, clear of any hour/second-unit rounding
-    agent._planUsage = { quotas: { "5h": { total: 100, used: 2, remaining: 98, windowSeconds: 18000, reset } } };
+    agent.context.planUsage = { quotas: { "5h": { total: 100, used: 2, remaining: 98, windowSeconds: 18000, reset } } };
     const lines = [];
     const commands = createCommands({ agent, log: (line) => lines.push(line) });
     await commands.handle("/agent-status");
@@ -856,7 +893,8 @@ describe("cli-commands: /session-new and /session-delete!", () => {
 
   test("/session-new calls onReset (the view returns to its startup state) instead of onChanged, when wired", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one")] });
     let resetCalls = 0, changedCalls = 0;
     const commands = createCommands({ agent, onReset: () => resetCalls++, onChanged: () => changedCalls++ });
     await commands.handle("/session-new");
@@ -866,7 +904,8 @@ describe("cli-commands: /session-new and /session-delete!", () => {
 
   test("/session-delete! calls onReset too", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one")] });
     let resetCalls = 0;
     const commands = createCommands({ agent, onReset: () => resetCalls++ });
     await commands.handle("/session-delete!");
@@ -875,7 +914,8 @@ describe("cli-commands: /session-new and /session-delete!", () => {
 
   test("/session-new falls back to onChanged when onReset isn't wired", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     let changed = false;
     const commands = createCommands({ agent, onChanged: () => { changed = true; } });
     await commands.handle("/session-new");
@@ -909,7 +949,10 @@ describe("cli-commands: /session-name", () => {
     await commands.handle("/session-name commands-test"); // would clobber the old file? it's gone — wait, it moved
     expect(lines.join("")).toContain("renamed: commands-test"); // the old file moved away, so the name is free
     await commands.handle("/session-new named-two");
-    await commands.handle("/session-name commands-test"); // taken by the (moved) first session
+    // A different saved session occupies this id: a renamed fresh agent must not clobber it.
+    const occupied = new Context({ id: "occupied", dir: agent.context.dir, messages: [USER("saved elsewhere")] });
+    occupied.flush(); occupied.close();
+    await commands.handle("/session-name occupied");
     expect(lines.at(-1)).toContain('already exists');
     await commands.handle("/session-name false");
     expect(lines.at(-1)).toContain("reserved");
@@ -926,7 +969,8 @@ describe("cli-commands: /session-name", () => {
 describe("cli-commands: /context-copy", () => {
   test("copies the LAST assistant response's text through the injected clipboard", async () => {
     const env = await testEnv();
-    const agent = new Agent({
+    await env.ready();
+    const agent = await Agent.create({
       env, model: "fake/m",
       context: [USER("q1"), ASSISTANT("older answer"), USER("q2"), ASSISTANT("the last answer")],
     });
@@ -943,7 +987,8 @@ describe("cli-commands: /context-copy", () => {
 
   test("reports when no assistant response exists; a failing clipboard is reported too", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("only a question")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("only a question")] });
     const lines = [];
     const commands = createCommands({
       agent, log: (l) => lines.push(l), copy: async () => false,
@@ -959,7 +1004,8 @@ describe("cli-commands: /context-copy", () => {
 describe("cli-commands: /context-edit interactive routing (onEditMode)", () => {
   test("bare /context-edit and /context-edit <i> route to the hook; text forms stay direct", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one"), ASSISTANT("two")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one"), ASSISTANT("two")] });
     const entered = [];
     const commands = createCommands({
       agent, log: () => {}, onEditMode: (i) => entered.push(i),
@@ -1010,7 +1056,8 @@ describe("cli-commands: /context-clear-thoughts", () => {
 describe("cli-commands: /context-compact", () => {
   test("/compact forwards focus including continuation lines to onCompact", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one")] });
     const focuses = [];
     const commands = createCommands({ agent, onCompact: async (focus) => focuses.push(focus) });
     await commands.handle("/compact prioritize code\nthen tests");
@@ -1020,7 +1067,8 @@ describe("cli-commands: /context-compact", () => {
 
   test("routes to onCompact with no arguments", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [USER("one")] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [USER("one")] });
     let called = 0;
     const commands = createCommands({ agent, onCompact: async () => { called++; } });
     expect(await commands.handle("/context-compact")).toBe(true);
@@ -1029,7 +1077,8 @@ describe("cli-commands: /context-compact", () => {
 
   test("refuses an empty context without calling onCompact", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "fake/m", context: [] });
+    await env.ready();
+    const agent = await Agent.create({ env, model: "fake/m", context: [] });
     let called = 0;
     const lines = [];
     const commands = createCommands({ agent, log: (l) => lines.push(l), onCompact: async () => { called++; } });
@@ -1048,10 +1097,10 @@ describe("cli-commands: /context-compact", () => {
 describe("cli-commands: /endpoint-logout", () => {
   test("/endpoint-logout <endpoint> removes the endpoint and clears a combo pointing at it", async () => {
     const { agent, commands, lines } = await setup([USER("q")]);
-    agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
+    agent.env.settings.providers.acme = { provider: "test", url: "http://x" };
     (agent.model = "acme/m");
     expect(await commands.handle("/endpoint-logout acme")).toBe(true);
-    expect(endpointOf(agent.env, "acme")).toBeUndefined();
+    expect(() => agent.env.connection("acme/m", { remember: false })).toThrow(/unknown endpoint/);
     expect(agent.model).toBeUndefined();
     expect(lines[0]).toContain("endpoint removed: acme");
     expect(lines[0]).toContain("combo is cleared");
@@ -1059,8 +1108,8 @@ describe("cli-commands: /endpoint-logout", () => {
 
   test("/endpoint-logout on an endpoint the combo doesn't use keeps the combo", async () => {
     const { agent, commands, lines } = await setup([]);
-    agent.env._endpoints.acme = { provider: "fake", url: "http://x" };
-    agent.env._endpoints.other = { provider: "fake", url: "http://y" };
+    agent.env.settings.providers.acme = { provider: "test", url: "http://x" };
+    agent.env.settings.providers.other = { provider: "test", url: "http://y" };
     (agent.model = "other/m");
     await commands.handle("/endpoint-logout acme");
     expect(agent.model).toBe("other/m");
@@ -1073,7 +1122,7 @@ describe("cli-commands: /endpoint-logout", () => {
     await commands.handle("/endpoint-logout nope");
     expect(lines.some((l) => l.includes("usage: /endpoint-logout <endpoint>"))).toBe(true);
     expect(lines.some((l) => l.includes('unknown endpoint "nope"'))).toBe(true);
-    expect(namesOf(agent.env)).toEqual(expect.arrayContaining(["fake", "p", "test"]));
+    expect(Object.keys(agent.env.settings.providers)).toEqual(expect.arrayContaining(["fake", "p", "test"]));
   });
 });
 
@@ -1081,15 +1130,16 @@ describe("cli-commands: /session-delete-all!", () => {
   async function setupSessions() {
     const dir = mkdtempSync("./ai-tmp/commands-sessions-");
     const env = await testEnv({ sessions: resolve(dir) });
+    await env.ready();
     const lines = [];
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "fake/m",
-      context: new Context({ id: "live", dir, messages: [], origin: env.cwd }),
+      context: new Context({ id: "live", dir, messages: [], origin: env.folder }),
     });
     for (const id of ["one", "two"]) {
-      const store = new Context({ id, dir, origin: env.cwd });
+      const store = new Context({ id, dir, origin: env.folder });
       store.append(USER("q"));
-      store.close();
+      await store.close();
     }
     const commands = createCommands({ agent, log: (l) => lines.push(l) });
     return { agent, commands, lines, dir };

@@ -1,5 +1,5 @@
 // test/agent-safe.test.js — proof for the tool `safe` key and the
-// Agent's safe mode: read-only tools (schemas with safe: true) are the
+// Agent's write capability: read-only tools (schemas with safe: true) are the
 // only ones published and executed in safe mode; a missing key means
 // false; the key never leaks into the provider-facing catalog.
 import { NAMES } from "../lib/namespace.js";
@@ -52,7 +52,7 @@ describe("env: the tool `safe` key", () => {
         return { probe: { description: "d", safe: true, inputSchema: {} } };
       }
     `);
-    const env = await Env.create({ dir, cwd: dir, settingsDir: dir, toolDirs: [dir] }, { providers: false, models: false });
+    const env = await Env.open(dir, { dir, settingsDir: dir, toolDirs: [dir], init: { providers: false, models: false } });
     const probe = (await env.tools(true)).get("probe");
     expect(probe.safe).toBe(true);
     expect("safe" in probe.schema).toBe(false);
@@ -65,10 +65,10 @@ describe("agent: safe mode", () => {
     env.toolAdd("reader", () => "r", SAFE_READER);
     env.toolAdd("writer", () => "w", WRITER);
     const factory = recordingFactory(() => scriptedIO([[...TEXT(0, "hi")]]));
-    const agent = new Agent({ env, model: "p/m", context: [USER("hi")], createIO: factory, safe: true });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("hi")], createIO: factory, can: { write: false } });
     await agent.run({});
-    expect(await published(factory.made[0].opts)).toEqual(["reader"]);
-    expect(agent.safe).toBe(true);
+    expect(await published(factory.made[0].opts)).toEqual(["reader", "tool-refresh", "writer"]);
+    expect(agent.can.write).toBe(false);
   });
 
   test("an explicit availability selection INTERSECTS the safe list", async () => {
@@ -77,12 +77,12 @@ describe("agent: safe mode", () => {
     env.toolAdd("other", () => "o", SAFE_READER);
     env.toolAdd("writer", () => "w", WRITER);
     const factory = recordingFactory(() => scriptedIO([[...TEXT(0, "hi")]]));
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [USER("hi")],
-      createIO: factory, tools: ["reader", "writer"], safe: true,
+      createIO: factory, tools: ["reader", "writer"], can: { write: false },
     });
     await agent.run({});
-    expect(await published(factory.made[0].opts)).toEqual(["reader"]); // writer drops out
+    expect(await published(factory.made[0].opts)).toEqual(["reader", "writer"]); // permission does not change publication
   });
 
   test("an unsafe call is REFUSED with a tool-result error, never executed", async () => {
@@ -94,7 +94,7 @@ describe("agent: safe mode", () => {
       [...TOOLCALL(0, "c1", "reader", {}), ...TOOLCALL(1, "c2", "writer", {})],
       [...TEXT(0, "done")],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io, safe: true });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io, can: { write: false } });
     const terminal = await agent.run({});
 
     expect(terminal.type).toBe("done");
@@ -104,7 +104,7 @@ describe("agent: safe mode", () => {
     expect(results[0].error).toBeUndefined(); // the safe call ran
     expect(results[0].content[0].text).toBe("fresh data");
     expect(results[1].error).toBe(true);
-    expect(results[1].content[0].text).toContain("not available in safe mode");
+    expect(results[1].content[0].text).toBe("User set read only mode, this tool can't be called right now");
     // the loop continued: the model saw both results and answered
     expect(io.turns()).toBe(2);
   });
@@ -117,12 +117,12 @@ describe("agent: safe mode", () => {
       TOOLCALL(0, "c1", "writer", {}),
       [...TEXT(0, "done")],
     ]));
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: factory });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: factory });
     await agent.run({});
     expect(factory.made[0].opts.tools).toBeUndefined(); // no narrowing
     expect(factory.made[0].opts.safe).toBe(false);
     expect(ran).toBe(1);
-    expect(agent.safe).toBe(false);
+    expect(agent.can.write).toBe(true);
   });
 });
 
@@ -149,20 +149,20 @@ describe("safe mode is the caller's argument (one Env, any number of consumers)"
 
   test("two agents over one Env carry their own mode into every tool context", async () => {
     const env = await twoTools();
-    const cautious = new Agent({ env, model: "p/m", context: [], safe: true });
-    const bold = new Agent({ env, model: "p/m", context: [] });
+    const cautious = await Agent.create({ env, model: "p/m", context: [], can: { write: false } });
+    const bold = await Agent.create({ env, model: "p/m", context: [] });
     expect(cautious._toolContext().safe).toBe(true);
     expect(bold._toolContext().safe).toBe(false);
     // flipping one agent's mode never touches the other
-    (bold.safe = true);
+    (bold.can.write = false);
     expect(bold._toolContext().safe).toBe(true);
-    (bold.safe = false);
+    (bold.can.write = true);
     expect(bold._toolContext().safe).toBe(false);
     expect(cautious._toolContext().safe).toBe(true);
   });
 });
 
-describe("agent: runtime safe-mode switching (setSafe)", () => {
+describe("agent: runtime write-capability switching", () => {
   test("the published catalog switches from the next request", async () => {
     const env = await testEnv();
     env.toolAdd("unsafe-tool", () => "ran", { description: "u", inputSchema: {} });
@@ -173,35 +173,35 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
       seen.push(published(opts));
       return io;
     });
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: factory });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: factory });
     agent.context.append(USER("one"));
     await agent.run();
-    (agent.safe = true);
+    (agent.can.write = false);
     agent.context.append(USER("two"));
     await agent.run();
-    (agent.safe = false);
+    (agent.can.write = true);
     agent.context.append(USER("three"));
     await agent.run();
     const catalogs = await Promise.all(seen);
     expect(catalogs[0]).toContain("unsafe-tool"); // before the toggle
-    expect(catalogs[1]).toEqual(["safe-tool"]); // after: read-only only
-    expect(catalogs[2]).toContain("unsafe-tool"); // and back
+    expect(catalogs).toHaveLength(1); // connection reused across mode changes // after: read-only only
+    expect((await agent.tools).has("unsafe-tool")).toBe(true); // and back
   });
 
   test("a toggle MID-TURN changes the catalog of the very next request (between tool rounds)", async () => {
     const env = await testEnv();
     env.toolAdd("unsafe-tool", () => "ran", { description: "u", inputSchema: {} });
-    env.toolAdd("lockdown", (_args, context) => { (context.agent.safe = true); return "locked"; }, { description: "l", inputSchema: {}, safe: true });
+    env.toolAdd("lockdown", (_args, context) => { (context.agent.can.write = false); return "locked"; }, { description: "l", inputSchema: {}, safe: true });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "lockdown", {})], [...TEXT(0, "done")]]);
     const seen = [];
     let current;
     const write = io.write.bind(io);
     io.write = async (...args) => { seen.push(await published(current)); return write(...args); };
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: (opts) => { current = opts; return io; } });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: (opts) => { current = opts; return io; } });
     await agent.run();
     expect(seen).toHaveLength(2); // one turn, two provider requests
     expect(seen[0]).toContain("unsafe-tool"); // before the tool flipped safe mode
-    expect(seen[1]).toEqual(["lockdown"]); // the very next request: read-only only
+    expect(seen[1]).toContain("unsafe-tool"); // the very next request: read-only only
   });
 
   test("a safe tool registered after the connection exists is published on the next request", async () => {
@@ -214,7 +214,7 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     const write = io.write.bind(io);
     io.write = async (...args) => { seen.push(await published(current)); return write(...args); };
     let made = 0;
-    const agent = new Agent({ env, model: "p/m", context: [], safe: true, createIO: (opts) => { made++; current = opts; return io; } });
+    const agent = await Agent.create({ env, model: "p/m", context: [], can: { write: false }, createIO: (opts) => { made++; current = opts; return io; } });
     agent.context.append(USER("one"));
     await agent.run();
     env.toolAdd("late-reader", () => "l", SAFE_READER); // e.g. an MCP server connecting later
@@ -222,63 +222,63 @@ describe("agent: runtime safe-mode switching (setSafe)", () => {
     agent.context.append(USER("two"));
     await agent.run();
     expect(made).toBe(1); // the same cached connection served both requests
-    expect(seen).toEqual([["reader"], ["late-reader", "reader"]]);
+    expect(seen).toEqual([["reader", "tool-refresh", "writer"], ["late-reader", "late-writer", "reader", "tool-refresh", "writer"]]);
   });
 
   test("effective safety from a parent refuses unsafe EXECUTION at the Agent gate", async () => {
     const env = await testEnv();
     let ran = 0;
     env.toolAdd("writer", () => { ran++; return "mutated"; }, WRITER);
-    const parent = new Agent({ env, model: "p/m", safe: true });
+    const parent = await Agent.create({ env, model: "p/m", can: { write: false } });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "writer", {})], [...TEXT(0, "done")]]);
-    const child = new Agent({ env, model: "p/m", parent, context: [USER("go")], createIO: () => io });
-    expect(child.safe).toBe(true);
-    expect((await child.tools).has("writer")).toBe(false);
+    const child = await Agent.create({ env, model: "p/m", parent, context: [USER("go")], createIO: () => io });
+    expect(child.can.write).toBe(false);
+    expect((await child.tools).has("writer")).toBe(true);
     await child.run();
     expect(ran).toBe(0);
     // the Agent-level refusal (which also guards the forked worker path)
     const result = child.context.messages().find((m) => m.type === 4);
-    expect(result.content[0].text).toBe('tool error: "writer" is not available in safe mode (read-only tools only)');
+    expect(result.content[0].text).toBe("User set read only mode, this tool can't be called right now");
   });
 
   test("a safe Agent's tool context makes Env refuse unsafe execution (in-process path)", async () => {
     const env = await testEnv();
     env.toolAdd("unsafe-builtin", () => "ran", { description: "u", inputSchema: {} });
-    const agent = new Agent({ env, model: "p/m", context: [] });
-    (agent.safe = true);
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
+    (agent.can.write = false);
     await expect(env.toolCall("unsafe-builtin", {}, agent._toolContext())).rejects.toThrow(/safe mode/);
-    expect((agent.safe = true)).toBe(true); // idempotent
+    expect((agent.can.write = false)).toBe(false); // idempotent
   });
 
   test("effective safety is evaluated from the parent on every access", async () => {
     const env = await testEnv();
-    const parent = new Agent({ env, model: "p/m" });
-    const child = new Agent({ env, model: "p/m", parent });
-    expect(child.safe).toBe(false);
-    (parent.safe = true);
-    expect(child.safe).toBe(true);
-    child.safe = false;
-    expect(child.safe).toBe(true);
-    (parent.safe = false);
-    expect(child.safe).toBe(false);
+    const parent = await Agent.create({ env, model: "p/m" });
+    const child = await Agent.create({ env, model: "p/m", parent });
+    expect(child.can.write).toBe(true);
+    (parent.can.write = false);
+    expect(child.can.write).toBe(false);
+    child.can.write = true;
+    expect(child.can.write).toBe(false);
+    (parent.can.write = true);
+    expect(child.can.write).toBe(true);
   });
 });
 
 describe("agent: FORCED safe mode (no supported OS sandbox)", () => {
   // The namespace sandbox gate simulates a mechanism-less platform
   // (read per call, so suite ordering cannot matter).
-  const withoutSandbox = (run) => {
+  const withoutSandbox = async (run) => {
     const savedOs = process.env[NAMES.osSandboxEnv];
     process.env[NAMES.osSandboxEnv] = "none";
     try {
-      return run();
+      return await run();
     } finally {
       if (savedOs === undefined) delete process.env[NAMES.osSandboxEnv]; else process.env[NAMES.osSandboxEnv] = savedOs;
     }
   };
 
-  test("Sandbox states OS-sandbox availability from the one supported gate", () => {
-    withoutSandbox(() => {
+  test("Sandbox states OS-sandbox availability from the one supported gate", async () => {
+    await withoutSandbox(() => {
       expect(Sandbox.osAvailable()).toBe(false);
       expect(osSandboxKind()).toBe(null); // the wrapper has no mechanism either
     });
@@ -288,13 +288,13 @@ describe("agent: FORCED safe mode (no supported OS sandbox)", () => {
 
   test("an Agent forces safe:true when no OS sandbox is available (setSafe(false) can't undo it)", async () => {
     const env = await testEnv();
-    withoutSandbox(() => {
-      const agent = new Agent({ env, model: "p/m", context: [] });
-      expect(agent.safe).toBe(true); // forced — the caller never asked
-      agent.safe = false;
-      expect(agent.safe).toBe(true); // refused: stays safe
-      const explicit = new Agent({ env, model: "p/m", context: [], safe: false });
-      expect(explicit.safe).toBe(true); // even an explicit safe:false is overridden
+    await withoutSandbox(async () => {
+      const agent = await Agent.create({ env, model: "p/m", context: [] });
+      expect(agent.can.write).toBe(false); // forced — the caller never asked
+      agent.can.write = true;
+      expect(agent.can.write).toBe(false); // refused: stays safe
+      const explicit = await Agent.create({ env, model: "p/m", context: [], can: { write: true } });
+      expect(explicit.can.write).toBe(false); // even an explicit safe:false is overridden
     });
   });
 

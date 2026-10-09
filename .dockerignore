@@ -1,0 +1,12 @@
+.git
+.DS_Store
+.claude
+.env
+node_modules
+ai-cache
+ai-tmp
+ai-output
+ai-research
+ai-tasks
+tmp
+coverage

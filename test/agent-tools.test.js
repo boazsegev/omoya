@@ -11,11 +11,11 @@ describe("Agent published tools", () => {
     const env = await testEnv();
     env.toolAdd("reader", () => "ok", schema("Reads", { storage: "private", detect: () => [], onTimeout: () => {} }));
     env.toolAdd("hidden", () => "ok", schema("Hidden", { secret: true }));
-    const agent = new Agent({ env, safe: true });
+    const agent = await Agent.create({ env, can: { write: false } });
     try {
       const tools = await agent.tools;
       expect(tools).toBeInstanceOf(Map);
-      expect([...tools.keys()]).toEqual(["reader"]);
+      expect([...tools.keys()]).toEqual(["tool-refresh", "reader"]);
       expect(tools.get("reader")).toEqual({ name: "reader", description: "Reads", inputSchema: schema().inputSchema });
       expect(agent._io.size).toBe(0); // inspection must not connect to a provider
       tools.clear();
@@ -23,33 +23,34 @@ describe("Agent published tools", () => {
     } finally { await agent.close(); }
   });
 
-  test("shares IO publication semantics for safe mode, selection, and dynamic availability", async () => {
+  test("shares IO publication semantics for selection, and dynamic availability", async () => {
     const env = await testEnv();
     let available = false;
     env.toolAdd("reader", () => "ok", schema("Reads"));
     env.toolAdd("dynamic", () => "ok", schema("Dynamic", { available: () => available }));
     env.toolAdd("writer", () => "ok", schema("Writes", { safe: false }));
     env.toolAdd("other", () => "ok", schema("Other"));
-    const agent = new Agent({ env, safe: true, tools: ["reader", "dynamic", "writer"] });
+    const agent = await Agent.create({ env, can: { write: false }, tools: ["reader", "dynamic", "writer"] });
     const io = Object.create(IO.prototype);
     io._toolSelection = ["reader", "dynamic", "writer"];
     try {
-      expect([...(await agent.tools).keys()]).toEqual(["reader"]);
+      expect([...(await agent.tools).keys()]).toEqual(["reader", "writer"]);
       available = true;
-      io._toolCatalog = await env.tools(agent.safe, agent.model);
+      io._toolCatalog = await env.tools(false, agent.model);
       expect([...(await agent.tools).values()]).toEqual(io.tools());
-      expect([...(await agent.tools).keys()]).toEqual(["reader", "dynamic"]);
-      const none = new Agent({ env, safe: true, tools: [] });
-      const all = new Agent({ env, safe: true, tools: ["*"] });
+      expect([...(await agent.tools).keys()]).toEqual(["reader", "dynamic", "writer"]);
+      const none = await Agent.create({ env, can: { write: false }, tools: [] });
+      const all = await Agent.create({ env, can: { write: false }, tools: ["*"] });
       try {
         expect((await none.tools).size).toBe(0);
-        expect([...(await all.tools).keys()]).toEqual(["reader", "dynamic", "other"]);
+        expect([...(await all.tools).keys()]).toEqual(["tool-refresh", "reader", "dynamic", "writer", "other"]);
       } finally { await none.close(); await all.close(); }
     } finally { await agent.close(); }
   });
 
   test("includes provider-only tools and provider schemas that shadow global tools", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ providers: { p: { provider: "test", models: { m: {} } } } });
+    await env.ready();
     class Provider {
       static provider = { capabilities: { tools: {
         reader: { description: "Provider reader", safe: true, schema: { type: "object", properties: { query: { type: "string" } } }, function: () => "provider" },
@@ -58,16 +59,16 @@ describe("Agent published tools", () => {
     }
     providerAdd(env, "test", Provider);
     env.toolAdd("reader", () => "global", schema("Global"));
-    const agent = new Agent({ env, model: "p/m", safe: true });
+    const agent = await Agent.create({ env, model: "p/m", can: { write: false } });
     try {
       const tools = await agent.tools;
       expect(tools.get("reader").description).toBe("Provider reader");
       expect(tools.get("reader").inputSchema.properties).toEqual({ query: { type: "string" } });
       expect(tools.has("native")).toBe(true);
       const io = Object.create(IO.prototype);
-      io._toolCatalog = await env.tools(true, "p/m");
+      io._toolCatalog = await env.tools(false, "p/m");
       expect([...tools.values()]).toEqual(io.tools());
-      env.settings.providerTools = { native: false, reader: false };
+      env.settings.providers.tools = { native: false, reader: false };
       expect((await agent.tools).get("reader").description).toBe("Global");
       expect((await agent.tools).has("native")).toBe(false);
       agent.model = undefined;
@@ -91,7 +92,7 @@ describe("Agent published tools", () => {
     providerAdd(env, "test", Provider);
     env.toolAdd("reader", () => "ok", schema("Reads"));
     env.toolAdd("hidden", () => "ok", schema("Hidden", { secret: true }));
-    const agent = new Agent({ env, model: "p/m", safe: true, tools: ["reader", "hidden"], context: [{ type: 2, content: [{ type: "text", text: "go" }] }] });
+    const agent = await Agent.create({ env, model: "p/m", can: { write: false }, tools: ["reader", "hidden"], context: [{ type: 2, content: [{ type: "text", text: "go" }] }] });
     try {
       const catalog = await agent.tools;
       expect((await agent.run()).type).toBe("done");
@@ -100,19 +101,50 @@ describe("Agent published tools", () => {
     } finally { await agent.close(); }
   });
 
+  test("read-only toggles keep the same provider connection and wire tool list", async () => {
+    const env = await testEnv();
+    const sent = [];
+    class Provider {
+      static provider = {};
+      constructor(_url, io) { this.io = io; this.done = false; }
+      context2msg(context) { return [{}, { context, tools: this.io.tools() }]; }
+      async send(message) { sent.push(message[1].tools); this.done = false; }
+      async read() { if (this.done) return null; this.done = true; return {}; }
+      msg2events() { return [{ type: "text_delta", contentIndex: 0, text: "done" }, { type: "done" }]; }
+      async close() {}
+    }
+    providerAdd(env, "test", Provider);
+    env.toolAdd("writer", () => "ok", schema("Writes", { safe: false }));
+    const agent = await Agent.create({ env, model: "p/m", tools: ["writer"], context: [{ type: 2, content: [{ type: "text", text: "go" }] }] });
+    try {
+      await agent.run();
+      const io = agent.io;
+      agent.can.write = false;
+      expect(agent.can.write).toBe(false);
+      await agent.run();
+      agent.can.write = true;
+      expect(agent.io).toBe(io);
+      await agent.run();
+      expect(sent).toHaveLength(3);
+      expect(sent[0].map(({ name }) => name)).toEqual(["writer"]);
+      expect(sent[1]).toEqual(sent[0]);
+      expect(sent[2]).toEqual(sent[0]);
+    } finally { await agent.close(); }
+  });
+
   test("tracks inherited safety and late tool registrations without cached publication state", async () => {
     const env = await testEnv();
     env.toolAdd("writer", () => "ok", schema("Writes", { safe: false }));
-    const parent = new Agent({ env, safe: true });
-    const child = new Agent({ env, parent });
+    const parent = await Agent.create({ env, can: { write: false } });
+    const child = await Agent.create({ env, parent });
     try {
-      expect((await child.tools).has("writer")).toBe(false);
+      expect((await child.tools).has("writer")).toBe(true);
       env.toolAdd("late", () => "ok", schema("Late"));
       expect((await child.tools).has("late")).toBe(true);
-      parent.safe = false;
-      expect((await child.tools).has("writer")).toBe(!parent.safe);
-      parent.safe = true;
-      expect((await child.tools).has("writer")).toBe(false);
+      parent.can.write = true;
+      expect((await child.tools).has("writer")).toBe(true);
+      parent.can.write = false;
+      expect((await child.tools).has("writer")).toBe(true);
     } finally { await child.close(); await parent.close(); }
   });
 

@@ -43,6 +43,7 @@ const shim = (target) => `${SHEBANG}\nimport "./scripts/${target}";\n`;
 export function wrapperMap(prefix = NAMES.cliPrefix, fullName = NAMES.namespace) {
   const map = {};
   for (const name of SCRIPT_NAMES) map[`${prefix}-${name}`] = shim(name);
+  map[`${prefix}d`] = shim("daemon.js"); // library-free supervisor
   map[prefix] = shim("app"); // short app command
   map[fullName] = shim("app"); // full app command (same entry when equal)
   for (const name of DOUBLE_WRAPPED) map[name] = shim(name); // also without the prefix

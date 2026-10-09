@@ -11,7 +11,7 @@
  * the file's line-ending style).
  *
  * The record is SESSION-SCOPED: it lives in the calling agent's
- * toolStorage (context.agent.toolStorage("edit")), so one agent can
+ * storage (context.storage), so one agent can
  * never see, guess, or consume another agent's edit ids. Direct
  * callers without an agent (tests, scripts) fall back to one shared
  * module store. A store is size-capped (oldest entries drop). A
@@ -34,15 +34,13 @@ const fallback = new Map();
 
 /**
  * The calling session's record store. An agent's store lives in its
- * OWN toolStorage (session-scoped — never shared across agents);
+ * OWN context.storage (session-scoped — never shared across agents);
  * agentless callers share one module-level fallback store.
- * @param {Object} [context] - harness tool context ({agent})
+ * @param {Object} [context] - harness tool context ({storage})
  * @returns {Map<string, {path: string, edits: Array, ending: string}>}
  */
 function storeFor(context) {
-  const storage = context?.agent && typeof context.agent.toolStorage === "function"
-    ? context.agent.toolStorage("edit")
-    : null;
+  const storage = context?.storage;
   return storage ? (storage[STORAGE_KEY] ??= new Map()) : fallback;
 }
 
@@ -50,7 +48,7 @@ function storeFor(context) {
  * Record an applied edit for a later rollback.
  * @param {string} callId - the tool call's id (Agent-owned)
  * @param {{path: string, edits: Array<{oldText: string, newText: string, at?: number}>, ending?: string}} entry
- * @param {Object} [context] - harness tool context ({agent})
+ * @param {Object} [context] - harness tool context ({storage})
  */
 export function recordEdit(callId, entry, context) {
   if (typeof callId !== "string" || callId === "") return;
@@ -64,7 +62,7 @@ export function recordEdit(callId, entry, context) {
  * Look a recorded edit up WITHOUT consuming it (the rollback path
  * consumes it only after the rewrite succeeded).
  * @param {string} callId
- * @param {Object} [context] - harness tool context ({agent})
+ * @param {Object} [context] - harness tool context ({storage})
  * @returns {{path: string, edits: Array, ending?: string}|undefined}
  */
 export function peekEdit(callId, context) {

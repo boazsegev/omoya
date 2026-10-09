@@ -64,7 +64,7 @@ describe("availability flows into the request (IO tools())", () => {
     const e = await toolsEnv();
     class Protocol {}
     providerAdd(e, "x", Protocol);
-    e._endpoints.x = { provider: "x", url: "test://x" };
+    e.settings.providers.x = { provider: "x", url: "test://x" };
     const all = new IO({ env: e, model: "x/m" });
     const none = new IO({ env: e, model: "x/m", tools: [] });
     const some = new IO({ env: e, model: "x/m", tools: ["alpha"] });
@@ -79,7 +79,7 @@ describe("availability flows into the request (IO tools())", () => {
     const e = await toolsEnv();
     let seen;
     const io = scriptedIO([[...TEXT(0, "ok"), { type: "done" }]]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env: e, model: "p/m", tools: ["alpha"], context: [USER("hi")],
       createIO: (opts) => { seen = opts; return io; },
     });
@@ -93,7 +93,7 @@ describe("availability flows into the request (IO tools())", () => {
       [...TOOLCALL(0, "c1", "beta", {}), { type: "done" }], // beta NOT in availability
       [{ type: "done" }],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env: e, model: "p/m", tools: ["alpha"], context: [USER("hi")],
       createIO: () => io,
     });

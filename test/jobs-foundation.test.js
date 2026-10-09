@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import API from "../lib/index.js";
+import API from "../lib/agent.js";
 import Jobs from "../lib/jobs.js";
 import { JobsError } from "../lib/jobs/errors-base.js";
 import { cycleRecord, dispatchJobs } from "../lib/jobs/dispatcher.js";

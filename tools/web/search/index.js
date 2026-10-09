@@ -12,7 +12,7 @@ const MAX_CACHE_ENTRIES = 256;
 const MAX_REDIRECTS = 8;
 const MAX_OUTPUT_CHARS = 50_000;
 const RRF_K = 60;
-const CHALLENGE_COOLDOWN_MS = 5 * 60_000;
+const ENGINE_COOLDOWN_MS = 5 * 60_000;
 
 const TRACKING_PARAMS = new Set([
   "fbclid", "gclid", "gbraid", "wbraid", "msclkid", "dclid", "yclid", "mc_cid", "mc_eid", "igshid",
@@ -27,11 +27,11 @@ const DEFAULT_ENGINES = Object.freeze([
 ]);
 
 const cache = new Map();
-const challengeCooldown = new Map();
+const engineCooldown = new Map();
 
 export function __resetPackageSearchForTest() {
   cache.clear();
-  challengeCooldown.clear();
+  engineCooldown.clear();
   __resetWebRateForTests();
 }
 
@@ -73,7 +73,7 @@ export async function packageSearch(args, context = {}, options = {}) {
   const leave = await rateEnter(rate, clock, context.signal, options.sleep, budgetMs, "web-search");
   let successful = false;
   try {
-    const content = await runSearch(args, context, options, config, clock.now());
+    const content = await runSearch(args, context, options, config);
     writeCache(key, content, config.cacheSeconds, config.cacheMaxEntries, clock.now());
     successful = true;
     return appendClampNotice(content, args.wasClamped);
@@ -88,8 +88,8 @@ function validateArgs(args) {
   if (!Number.isInteger(args.limit) || args.limit < 1 || args.limit > DEFAULT_LIMIT) throw new TypeError("web-search limit must be a normalized integer from 1 through 40");
 }
 
-async function runSearch(args, context, options, config, startTime) {
-  const deadline = startTime + config.timeoutMs;
+async function runSearch(args, context, options, config) {
+  const deadline = Date.now() + Math.min(config.timeoutMs, webBudgetMs(context));
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new SearchConfigError("fetch is unavailable; provide options.fetchImpl or a runtime fetch");
   const errors = [];
@@ -97,10 +97,12 @@ async function runSearch(args, context, options, config, startTime) {
   const access = typeof context.accessLabel === "string" && config.isDebug ? `${context.accessLabel} ` : "";
   for (const backend of config.backends) {
     try {
-      const results = await searchSearxng(backend, args.query, fetchImpl, context.signal, deadline);
+      const backendDeadline = Math.min(Date.now() + ENGINE_TIMEOUT_MS, deadline);
+      const results = await searchSearxng(backend, args.query, fetchImpl, context.signal, backendDeadline);
       if (results.length === 0) throw new Error("no usable search results");
       return renderMarkdown(args.query, results.slice(0, args.limit), config.isDebug ? `${access}SearXNG (${backend.name})` : undefined, config.isDebug);
     } catch (error) {
+      throwIfAborted(context.signal);
       errors.push(formatCause(backend.name, error));
     }
   }
@@ -110,6 +112,7 @@ async function runSearch(args, context, options, config, startTime) {
   }
 
   const settled = await Promise.allSettled(config.engines.map((engine, index) => searchEngine(engine, index, args.query, fetchImpl, context.signal, deadline)));
+  throwIfAborted(context.signal);
   const successes = [];
   const diagnostics = [];
   for (const [index, result] of settled.entries()) {
@@ -266,9 +269,8 @@ async function searchSearxng(backend, query, fetchImpl, signal, deadline) {
   const url = new URL(backend.url);
   url.searchParams.set("q", query);
   url.searchParams.set("format", "json");
-  const response = await fetchWithRedirects(url, { token: backend.token, fetchImpl, signal, deadline, baseOrigin: new URL(backend.url).origin });
+  const { response, text } = await fetchWithRedirects(url, { token: backend.token, fetchImpl, signal, deadline, baseOrigin: new URL(backend.url).origin });
   const type = response.headers.get("content-type") ?? "";
-  const text = await response.text();
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   if (type.includes("json") || looksJson(text)) return parseSearxJson(text);
   return parseSearchHtml(text, parseSearxHtml);
@@ -284,20 +286,20 @@ async function searchEngine(engine, index, query, fetchImpl, signal, packageDead
 
 async function searchHtmlEngine(engine, query, fetchImpl, signal, deadline, parser) {
   const key = `${engine.type}:${engine.url}`;
-  if ((challengeCooldown.get(key) ?? 0) > Date.now()) throw new Error("challenge cooldown");
-  challengeCooldown.delete(key);
+  const cooldown = engineCooldown.get(key);
+  if (cooldown?.expiresAt > Date.now()) throw new Error(`${cooldown.reason} cooldown`);
+  engineCooldown.delete(key);
   const url = new URL(engine.url);
   url.searchParams.set("q", query);
-  const response = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: url.origin });
-  const text = await response.text();
+  const { response, text } = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: url.origin });
   if (!response.ok) {
-    if (response.status === 429 || response.status === 403) challengeCooldown.set(key, Date.now() + CHALLENGE_COOLDOWN_MS);
+    if (response.status === 429 || response.status === 403) engineCooldown.set(key, { expiresAt: Date.now() + ENGINE_COOLDOWN_MS, reason: `HTTP ${response.status}` });
     throw new Error(`HTTP ${response.status}`);
   }
   try {
     return parseSearchHtml(text, parser);
   } catch (error) {
-    if (error.message === "recognized challenge page") challengeCooldown.set(key, Date.now() + CHALLENGE_COOLDOWN_MS);
+    if (error.message === "recognized challenge page") engineCooldown.set(key, { expiresAt: Date.now() + ENGINE_COOLDOWN_MS, reason: "challenge" });
     throw error;
   }
 }
@@ -307,8 +309,8 @@ async function searchSwisscows(engine, query, fetchImpl, signal, deadline) {
   const args = { freshness: "All", itemsCount: "20", locale: "en-US", offset: "0", query, spellcheck: "true" };
   for (const [name, value] of Object.entries(args)) url.searchParams.set(name, value);
   const { nonce, signature } = signSwisscows(url.pathname, args);
-  const response = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: new URL(engine.url).origin, accept: "application/json", extraHeaders: { "x-request-nonce": nonce, "x-request-signature": signature } });
-  const json = parseJson(await response.text(), "Swisscows API returned malformed JSON");
+  const { response, text } = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: new URL(engine.url).origin, accept: "application/json", extraHeaders: { "x-request-nonce": nonce, "x-request-signature": signature } });
+  const json = parseJson(text, "Swisscows API returned malformed JSON");
   if (!response.ok) throw new Error(`Swisscows API HTTP ${response.status}`);
   const payload = typeof json.payload === "string" ? decodeJwtPayload(json.payload) : json;
   if (!Array.isArray(payload.items)) throw new Error("Swisscows API response was not recognized");
@@ -338,8 +340,7 @@ function decodeJwtPayload(value) {
 async function searchBrave(engine, query, fetchImpl, signal, deadline) {
   const url = new URL(engine.url);
   url.searchParams.set("q", query);
-  const response = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: new URL(engine.url).origin, accept: "application/json" });
-  const text = await response.text();
+  const { response, text } = await fetchWithRedirects(url, { token: engine.token, fetchImpl, signal, deadline, baseOrigin: new URL(engine.url).origin, accept: "application/json" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const json = parseJson(text, "Brave API returned malformed JSON");
   const items = Array.isArray(json.web?.results) ? json.web.results : [];
@@ -358,8 +359,9 @@ async function fetchWithRedirects(initialUrl, { token, fetchImpl, signal, deadli
       for (const [name, value] of Object.entries(extraHeaders ?? {})) headers.set(name, value);
       if (token) headers.set(token.header, token.value);
     }
-    const response = await fetchWithDeadline(fetchImpl, url, { method: "GET", redirect: "manual", headers, signal }, deadline);
-    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const fetched = await fetchWithDeadline(fetchImpl, url, { method: "GET", redirect: "manual", headers, signal }, deadline);
+    const { response } = fetched;
+    if (![301, 302, 303, 307, 308].includes(response.status)) return fetched;
     if (hop === MAX_REDIRECTS) throw new Error("too many redirects");
     const location = response.headers.get("location");
     if (!location) throw new Error("redirect missing Location header");
@@ -376,18 +378,65 @@ function parseRedirectUrl(location, base) {
 }
 
 async function fetchWithDeadline(fetchImpl, url, init, deadline) {
-  const ms = Math.max(1, deadline - Date.now());
+  const ms = deadline - Date.now();
+  if (ms <= 0) throw new Error("web-search request timed out");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error("web-search request timed out")), ms);
   const sourceSignal = init.signal;
   const abort = () => controller.abort(sourceSignal.reason);
+  let response;
   try {
-    if (sourceSignal?.aborted) throw sourceSignal.reason ?? new Error("web-search cancelled");
+    throwIfAborted(sourceSignal);
     sourceSignal?.addEventListener("abort", abort, { once: true });
-    return await fetchWithConnectTimeout(fetchImpl, url, { ...init, signal: controller.signal }, { connectTimeoutMs: Math.min(CONNECT_TIMEOUT_MS, ms), message: "web-search connection timed out" });
+    response = await withinSignal(
+      fetchWithConnectTimeout(fetchImpl, url, { ...init, signal: controller.signal }, { connectTimeoutMs: Math.min(CONNECT_TIMEOUT_MS, ms), message: "web-search connection timed out" }),
+      controller.signal,
+    );
+    // Redirect bodies are irrelevant; do not let them delay the next hop.
+    const text = [301, 302, 303, 307, 308].includes(response.status) ? "" : await readResponseText(response, controller.signal);
+    return { response, text };
   } finally {
+    void response?.body?.cancel().catch(() => {});
     sourceSignal?.removeEventListener("abort", abort);
     clearTimeout(timeout);
+  }
+}
+
+function withinSignal(work, signal) {
+  if (signal.aborted) {
+    void Promise.resolve(work).catch(() => {});
+    return Promise.reject(signal.reason ?? new Error("web-search cancelled"));
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const abort = () => { cleanup(); reject(signal.reason ?? new Error("web-search cancelled")); };
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(work).then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+  });
+}
+
+async function readResponseText(response, signal) {
+  const reader = response.body?.getReader();
+  if (!reader) return withinSignal(response.text(), signal);
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let completed = false;
+  try {
+    for (;;) {
+      throwIfAborted(signal);
+      const { done, value } = await withinSignal(reader.read(), signal);
+      if (done) break;
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    completed = true;
+    return chunks.join("");
+  } finally {
+    if (!completed) void reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -409,24 +458,44 @@ function parseSearxHtml(text) {
 }
 
 function parseDuckDuckGoHtml(text) {
-  const blocks = matchAll(text, /<div\b[^>]*class=["']result(?:\s[^"']*)?["'][^>]*>[\s\S]*?(?=<div\b[^>]*class=["']result(?:\s|["'])|<\/body>|$)/gi);
+  const blocks = matchAll(text, /<div\b[^>]*class=["'](?:[^"']*\s)?result(?:\s[^"']*)?["'][^>]*>[\s\S]*?(?=<div\b[^>]*class=["'](?:[^"']*\s)?result(?:\s[^"']*)?["']|<\/body>|$)/gi);
   if (blocks.length === 0 && isRecognizedNoResults(text)) return [];
   if (blocks.length === 0) throw new Error("DuckDuckGo HTML was not recognized");
   return blocks.map(parseDuckBlock).filter(validResult);
 }
 
 function parseMojeekHtml(text) {
-  const blocks = matchAll(text, /<li\b[^>]*class=["'][^"']*(?:result|r)[^"']*["'][^>]*>[\s\S]*?<\/li>|<div\b[^>]*class=["'][^"']*result[^"']*["'][^>]*>[\s\S]*?<\/div>/gi);
+  const lists = matchAll(text, /<ul\b[^>]*class=["'](?:[^"']*\s)?results-standard(?:\s[^"']*)?["'][^>]*>[\s\S]*?<\/ul>/gi);
+  const blocks = lists.length > 0
+    ? lists.flatMap((list) => matchAll(list, /<li\b[^>]*>[\s\S]*?<\/li>/gi))
+    : matchAll(text, /<li\b[^>]*class=["'](?:[^"']*\s)?(?:result|r)(?:\s[^"']*)?["'][^>]*>[\s\S]*?<\/li>|<div\b[^>]*class=["'](?:[^"']*\s)?result(?:\s[^"']*)?["'][^>]*>[\s\S]*?<\/div>/gi);
   if (blocks.length === 0 && isRecognizedNoResults(text)) return [];
   if (blocks.length === 0) throw new Error("Mojeek HTML was not recognized");
-  return blocks.map(parseGenericResultBlock).filter(validResult);
+  return blocks.map((block) => {
+    const result = parseGenericResultBlock(block);
+    const heading = firstMatch(block, /<h2\b[^>]*>([\s\S]*?)<\/h2>/i)?.[1];
+    const titleLink = heading ? resultAnchor(heading) : undefined;
+    if (titleLink) { result.title = titleLink.title; result.url = titleLink.url; }
+    const snippet = firstMatch(block, /<p\b[^>]*class=["'](?:[^"']*\s)?s(?:\s[^"']*)?["'][^>]*>([\s\S]*?)<\/p>/i)?.[1];
+    if (snippet !== undefined) result.snippet = cleanHtml(snippet);
+    return result;
+  }).filter(validResult);
 }
 
 function parseDuckBlock(block) {
-  const href = firstMatch(block, /<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i)
-    ?? firstMatch(block, /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
-  if (!href) return {};
-  return { title: cleanHtml(href[2]), url: decodeDuckUrl(decodeEntities(href[1])), snippet: cleanHtml(firstMatch(block, /<a\b[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)?.[1] ?? firstMatch(block, /<div\b[^>]*class=["'][^"']*snippet[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] ?? "") };
+  const anchor = resultAnchor(block, "result__a") ?? resultAnchor(block);
+  if (!anchor) return {};
+  return { ...anchor, url: decodeDuckUrl(anchor.url), snippet: cleanHtml(firstMatch(block, /<a\b[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)?.[1] ?? firstMatch(block, /<div\b[^>]*class=["'][^"']*snippet[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1] ?? "") };
+}
+
+function resultAnchor(block, className) {
+  for (const match of block.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const classes = firstMatch(match[1], /\bclass=["']([^"']*)["']/i)?.[1].split(/\s+/) ?? [];
+    if (className && !classes.includes(className)) continue;
+    const href = firstMatch(match[1], /\bhref=["']([^"']*)["']/i)?.[1];
+    if (href !== undefined) return { title: cleanHtml(match[2]), url: decodeEntities(href) };
+  }
+  return undefined;
 }
 
 function parseGenericResultBlock(block) {
@@ -466,7 +535,11 @@ function parseSearchHtml(text, parser) {
 }
 
 function isChallenge(text) {
-  return /captcha|verify you are human|unusual traffic|enable javascript|challenge-form/i.test(text);
+  // Keywords, query echoes and examples are not evidence of a blocked search.
+  const html = text.replace(/<!--[\s\S]*?(?:-->|$)/g, " ")
+    .replace(/<(script|style|textarea)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ");
+  if (/<form\b[^>]*\sid\s*=\s*(?:"challenge-form"|'challenge-form'|challenge-form(?=[\s>]))/i.test(html)) return true;
+  return /<div\b[^>]*\sclass\s*=\s*["'](?:[^"']*\s)?captcha-wrap(?:\s[^"']*)?["'][^>]*>[\s\S]*?complete this challenge[\s\S]*?<\/div>/i.test(html);
 }
 
 function isRecognizedNoResults(text) {

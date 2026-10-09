@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, USER, TEXT, TOOLCALL } from "./fakes.js";
 import { toolEntry } from "./env-internals.js";
+import { toolStorage } from "../lib/agent/tool-storage.js";
 
 async function loopEnv(tools = {}) {
   const env = await testEnv();
@@ -16,27 +17,29 @@ async function loopEnv(tools = {}) {
 }
 
 describe("Agent tool storage", () => {
-  test("is stable per agent/tool, isolated, clearable, and injected into calls", async () => {
+  test("is stable per agent/tool, isolated, and injected into calls", async () => {
     const seen = [];
-    const env = await loopEnv({
-      alpha: (_args, context) => { context.storage.count = (context.storage.count ?? 0) + 1; seen.push(context.storage); return context.storage.count; },
-      beta: (_args, context) => { seen.push(context.storage); return "beta"; },
-    });
-    const agent = new Agent({ env });
+    const env = await testEnv();
+    // Storage probes do not mutate files; explicitly classify them read-only
+    // so the test also works when Linux has no bubblewrap.
+    env.toolAdd("alpha", (_args, context) => { context.storage.count = (context.storage.count ?? 0) + 1; seen.push(context.storage); return context.storage.count; }, { description: "storage alpha", inputSchema: {}, safe: true });
+    env.toolAdd("beta", (_args, context) => { seen.push(context.storage); return "beta"; }, { description: "storage beta", inputSchema: {}, safe: true });
+    const agent = await Agent.create({ env });
 
-    expect(agent.toolStorage("alpha")).toBe(agent.toolStorage("alpha"));
-    expect(agent.toolStorage("alpha")).not.toBe(agent.toolStorage("beta"));
+    expect(toolStorage(agent, "alpha")).toBe(toolStorage(agent, "alpha"));
+    expect(toolStorage(agent, "alpha")).not.toBe(toolStorage(agent, "beta"));
     await agent.env.toolCall("alpha", {}, agent._toolContext({ name: "alpha", callId: "1" }));
     await agent.env.toolCall("alpha", {}, agent._toolContext({ name: "alpha", callId: "2" }));
     await agent.env.toolCall("beta", {}, agent._toolContext({ name: "beta", callId: "3" }));
     expect(seen[0]).toBe(seen[1]);
     expect(seen[0].count).toBe(2);
-    expect(seen[2]).toBe(agent.toolStorage("beta"));
-
-    agent.toolStorageClear("alpha");
-    expect(agent.toolStorage("alpha")).not.toBe(seen[0]);
-    agent.toolStorageClear();
-    expect(agent._toolStorage).toBeUndefined();
+    expect(seen[2]).toBe(toolStorage(agent, "beta"));
+    const other = await Agent.create({ env });
+    expect(toolStorage(other, "alpha")).not.toBe(seen[0]);
+    expect(toolStorage(other, "beta")).not.toBe(seen[2]);
+    other.close();
+    agent.close();
+    env.close();
   });
 });
 
@@ -53,7 +56,7 @@ describe("Agent loop: tool execution", () => {
       [...TOOLCALL(0, "c1", "fake-tool", { path: "./a" }), { type: "done" }],
       [...TEXT(0, "finished"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -77,7 +80,7 @@ describe("Agent loop: tool execution", () => {
       [...TOOLCALL(0, "c1", "a", {}), ...TOOLCALL(1, "c2", "b", {}), { type: "done" }],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
 
     expect(order).toEqual(["a", "b"]);
@@ -102,7 +105,7 @@ describe("Agent loop: read-only tool batches", () => {
       }, { description: "read", safe: true, inputSchema: {} });
       const calls = Array.from({ length: 6 }, (_, i) => TOOLCALL(i, `c${i}`, "reader", { id: i })).flat();
       const io = scriptedIO([[...calls, { type: "done" }], [{ type: "done" }]]);
-      const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
       await agent.run();
       expect(peak).toBe(concurrency);
       expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(Array.from({ length: 6 }, (_, i) => `c${i}`));
@@ -111,7 +114,7 @@ describe("Agent loop: read-only tool batches", () => {
 
   test("invalid tool concurrency rejects clearly when the Agent is created", async () => {
     const env = await testEnv({ tools: { concurrency: 0 } });
-    expect(() => new Agent({ env, model: "p/m", context: [USER("go")] })).toThrow("tools.concurrency must be a positive integer");
+    await expect(Agent.create({ env, model: "p/m", context: [USER("go")] })).rejects.toThrow("tools.concurrency must be a positive integer");
   });
 
   test("concurrent safe calls finish together and preserve result order", async () => {
@@ -125,13 +128,37 @@ describe("Agent loop: read-only tool batches", () => {
       [...TOOLCALL(0, "a", "reader", { id: "a" }), ...TOOLCALL(1, "b", "reader", { id: "b" }), { type: "done" }],
       [...TEXT(0, "finished"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     try {
       for (let i = 0; i < 100 && started.length < 2; i++) await Bun.sleep(2);
       expect(started).toEqual(["a", "b"]);
     } finally { release(); await run; }
     expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "b"]);
+  });
+
+  test("a freed read slot starts the next call without waiting for a slow sibling", async () => {
+    const env = await testEnv({ tools: { concurrency: 2 } });
+    const started = [];
+    let releaseSlow;
+    const slow = new Promise((resolve) => { releaseSlow = resolve; });
+    env.toolAdd("reader", async ({ id }) => {
+      started.push(id);
+      if (id === "slow") await slow;
+      return id;
+    }, { description: "read", safe: true, inputSchema: {} });
+    const io = scriptedIO([
+      [...TOOLCALL(0, "a", "reader", { id: "slow" }), ...TOOLCALL(1, "b", "reader", { id: "fast" }),
+        ...TOOLCALL(2, "c", "reader", { id: "next" }), { type: "done" }],
+      [{ type: "done" }],
+    ]);
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const run = agent.run();
+    try {
+      for (let i = 0; i < 100 && started.length < 3; i++) await Bun.sleep(2);
+      expect(started).toEqual(["slow", "fast", "next"]);
+    } finally { releaseSlow(); await run; await agent.close(); }
+    expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "b", "c"]);
   });
 
   test("unsafe calls form barriers even when async is enabled", async () => {
@@ -146,7 +173,7 @@ describe("Agent loop: read-only tool batches", () => {
         ...TOOLCALL(2, "b", "reader", { id: "b" }), ...TOOLCALL(3, "c", "reader", { id: "c" }), { type: "done" }],
       [...TEXT(0, "finished"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io, toolCall: { async: true } });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
     expect(order).toEqual(["start a", "end a", "start write", "end write", "start b", "start c", "end b", "end c"]);
     expect(agent.context.messages().filter((m) => m.type === 4).map((m) => m.callId)).toEqual(["a", "w", "b", "c"]);
@@ -171,7 +198,7 @@ describe("Agent loop: read-only tool batches", () => {
         ...TOOLCALL(4, "e", "reader", { id: "e" }), ...TOOLCALL(5, "f", "reader", { id: "f" }), { type: "done" }],
       [...TEXT(0, "finished"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
     expect(peak).toBeLessThanOrEqual(3); // the parallel-tool ceiling
     expect(started.slice(0, 3)).toEqual(["a", "b", "c"]); // first window starts together
@@ -189,7 +216,7 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
       [...TOOLCALL(0, "c1", "broken", {}), { type: "done" }],
       [...TEXT(0, "recovered"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -206,7 +233,7 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
       [...TOOLCALL(0, "c1", "no-such-tool", {}), { type: "done" }],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
     expect(agent.context.at(2)).toMatchObject({ type: 4, error: true, name: "no-such-tool" });
@@ -223,7 +250,7 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
       ],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
     expect(agent.context.at(2)).toMatchObject({ type: 4, error: true });
@@ -242,7 +269,7 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
       ],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
     expect(agent.context.at(2)).toMatchObject({ type: 4, error: true, callId: "c1", name: "question" });
@@ -258,7 +285,7 @@ describe("Agent loop: failures surface as tool-result errors, never a crash", ()
         { type: "error", error: "cancelled", kind: "cancelled", cancelled: true },
       ],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("error");
     expect(terminal.kind).toBe("cancelled");
@@ -285,7 +312,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
       ],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -315,7 +342,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
       [...TOOLCALL(0, "c1", "mutate-state", {}), { type: "done" }],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: history, createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: history, createIO: () => io });
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -337,7 +364,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
       USER("continue"),
     ];
     const io = scriptedIO([[...TEXT(0, "carried on"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: history, createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: history, createIO: () => io });
     const terminal = await agent.run();
 
     expect(terminal.type).toBe("done");
@@ -362,7 +389,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
       [...TOOLCALL(0, "c1", "mutate-state", { path: "./a" }), { type: "done" }], // provider re-issues
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
     expect(executions).toBe(1);
 
@@ -388,7 +415,7 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
       [...TOOLCALL(0, "c1", "t", {}), ...TOOLCALL(1, "c1", "t", {}), { type: "done" }],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     agent.onEvent(Agent.EVENT.TOOL_EXECUTE, (call) => lifecycle.push(["execute", call.callId]));
     agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => lifecycle.push(["result", result.callId, Boolean(result.error)]));
     await agent.run();
@@ -405,13 +432,13 @@ describe("Agent loop: live calls EXECUTE (identical repeats too), history calls 
 describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call count", () => {
   test("a fresh large tool result cannot hide behind the previous request's provider usage", async () => {
     const env = await loopEnv({ t: () => "word ".repeat(80) });
-    env.settings.p = { ...env.settings.p, contextWindow: 200 };
+    env.settings.context = { autocompact: 0 };
+    env.settings.providers.p = { ...env.settings.providers.p, models: { m: { contextWindow: 200 } } };
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done", usage: { inputTokens: 2, outputTokens: 1, source: "provider" } }],
       [...TEXT(0, "should never be sent"), { type: "done" }],
     ]);
-    io.contextUsage = { used: 2, total: 200 };
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.error).toContain("runaway guard");
     expect(io.writes).toHaveLength(1);
@@ -419,8 +446,8 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
   test("the OVERALL cap (default 90%) refuses to continue BEFORE even making a request", async () => {
     const env = await loopEnv({});
     const io = scriptedIO([[...TEXT(0, "should never be sent"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
-    agent._contextReport = { used: 91, total: 100 }; // inherited from earlier turns: already over cap
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    agent.context.contextUsage = { used: 91, total: 100 }; // inherited from earlier turns: already over cap
     const terminal = await agent.run();
     expect(terminal.type).toBe("error");
     expect(terminal.error).toContain("runaway guard");
@@ -435,8 +462,8 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     const env = await loopEnv({});
     env.settings.context = { cap: 0.5 };
     const io = scriptedIO([[...TEXT(0, "x"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
-    agent._contextReport = { used: 60, total: 100 }; // 60%: under the default 90%, over a configured 50%
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    agent.context.contextUsage = { used: 60, total: 100 }; // 60%: under the default 90%, over a configured 50%
     const terminal = await agent.run();
     expect(terminal.error).toContain("cap 50%");
     expect(io.writes).toHaveLength(0);
@@ -449,12 +476,13 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
     // comfortably between the 40% turn cap and the 90% overall cap of
     // a 200-token window
     const env = await loopEnv({ t: () => "word ".repeat(80) });
-    env.settings.p = { ...env.settings.p, contextWindow: 200 }; // 40% = 80 tokens
+    env.settings.context = { autocompact: 0 };
+    env.settings.providers.p = { ...env.settings.providers.p, models: { m: { contextWindow: 200 } } }; // 40% = 80 tokens
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
-      [...TOOLCALL(0, "c2", "t", {}), { type: "done" }], // would run forever if not stopped
+      [...TEXT(0, "guard did not stop the second request"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("error");
     expect(terminal.error).toContain("runaway guard");
@@ -465,13 +493,13 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
 
   test("settings.context.turn is settable", async () => {
     const env = await loopEnv({ t: () => "word ".repeat(20) });
-    env.settings.p = { ...env.settings.p, contextWindow: 200 };
+    env.settings.providers.p = { ...env.settings.providers.p, models: { m: { contextWindow: 200 } } };
     env.settings.context = { turn: 0.1 }; // 10%: trips on far less growth
     const io = scriptedIO([
       [...TOOLCALL(0, "c1", "t", {}), { type: "done" }],
-      [...TOOLCALL(0, "c2", "t", {}), { type: "done" }],
+      [...TEXT(0, "guard did not stop the second request"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.error).toContain("cap 10%");
     expect(io.writes).toHaveLength(1);
@@ -485,7 +513,7 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
       [...TOOLCALL(0, "c3", "t", {}), { type: "done" }],
       [...TEXT(0, "completed"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const terminal = await agent.run();
     expect(terminal.type).toBe("done");
     expect(io.writes).toHaveLength(4);
@@ -495,8 +523,8 @@ describe("Agent loop: runaway guard is CONTEXT USAGE, not a request/tool-call co
   test("compaction bypasses the normal context guard so it can recover an over-cap context", async () => {
     const env = await loopEnv({});
     const io = scriptedIO([[...TEXT(0, "compact summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("long history")], createIO: () => io });
-    agent._contextReport = { used: 95, total: 100 };
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("long history")], createIO: () => io });
+    agent.context.contextUsage = { used: 95, total: 100 };
     const result = await agent.compact();
     expect(result.ok).toBe(true);
     expect(io.writes).toHaveLength(1);

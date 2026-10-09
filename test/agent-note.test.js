@@ -19,21 +19,21 @@ import * as tools from "../tools/note.js";
 import { Context } from "../lib/context.js";
 import TestPlugin from "../providers/test.js";
 import { providerAdd, toolEntry, toolsLoad } from "./env-internals.js";
+import { toolStorage } from "../lib/agent/tool-storage.js";
+import { updateToolMessage } from "../lib/agent/tool-messages.js";
 
-const { note } = tools;
+const note = (args, context) => tools.note(args, {
+  ...context,
+  storage: toolStorage(context.agent, "note"),
+  messageSet: (text) => updateToolMessage(context.agent, "note", text),
+});
 
 // a recorded note tool call (assistant message, type 3) + its result (type 4)
 const TC = (callId, name, args) => ({ type: 3, content: [{ type: "toolCall", callId, name, arguments: args }] });
 const TR = (callId, name, error = false) => ({
   type: 4, callId, name, ...(error ? { error: true } : {}), content: [{ type: "text", text: "x" }],
 });
-const agentOf = (...messages) => ({
-  context: new Context({ messages: [...messages] }),
-  toolStorage(name) {
-    const stores = (this._toolStorage ??= Object.create(null));
-    return (stores[name] ??= {});
-  },
-});
+const agentOf = (...messages) => ({ context: new Context({ messages: [...messages] }) });
 
 describe("note tool: the store is DERIVED from the context's own note calls", () => {
   test("successful set calls apply in order; patches MERGE, null deletes a field", () => {
@@ -92,13 +92,19 @@ describe("note tool: the store is DERIVED from the context's own note calls", ()
     expect(note({ action: "list" }, { agent })).toContain("temp"); // the fresh snapshot answers directly
   });
 
-  test("the owner guard: a NEW context (new/resumed session) starts clean — no snapshot leak", () => {
-    const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { "old session": { content: "x" } } }), TR("c1", "note"),
-    );
+  test("a new Agent starts with its own note storage and context", async () => {
+    const env = await testEnv();
+    const agent = await Agent.create({ env });
+    agent.context.append(TC("c1", "note", { action: "set", notes: { "old session": { content: "x" } } }));
+    agent.context.append(TR("c1", "note"));
     expect(note({ action: "list" }, { agent })).toContain("old session");
-    agent.context = new Context(); // a new session's fresh Context: the snapshot's owner no longer matches
-    expect(note({ action: "list" }, { agent })).toContain("No notes");
+    note({ action: "set", notes: { "old session": { content: "updated" } } }, { agent });
+    const next = await Agent.create({ env });
+    expect(note({ action: "list" }, { agent: next })).toBe("No notes.");
+    expect(toolStorage(next, "note")).not.toBe(toolStorage(agent, "note"));
+    next.close();
+    agent.close();
+    env.close();
   });
 
   test("an EMPTY context (no numeric-type message) RESETS the store", () => {
@@ -108,7 +114,7 @@ describe("note tool: the store is DERIVED from the context's own note calls", ()
     expect(note({ action: "list" }, { agent })).toContain("kept");
     agent.context.update((messages) => { messages.length = 0; return true; }); // a full clear in place (the same Context)
     expect(note({ action: "list" }, { agent })).toBe("No notes."); // reset, not resurrected
-    expect(agent.toolStorage("note").snapshot).toBeUndefined(); // the cache cleared too
+    expect(toolStorage(agent, "note").snapshot).toBeUndefined(); // the cache cleared too
   });
 
   test("deleting the LAST note STAYS deleted — the empty snapshot persists (no resurrection)", () => {
@@ -281,11 +287,7 @@ describe("note tool: the agent-owned sticky display (badge-headed titles, done t
   const displayAgent = (...messages) => {
     const agent = agentOf(...messages);
     agent._toolMessages = new Map();
-    agent.toolMessageSet = function (name, text) {
-      if (text === null || text === undefined || text === "") this._toolMessages.delete(name);
-      else this._toolMessages.set(name, String(text));
-      return this._toolMessages.get(name) ?? null;
-    };
+
     return agent;
   };
   // reading the message: any note call derives the store and publishes
@@ -344,27 +346,29 @@ describe("note tool: end-to-end through the Agent's tool loop (scripted TEST pro
       }
     }
     providerAdd(env, "capturing", Capturing);
-    env._endpoints.capturing = { provider: "capturing", url: "test://script", secret: true };
+    env.settings.providers.capturing = { provider: "capturing", url: "test://script", secret: true };
     const { IO } = await import("../lib/io.js");
-    const aiio = new IO({ env, model: "capturing/test-model", settings: { script: [[{ text: "ok" }]] } });
-    const terminal = await aiio.write([
+    env.settings.providers.capturing.script = [[{ text: "ok" }]];
+    const aiio = new IO({ env, model: "capturing/test-model" });
+    const context = new Context({ messages: [
       { type: "note-store", notes: { a: { content: "hidden" } } },
       { type: 2, content: [{ type: "text", text: "hi" }] },
-    ]);
+    ] });
+    const terminal = await aiio.write(context);
     expect(terminal.type).toBe("done");
     expect(seen).toHaveLength(1); // the record stayed home
     expect(seen[0].type).toBe(2);
+    expect(context.messages().some((message) => message.type === "note-store")).toBe(true);
+    expect(context.messages().filter((message) => message.type === "io-root")).toHaveLength(1);
   });
 
   const testProviderAgent = async (script) => {
     const env = await testEnv();
     providerAdd(env, "test", TestPlugin);
-    env._endpoints.test = { provider: "test", url: "test://script", secret: true };
+    env.settings.providers.test = { provider: "test", url: "test://script", secret: true };
+    env.settings.providers.test.script = script;
     await toolsLoad(env, { dirs: ["./tools"] }); // the real note tool
-    const agent = new Agent({
-      env, model: "test/test-model", contextId: "s-note",
-      settings: { script }, // the per-invocation script (providers/test.js)
-    });
+    const agent = await Agent.create({ env, model: "test/test-model", contextId: "s-note" });
     return { env, agent };
   };
 
@@ -402,7 +406,7 @@ describe("note tool: end-to-end through the Agent's tool loop (scripted TEST pro
     // resume: the record rides back in as the baseline (a FRESH agent —
     // no tool-storage snapshot, so the record is the only source)
     const { Agent: AgentClass } = await import("../lib/agent.js");
-    const resumed = new AgentClass({ env, model: "test/test-model", contextId: agent.context.id });
+    const resumed = await AgentClass.create({ env, model: "test/test-model", contextId: agent.context.id });
     expect(note({ action: "list" }, { agent: resumed })).toContain("durable");
   });
 
@@ -435,6 +439,22 @@ describe("note tool: end-to-end through the Agent's tool loop (scripted TEST pro
     expect(result.ok).toBe(true);
     expect(agent.context.messages().some((m) => m?.type === "note-store")).toBe(true); // the record survived the rollback
     expect(note({ action: "list" }, { agent })).toContain("kept"); // the store rebuilt from it
+  });
+
+  test("manual Env.toolCall with an Agent retains note storage and sticky display", async () => {
+    const env = await testEnv();
+    await toolsLoad(env, { dirs: ["./tools"] });
+    const agent = await Agent.create({ env });
+    agent.context.append(USER("manual note"));
+    try {
+      expect(await env.toolCall("note", { action: "set", notes: { manual: { type: "todo" } } }, { agent })).toBe("note saved");
+      expect(await env.toolCall("note", { action: "list" }, { agent })).toContain("manual");
+      expect(toolStorage(agent, "note").snapshot?.owner).toBe(agent.context);
+      expect(agent.toolMessages()).toEqual([{ name: "note", text: "🔵 **manual**" }]);
+    } finally {
+      agent.close();
+      env.close();
+    }
   });
 
   test("the note tool publishes as a SAFE read-only host tool", async () => {

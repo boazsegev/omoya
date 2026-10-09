@@ -17,7 +17,7 @@ Every text is a negotiation for the reader's attention and trust: the reader can
 ## Use Plain Language
 
 - Target: an average 15-year-old understands it (~grade 8). Technical docs may assume domain basics (~grade 10); explain key terms in plain words on first use.
-- Use common words ("use", not "utilize"). Keep sentences short (~15 words average), active, one idea each.
+- Use common words ("use", not "utilize"). Keep sentences short (~15 words average), active, one idea each. Simple is better.
 - Avoid idioms and slang that non-native readers may miss.
 - Use inclusive words: "everyone" not "guys", "they" not "he/she", "has X" not "suffers from X".
 
@@ -27,7 +27,7 @@ Every text is a negotiation for the reader's attention and trust: the reader can
 - Cut the first draft by about half. Keep only words that add meaning.
 - Write paragraphs of 2–3 sentences. Use headings that say something ("Prices start at $10", not "Pricing").
 - Start list items and headings with the word that sets them apart; vary how items begin.
-- Bold only key terms, and rarely.
+- Format and space for readability. Bold only key terms, and rarely.
 
 ## Earn Trust
 
@@ -36,7 +36,11 @@ Every text is a negotiation for the reader's attention and trust: the reader can
 - Costly signals persuade; cheap ones don't. Use specific numbers, guarantees, named sources, and admitted limits.
 - Reputation compounds: one hyped claim discounts everything else you write.
 - Skeptical-engineer test: if it sounds unbelievable, add a fact or cut it.
-- For critical texts, such as technical, academic or legal texts, always re-validate all factual claims are correct and reference proof using: (1) primary sources when possible (first hand documented evidence); (2) two or more secondary sources (research papers / reports); and (3) established tertiary sources as an optional last resort (Wikipedia / established news outlets). Any website link must be validated before delivery (working and content matches description). Every quote must be a validated verbatim quote.
+- For critical texts, such as technical, academic or legal texts, always re-validate all factual claims are correct and reference proof using:
+  1. primary sources when possible (first hand documented evidence);
+  2. two or more secondary sources (research papers / reports); and
+  3. established tertiary sources as an optional last resort (Wikipedia / established news outlets).
+  Any website link must be validated before delivery (working and content matches description). Every quote must be a validated verbatim quote.
 
 ## Lead the Reader (Scaled to Strength)
 

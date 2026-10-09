@@ -10,7 +10,7 @@ import { scriptedIO, testEnv, TEXT, USER } from "./fakes.js";
 describe("Agent.compact: headless context compaction", () => {
   test("rebuilds the context as system messages + one ASSISTANT summary", async () => {
     const env = await testEnv();
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m",
       context: [
         { type: MessageType.System, content: [{ type: "text", text: "be terse" }] },
@@ -30,7 +30,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("a headless /compact user message invokes compaction instead of reaching the model literally", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "focused summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("task")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("task")], createIO: () => io });
     agent.send(USER("/compact Prioritize unresolved tests"));
     await agent.run();
     expect(io.writes).toHaveLength(1);
@@ -45,7 +45,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("directly appended /compact is consumed before IO, retaining its focus", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("task")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("task")], createIO: () => io });
     agent.context.append(USER("/compact keep the decisions"), { merge: false });
     await agent.run();
     expect(io.writes).toHaveLength(1);
@@ -57,7 +57,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("seeded /compact is consumed before the first IO write", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("task"), USER("/compact keep the decisions")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("task"), USER("/compact keep the decisions")], createIO: () => io });
     await agent.run();
     expect(io.writes[0].context.at(-1).content[0].text).toContain("keep the decisions");
     expect(io.writes[0].context.at(-1).content[0].text).toContain("Create a detailed summary");
@@ -69,7 +69,7 @@ describe("Agent.compact: headless context compaction", () => {
       [...TEXT(0, "first reply"), { type: "done" }],
       [...TEXT(0, "summary"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("task")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("task")], createIO: () => io });
     const turn = agent.run();
     agent.send(USER("/compact focus on the reply"));
     await turn;
@@ -82,7 +82,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("only a standalone text /compact command is intercepted", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "reply"), { type: "done" }], [...TEXT(0, "reply"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.send(USER("/compactness details"));
     await agent.send({ ...USER("/compact focus"), content: [...USER("/compact focus").content, { type: "image", data: "x" }] });
     expect(io.writes[0].context.at(-1)).toEqual(USER("/compactness details"));
@@ -92,7 +92,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("compact(focus) appends guidance to the summary instruction", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "focused summary"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [{ type: MessageType.User, content: [{ type: "text", text: "task" }] }], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [{ type: MessageType.User, content: [{ type: "text", text: "task" }] }], createIO: () => io });
     const result = await agent.compact("Prioritize unresolved tests");
     expect(result.ok).toBe(true);
     expect(io.writes[0].context.at(-1).content[0].text).toContain("Prioritize unresolved tests");
@@ -102,7 +102,7 @@ describe("Agent.compact: headless context compaction", () => {
   test("a compact turn with no assistant text is a no-op — context untouched", async () => {
     const env = await testEnv();
     env.settings.retry = { attempts: 1 }; // one shot: the no-op assertion needs the failed turn settled
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m",
       context: [{ type: MessageType.User, content: [{ type: "text", text: "q" }] }],
       createIO: () => scriptedIO([[{ type: "error", error: "boom", kind: "provider" }]]),

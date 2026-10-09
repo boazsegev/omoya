@@ -24,7 +24,9 @@ import { mkdtempSync, mkdirSync } from "node:fs";
 // failure-class exit-code assertions past their timeouts
 mkdirSync("./ai-tmp", { recursive: true });
 const SPAWN_SETTINGS = mkdtempSync("./ai-tmp/agent-cli-settings-");
-writeFileSync(`${SPAWN_SETTINGS}/settings.json`, JSON.stringify({ retry: { attempts: 1 } }));
+writeFileSync(`${SPAWN_SETTINGS}/settings.json`, JSON.stringify({
+  retry: { attempts: 1 }, providers: { scripted: { provider: "test", url: "test://script", models: { "test-model": {} } } },
+}));
 
 const ROOT = `./ai-tmp/agent-cli-${process.pid}`;
 
@@ -33,7 +35,7 @@ function startServer(handler) {
   return `http://127.0.0.1:${server.port}`;
 }
 
-async function runCli({ input = "", args = [], signal } = {}) {
+async function runCli({ input = "", args = [], signal, requestStarted } = {}) {
   const proc = Bun.spawn(["bun", cli.agent, ...args], {
     stdin: "pipe",
     stdout: "pipe",
@@ -42,7 +44,10 @@ async function runCli({ input = "", args = [], signal } = {}) {
   });
   proc.stdin.write(input);
   proc.stdin.end();
-  if (signal) setTimeout(() => proc.kill(signal), 300);
+  if (signal) {
+    if (requestStarted) void requestStarted.then(() => proc.kill(signal));
+    else setTimeout(() => proc.kill(signal), 300);
+  }
   const [stdout, stderr, exit] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -83,6 +88,23 @@ function toolLoopServer(toolName, toolArgs, finalText = "loop finished") {
 }
 
 describe("agent CLI: tool loop over the shared stdin grammar", () => {
+  test("scripted provider responds with invocation-only endpoint overrides", async () => {
+    const script = JSON.stringify([[{ text: "scripted answer" }]]);
+    const previous = process.env[NAMES.testScriptEnv];
+    process.env[NAMES.testScriptEnv] = script;
+    try {
+      const { events, exit, stderr } = await runCli({
+        input: "hello", args: ["--model", "scripted/test-model", "--token", "temporary", "--timeout", "5s"],
+      });
+      expect(exit).toBe(0);
+      expect(events.at(-1)).toMatchObject({ type: "done", message: { content: [{ type: "text", text: "scripted answer" }] } });
+      expect(stderr).not.toContain("no script");
+    } finally {
+      if (previous === undefined) delete process.env[NAMES.testScriptEnv];
+      else process.env[NAMES.testScriptEnv] = previous;
+    }
+  });
+
   test("buffered-to-EOF input LOOPS tools until done (unlike the io CLI's one request)", async () => {
     writeFileSync(`${ROOT}-target.txt`, "target file body");
     const { requests, url } = toolLoopServer("read", { path: `./ai-tmp/agent-cli-${process.pid}-target.txt` });
@@ -110,7 +132,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
     expect(types).toContain("tool_call_start");
     expect(types.at(-1)).toBe("done");
     expect(events.at(-1).message.content).toEqual([{ type: "text", text: "loop finished" }]);
-    expect(events.at(-1).usage).toEqual({ inputTokens: 9, outputTokens: 4, source: "provider" });
+    expect(events.at(-1).usage).toEqual({ inputTokens: 9, outputTokens: 4, totalTokens: 13, source: "provider" });
 
     // stderr: diagnostics only — tool execution + usage, no JSON
     expect(stderr).toContain("tool read: ok");
@@ -151,7 +173,7 @@ describe("agent CLI: tool loop over the shared stdin grammar", () => {
     // resolveSystemPrompt) — Agent seeds it at construction, ALWAYS the
     // context's first message
     const allRecords = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
-      .filter((record) => record?.type !== "session-metadata");
+      .filter((record) => record?.type !== "session-metadata" && record?.type !== "io-root");
     expect(allRecords.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     const records = allRecords.filter((m) => m.type !== 1);
     expect(records.map((m) => m.type))
@@ -203,11 +225,14 @@ describe("agent CLI: exit codes and --help (matching the io CLI)", () => {
   });
 
   test("130 on SIGINT cancellation of an in-flight request", async () => {
-    const url = startServer(() => new Promise((resolve) => pending.push(resolve))); // responds only in afterEach
+    let notifyRequest;
+    const requestStarted = new Promise((resolve) => { notifyRequest = resolve; });
+    const url = startServer(() => { notifyRequest(); return new Promise((resolve) => pending.push(resolve)); }); // responds only in afterEach
     const { exit, stderr, events } = await runCli({
       input: "hi",
       args: ["--model", "ollama/m", "--url", url, "--timeout", "10000"],
       signal: "SIGINT",
+      requestStarted,
     });
     expect(exit).toBe(130);
     expect(stderr).toContain("SIGINT");

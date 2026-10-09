@@ -8,7 +8,13 @@
  * metadata surface, and environment detection.
  *
  * Wire mapping (context -> /messages):
- *   system       -> the top-level `system` string (all joined)
+ *   system       -> the LEADING system messages join into the top-level
+ *                  `system` string; a later one rides IN PLACE as a
+ *                  mid-conversation role:"system" message (appending
+ *                  must only ever append to the request: a changed
+ *                  top-level `system` invalidates every earlier
+ *                  thinking block). Models that reject role:"system"
+ *                  are unlisted (see UNSUPPORTED_SYSTEM_MODELS).
  *   user         -> {role:"user", content:[text | image | document]} —
  *                  a PDF rides inline as a base64 document source, a
  *                  text-like binary decodes and rides as a `text`
@@ -19,15 +25,19 @@
  *                  media type is refused (document blocks accept only
  *                  PDF/plain-text — see providers/anthropic.js's
  *                  toMessage)
- *   assistant    -> {role:"assistant", content:[thinking (SIGNED only —
- *                  an unsigned replay is a 400), text, tool_use]}
+ *   assistant    -> {role:"assistant", content:[thinking (SIGNED only;
+ *                  an unsigned thinking block — another provider's, or
+ *                  one whose replay data was dropped — rides as text),
+ *                  text, tool_use]}
  *   tool result  -> {role:"user", content:[tool_result]} — consecutive
  *                  same-role messages MERGE (parallel tool results must
- *                  land in ONE user message)
+ *                  land in ONE user message, tool_result blocks first)
  * Tools: {name, description, input_schema}. `max_tokens` is the
  * model's known output cap (else 64K, the streaming default).
  * Thinking (settings.think, already the native mode IO mapped):
- * undefined = the model's default (omit); low..max = adaptive
+ * undefined = the model's default (omitted, except generation 5+ Claude
+ * models, which think by default and get an explicit adaptive request
+ * with summarized display so the summary is shown); low..max = adaptive
  * (summarized display, that effort); "none" = disabled (a 400 on
  * always-thinking models).
  *
@@ -38,6 +48,12 @@
  * stop reason + output tokens; message_stop terminates with a `done`
  * whose `message` is the MIRROR (the assembler cannot carry thinking
  * signatures — the mirror can, so replays stay valid).
+ *
+ * History binding: a thinking signature is valid only after the exact
+ * system, tools and messages it was produced with. When the request's
+ * Context reports `dirty` (an edit, a fork, another model or tool set —
+ * IO's root record), replay data from that index on is removed from the
+ * Context before conversion, and those thinking blocks ride as text.
  *
  * Auth: API keys ride `x-api-key`; environment bearer tokens ride
  * `authorization: Bearer`. Claude subscription OAuth belongs to the
@@ -59,23 +75,47 @@ const ONE_SHOT = { connection: "close" };
 const DEFAULT_MAX_TOKENS = 64000;
 /** Native thinking modes, least -> max: "none" disables, the rest are efforts. */
 const THINKING_MODES = ["none", "low", "medium", "high", "xhigh", "max"];
+/** The ONLY models served: those Anthropic documents as accepting
+ *  mid-conversation role:"system" messages, which Omoya depends on for
+ *  history stability (anything else — v4/v3 models, Claude Sonnet 5,
+ *  third-party Anthropic-compatible models — is neither listed nor
+ *  served). */
+/** Claude models KNOWN to reject mid-conversation role:"system"
+ *  messages (Sonnet below 5.5 — Anthropic documents Sonnet 5 explicitly —
+ *  Opus below 4.8, Haiku below 5.5, and the whole 3.x line): they are
+ *  neither listed nor served, because Omoya depends on in-place system
+ *  messages for history stability. Everything else — newer generations,
+ *  Fable/Mythos, third-party Anthropic-compatible models — is served. */
+function unsupportedModel(model) {
+  const id = String(model);
+  if (/^claude-(?:[12]|3)[.-]/.test(id)) return true; // the 3.x line and older
+  // "claude-opus-4-8" style: the family leads, then major[-minor]
+  const m = /^claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/.exec(id);
+  if (!m) return false; // not a versioned Claude id (third-party, fable, mythos)
+  const version = Number(m[2]) + (m[3] !== undefined ? Number(m[3]) / 10 : 0);
+  if (m[1] === "opus") return version < 4.8;
+  return version < 5.5; // sonnet and haiku
+}
 
 /** The static OFFLINE fallback for the Anthropic preset (the live
  *  /models list and the models.dev registry both refresh over it). */
-const ANTHROPIC_MODELS = {
-  "claude-fable-5-1": { label: "Claude Fable 5.1", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-fable-5": { label: "Claude Fable 5", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-5": { label: "Claude Opus 5", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-8": { label: "Claude Opus 4.8", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-7": { label: "Claude Opus 4.7", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-opus-4-6": { label: "Claude Opus 4.6", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-sonnet-5": { label: "Claude Sonnet 5", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-sonnet-4-6": { label: "Claude Sonnet 4.6", contextWindow: 1000000, maxTokens: 128000 },
-  "claude-haiku-4-5": { label: "Claude Haiku 4.5", contextWindow: 200000, maxTokens: 64000 },
-};
+const ANTHROPIC_MODELS = Object.fromEntries([
+  ["claude-fable-5-1", "Claude Fable 5.1"],
+  ["claude-fable-5", "Claude Fable 5"],
+  ["claude-mythos-5-1", "Claude Mythos 5.1"],
+  ["claude-mythos-5", "Claude Mythos 5"],
+  ["claude-opus-5-5", "Claude Opus 5.5"],
+  ["claude-opus-5", "Claude Opus 5"],
+  ["claude-opus-4-8", "Claude Opus 4.8"],
+  ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+  ["claude-haiku-5-5", "Claude Haiku 5.5"],
+  // the generation's standard window/cap; the live list and registry correct it
+].map(([id, label]) => [id, { label, contextWindow: 1000000, maxTokens: 128000 }]));
 
 /** Third-party services exposing an Anthropic-compatible /messages
- *  route (no GET /models: static lists, verified by a 1-token POST). */
+ *  route (no GET /models: static lists, verified by a 1-token POST).
+ *  They claim Anthropic compatibility, so their models are served
+ *  without the SYSTEM_MESSAGE_MODELS gate. */
 const DEEPSEEK_MODELS = {
   "deepseek-chat": { label: "DeepSeek Chat", thinking: [], contextWindow: 131072, maxTokens: 8192 },
   "deepseek-reasoner": { label: "DeepSeek Reasoner", contextWindow: 131072, maxTokens: 65536 },
@@ -128,7 +168,7 @@ function authHeaders(auth = {}) {
 /** Convert normalized context to a /messages request. */
 function context2msg(context, aiio = this.aiio) {
   const settings = aiio?.settings ?? {};
-  const model = aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1);
+  const model = aiio?.model?.slice(aiio.model.indexOf("/") + 1);
   const meta = settings.models?.[model] ?? presetOf(this.constructor, this.baseUrl)?.models?.[model];
   const headers = { "content-type": "application/json", ...authHeaders(settings.auth) };
   const body = {
@@ -139,18 +179,28 @@ function context2msg(context, aiio = this.aiio) {
     stream: true,
     messages: [],
   };
-  const system = context
-    .filter((message) => message?.type === MessageType.System)
-    .map(textOf)
-    .filter(Boolean)
-    .join("\n\n");
+  const messages = dropStaleReplayData(context, aiio);
+  const leading = messages.findIndex((message) => message?.type !== MessageType.System);
+  const head = leading === -1 ? messages.length : leading;
+  if (unsupportedModel(model)) {
+    throw Object.assign(new Error(
+      `model ${model} rejects mid-conversation system messages, which Omoya requires — pick a listed model`,
+    ), { status: 400 });
+  }
+  const system = messages.slice(0, head).map(textOf).filter(Boolean).join("\n\n");
   if (system) body.system = system;
-  for (const message of context) {
-    const wire = toMessage(message, aiio);
+  for (const message of messages.slice(head)) {
+    const wire = message?.type === MessageType.System ? inPlaceSystem(message) : toMessage(message, aiio);
     if (!wire) continue;
     const last = body.messages[body.messages.length - 1];
     if (last && last.role === wire.role) last.content.push(...wire.content);
     else body.messages.push(wire);
+  }
+  // a tool_use must be answered first: tool_result blocks lead their user message
+  for (const wire of body.messages) {
+    if (wire.role === "user") {
+      wire.content = [...wire.content.filter((b) => b.type === "tool_result"), ...wire.content.filter((b) => b.type !== "tool_result")];
+    }
   }
   const tools = aiio?.tools?.() ?? [];
   if (tools.length > 0) {
@@ -160,7 +210,11 @@ function context2msg(context, aiio = this.aiio) {
       input_schema: tool.inputSchema ? collapseAnyOf(tool.inputSchema) : { type: "object", properties: {} },
     }));
   }
-  Object.assign(body, thinkingOptions(settings.think));
+  // automatic caching: one top-level marker moves the breakpoint to the
+  // last cacheable block each request; the agent loop's growing history
+  // is served from the cache instead of being re-billed as input
+  body.cache_control = { type: "ephemeral" };
+  Object.assign(body, thinkingOptions(settings.think, model));
   return [headers, body];
 }
 
@@ -200,15 +254,75 @@ function collapseAnyOf(schema) {
 }
 
 /**
- * The thinking request options for one native mode: undefined omits
- * (the model's default — always-on on the Fable tier), "none"
- * disables, an effort turns adaptive thinking on with a summarized
- * display (the TUI shows it) at that effort.
+ * Claude generation 5+ models think adaptively by default but hide the
+ * text (display "omitted"); earlier generations default to no thinking
+ * and other Anthropic-compatible models keep their own default.
  */
-function thinkingOptions(think) {
+function thinksByDefault(model) {
+  const generation = /^claude-[a-z]+-(\d+)(?:-|$)/.exec(String(model ?? ""))?.[1];
+  return Number(generation) >= 5;
+}
+
+/**
+ * The thinking request options for one native mode: undefined keeps
+ * the model's default — on a model that thinks by default that is
+ * adaptive thinking, requested explicitly only to show its summary
+ * (the API never returns raw reasoning; "summarized" is the most it
+ * shows) — "none" disables, an effort turns adaptive thinking on with
+ * a summarized display at that effort.
+ */
+function thinkingOptions(think, model) {
+  if (think === undefined && thinksByDefault(model)) return { thinking: { type: "adaptive", display: "summarized" } };
   if (typeof think !== "string") return {};
   if (think === "none") return { thinking: { type: "disabled" } };
   return { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: think } };
+}
+
+/** Documented block fields; anything else on these blocks is replay data. */
+const DOCUMENTED_FIELDS = new Map([
+  [ContentType.Text, ["type", "text"]],
+  [ContentType.Thinking, ["type", "text"]],
+  [ContentType.ToolCall, ["type", "callId", "name", "arguments"]],
+]);
+
+/** A message without replay data (the same message when it carries none). */
+function withoutReplayData(message) {
+  if (!Array.isArray(message?.content)) return message;
+  let changed = false;
+  const content = message.content.map((block) => {
+    const fields = DOCUMENTED_FIELDS.get(block?.type);
+    if (!fields || Object.keys(block).every((key) => fields.includes(key))) return block;
+    changed = true;
+    return Object.fromEntries(fields.filter((key) => Object.hasOwn(block, key)).map((key) => [key, block[key]]));
+  });
+  return changed ? { ...message, content } : message;
+}
+
+/**
+ * Respond to a dirty Context: remove replay data from the dirty index
+ * on (persisted in the Context, so later requests agree) and return the
+ * request's messages with the cleaned copies substituted.
+ */
+function dropStaleReplayData(messages, aiio) {
+  const store = aiio?.context;
+  const from = store?.dirty ?? false;
+  if (from === false) return messages;
+  const cleaned = new Map();
+  store.update((entries) => {
+    for (let i = from; i < entries.length; i++) {
+      const clean = withoutReplayData(entries[i]);
+      if (clean !== entries[i]) { cleaned.set(entries[i], clean); entries[i] = clean; }
+    }
+    return cleaned.size > 0;
+  });
+  return messages.map((message) => cleaned.get(message) ?? message);
+}
+
+/** A system message after the conversation started: in place, as a
+ *  mid-conversation system message (role "system"). */
+function inPlaceSystem(message) {
+  const text = textOf(message);
+  return text ? { role: "system", content: [{ type: "text", text }] } : null;
 }
 
 /** One context message -> one wire message (nil when nothing to send). */
@@ -227,12 +341,15 @@ function toMessage(message, aiio) {
     const content = [];
     for (const block of message.content ?? []) {
       if (block?.type === ContentType.Thinking) {
-        // only a SIGNED thinking block replays (the signature binds it
-        // to its conversation); a redacted block replays as its data
+        // a SIGNED block replays as thinking, a redacted one as its data;
+        // unsigned reasoning (another provider's, or dropped replay
+        // data) is still what the model said: it rides as text
         if (typeof block.data === "string" && block.data !== "") {
           content.push({ type: "redacted_thinking", data: block.data });
         } else if (typeof block.signature === "string" && block.signature !== "") {
           content.push({ type: "thinking", thinking: block.text ?? "", signature: block.signature });
+        } else if (block.text) {
+          content.push({ type: "text", text: block.text });
         }
       } else if (block?.type === ContentType.Text) {
         if (block.text) content.push({ type: "text", text: block.text });
@@ -352,10 +469,12 @@ function msg2events(msg, state = {}, aiio) {
   if (type === "message_start") {
     const usage = msg.message?.usage ?? {};
     state.native = { id: msg.message?.id, model: msg.message?.model };
+    state.usage = Context.usageNormalize({ service_tier: msg.message?.service_tier, inference_geo: msg.message?.inference_geo, ...usage, uncachedInputTokens: usage.input_tokens });
     state.inputTokens = countInput(usage);
+    state.outputTokens = usage.output_tokens;
     // the exact context consumption the endpoint measured (cache
     // reads and creation are context too — input_tokens excludes them)
-    if (Number.isFinite(state.inputTokens)) (io && (io.contextUsage = { used: state.inputTokens }));
+    if (Number.isFinite(state.inputTokens)) (io?.context && (io.context.contextUsage = { used: state.inputTokens }));
     return [];
   }
   if (type === "content_block_start") {
@@ -422,8 +541,11 @@ function msg2events(msg, state = {}, aiio) {
   }
   if (type === "message_delta") {
     if (msg.delta?.stop_reason) state.stopReason = msg.delta.stop_reason;
+    // These are cumulative snapshots for ONE request, not per-frame deltas.
+    const report = msg.usage ?? {};
+    state.usage = { ...state.usage, ...Context.usageNormalize({ ...report, uncachedInputTokens: report.input_tokens }) };
     if (Number.isFinite(msg.usage?.output_tokens)) state.outputTokens = msg.usage.output_tokens;
-    const input = countInput(msg.usage ?? {});
+    const input = countInput(state.usage);
     if (Number.isFinite(input)) state.inputTokens = input;
     return [];
   }
@@ -432,7 +554,7 @@ function msg2events(msg, state = {}, aiio) {
       type: "done",
       doneReason: state.stopReason,
       message: mirrorMessage(state),
-      usage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+      usage: Context.usageNormalize({ ...state.usage, inputTokens: state.inputTokens, outputTokens: state.outputTokens }),
       native: state.native ?? {},
     }];
   }
@@ -441,7 +563,7 @@ function msg2events(msg, state = {}, aiio) {
 
 /** input + cache reads + cache creation, undefined when unreported. */
 function countInput(usage) {
-  const parts = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
+  const parts = [usage.uncachedInputTokens ?? usage.input_tokens, usage.cacheReadTokens ?? usage.cache_read_input_tokens, usage.cacheWriteTokens ?? usage.cache_creation_input_tokens]
     .filter(Number.isFinite);
   return parts.length > 0 ? parts.reduce((a, b) => a + b, 0) : undefined;
 }
@@ -620,9 +742,10 @@ async function models({ url, auth, settings = {}, signal } = {}) {
   const staticModels = preset?.models ?? {};
   const cached = settings.models && typeof settings.models === "object" && !Array.isArray(settings.models)
     ? settings.models : {};
-  const ids = live
+  const ids = (live
     ? Object.keys(live)
-    : [...new Set([...Object.keys(staticModels), ...Object.keys(registry), ...Object.keys(cached)])];
+    : [...new Set([...Object.keys(staticModels), ...Object.keys(registry), ...Object.keys(cached)])])
+    .filter((id) => !unsupportedModel(id));
   const map = {};
   for (const id of ids) {
     const merged = { ...cached[id], ...staticModels[id], ...registry[id], ...live?.[id] };
@@ -718,10 +841,10 @@ function unifiedWindowQuotas(headers) {
     if (!Number.isFinite(windowSeconds)) return;
     const spent = Number(value);
     if (!Number.isFinite(spent)) return;
-    const usedPct = Math.min(100, Math.max(0, Math.round(spent * 100)));
+    const usedPct = Math.min(100, Math.max(0, spent * 100));
     const reset = headers.get?.(`anthropic-ratelimit-unified-${match[1]}-reset`);
     quotas[match[1]] = {
-      total: 100, used: usedPct, remaining: 100 - usedPct,
+      total: 100, used: usedPct, remaining: 100 - usedPct, unit: "percent",
       ...(reset ? { reset } : {}),
       // the window's full cycle length — lets a consumer show elapsed
       // time / a countdown alongside the usage percentage above
@@ -736,19 +859,25 @@ function unifiedWindowQuotas(headers) {
  * (requests, total tokens, input tokens, output tokens — each with limit /
  * remaining / reset — API-key metering) plus the subscription-session
  * `anthropic-ratelimit-unified-*` windows (see unifiedWindowQuotas)
- * into the plan-usage channel. The plan readout deliberately has two
- * details: API keys retain requests + total tokens (input/output are subsets);
- * OAuth retains duration-named allowance windows (normally 5h + 7d).
+ * into the plan-usage channel. API keys retain all independent dimensions:
+ * requests, total tokens, input tokens, output tokens. OAuth retains
+ * duration-named allowance windows (normally 5h + 7d). Represented headers
+ * are consumed, not duplicated as raw details.
  */
 function reportPlanUsage(headers, aiio = this?.aiio) {
-  const get = (name) => headers?.get?.(name) ?? undefined;
+  const represented = [];
+  const get = (name) => { represented.push(name); return headers?.get?.(name) ?? undefined; };
   const num = (name) => {
     const value = Number(get(name));
     return get(name) !== undefined && Number.isFinite(value) ? value : undefined;
   };
   const quotas = unifiedWindowQuotas(headers);
+  headers?.forEach?.((value, name) => {
+    const match = UNIFIED_WINDOW.exec(name);
+    if (match && parseWindowSeconds(match[1]) && Number.isFinite(Number(value))) represented.push(name, name.replace(/utilization$/i, "reset"));
+  });
   const families = [
-    ["requests", "requests"], ["tokens", "tokens"],
+    ["requests", "requests"], ["tokens", "tokens"], ["input-tokens", "inputTokens"], ["output-tokens", "outputTokens"],
   ];
   for (const [wire, key] of families) {
     const quota = {
@@ -758,7 +887,10 @@ function reportPlanUsage(headers, aiio = this?.aiio) {
     };
     if (Object.keys(quota).length > 0) quotas[key] = quota;
   }
-  if (Object.keys(quotas).length > 0) (aiio && (aiio.planUsage = { quotas }));
+  const details = Context.usageHeaders(headers, { exclude: represented });
+  if (Object.keys(quotas).length > 0 || Object.keys(details).length > 0) {
+    if (aiio?.context) aiio.context.planUsage = { quotas, details };
+  }
 }
 
 /** The auth record an Anthropic API-key login stores. */
@@ -809,7 +941,7 @@ function apiWire(aiio, body) {
  */
 async function serverToolRequest(aiio, wire, tool, prompt, { signal, deadline }) {
   const [headers, payload] = wire(aiio, {
-    model: aiio.modelCurrent.slice(aiio.modelCurrent.indexOf("/") + 1),
+    model: aiio.model.slice(aiio.model.indexOf("/") + 1),
     max_tokens: 1024,
     messages: [{ role: "user", content: prompt }],
     tools: [{ ...tool }],
@@ -912,7 +1044,7 @@ export default class AnthropicProvider {
   /** Create Anthropic-hosted web tool handlers with dialect-specific request framing. */
   static webTools(wire) { return webTools(wire); }
 
-  static async detect({ endpoints = {} } = {}) {
+  static async detectEnvironment({ endpoints = {} } = {}) {
     const found = {};
     if (endpoints.anthropic) return found;
     const key = process.env[ENV_KEY];
@@ -929,6 +1061,9 @@ export default class AnthropicProvider {
     };
     return found;
   }
+
+  static detectEnvironmentOnly = true;
+  static detect(options) { return this.detectEnvironment(options); }
 
   static async models(options) { return models.call(this, options); }
   static async testConnection(options) { return testConnection.call(this, options); }

@@ -2,6 +2,7 @@
 // Testing list): mock HTTP, assert the normalized event/context shape
 // for Ollama end to end. Later connectors add theirs as they land.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { Context } from "../lib/context.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,17 +35,13 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
   let dir, env;
   beforeEach(async () => {
     dir = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "io-contract-")));
-    env = new Env({
-      dir,
-      cwd: dir,
-      settings: { providers: { ollama: { provider: "ollama", url: "http://mock" } } },
-    });
+    env = await Env.open(dir, { dir, settings: { providers: { ollama: { provider: "ollama", url: "http://mock" } } }, init: { providers: false, tools: false, detect: false, models: false } });
     await providersLoad(env, { dirs: [join(PACKAGE_ROOT, "providers")], detect: false });
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("Env scan-load registers ollama from the package providers dir", async () => {
-    const pkgEnv = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: PACKAGE_ROOT });
+    const pkgEnv = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: PACKAGE_ROOT, init: { providers: false, tools: false, detect: false, models: false } });
     const names = await providersLoad(pkgEnv);
     expect(names).toContain("ollama");
     const Ollama = providerOf(pkgEnv, "ollama");
@@ -64,10 +61,9 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
         { message: { role: "assistant", content: "is 42." }, done: false },
         { message: { role: "assistant", content: "" }, done: true, prompt_eval_count: 9, eval_count: 5 },
       ]);
-    const aiio = new IO({ env, model: "ollama/qwen3:8b", url: "http://mock" });
+    const aiio = new IO({ env, model: "ollama/qwen3:8b" });
     const events = [];
-    const terminal = await aiio.write(
-      [{ type: 2, content: [{ type: "text", text: "question" }] }],
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "question" }] }] }),
       new Proxy({}, { get: () => (e) => events.push(e) }),
     );
 
@@ -79,7 +75,7 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
     expect(messageValid(terminal.message)).toBe(true);
     expect(terminal.message.type).toBe(3);
     expect(terminal.message.content).toEqual([{ type: "text", text: "The answer is 42." }]);
-    expect(terminal.usage).toEqual({ inputTokens: 9, outputTokens: 5, source: "provider" });
+    expect(terminal.usage).toEqual({ inputTokens: 9, outputTokens: 5, totalTokens: 14, source: "provider" });
 
     // wire shape: one POST to /api/chat with the model and context
     expect(mock.calls).toHaveLength(1);
@@ -110,8 +106,8 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
         },
         { message: { role: "assistant", content: "" }, done: true, prompt_eval_count: 3, eval_count: 2 },
       ]);
-    const aiio = new IO({ env, model: "ollama/m", url: "http://mock" });
-    const terminal = await aiio.write([{ type: 2, content: [{ type: "text", text: "read it" }] }]);
+    const aiio = new IO({ env, model: "ollama/m" });
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "read it" }] }] }));
 
     // outgoing: the tool catalog reached the wire as function schemas
     // (the always-registered built-in tool-refresh rides along)
@@ -139,8 +135,8 @@ describe("Ollama connector contract (mock HTTP, normalized shape)", () => {
   test("metadata passthrough: native frame data rides the terminal event", async () => {
     mock.handler = () =>
       ndjson([{ message: { role: "assistant", content: "ok" }, done: true, done_reason: "stop", eval_count: 1, prompt_eval_count: 1 }]);
-    const aiio = new IO({ env, model: "ollama/m", url: "http://mock" });
-    const terminal = await aiio.write([{ type: 2, content: [] }]);
+    const aiio = new IO({ env, model: "ollama/m" });
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [] }] }));
     expect(terminal.doneReason).toBe("stop");
     expect(terminal.native.done_reason).toBe("stop");
   });

@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
 import { Context } from "../lib/context.js";
+import { Sandbox } from "../lib/sandbox.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createApp, msg } from "../lib/app/tui/app.js";
 import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
@@ -29,8 +30,9 @@ async function until(fn, timeout = 2000) {
 
 async function harness(options = {}) {
   const env = await testEnv();
+  await env.ready();
   const io = scriptedIO([[{ type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const app = createApp(agent, { env, ...options });
   const memory = GTUI.host.memory({ width: 80, height: 10 });
   const ui = new GTUI({ host: memory });
@@ -42,9 +44,9 @@ describe("TUI agent navigation", () => {
   test("Alt+Ctrl+Left/Right pages the live Env registry and wraps", () => {
     return (async () => {
       const env = await testEnv();
-      const first = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-      const second = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-      const third = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+      const first = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+      const second = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+      const third = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
       const app = createApp(first, { env });
       let model = app.init().model;
       model = app.update(model, { type: "key", key: "alt+ctrl+right" }).model;
@@ -60,8 +62,8 @@ describe("TUI agent navigation", () => {
 
   test("Alt+Ctrl+Up switches a child to its parent and otherwise does nothing", async () => {
     const env = await testEnv();
-    const parent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const child = parent.childCreate({ name: "worker", model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const parent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const child = await parent.childCreate({ name: "worker", model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(child, { env });
     let model = app.init().model;
     model = app.update(model, { type: "key", key: "alt+ctrl+up" }).model;
@@ -132,7 +134,7 @@ describe("TUI status toolbar", () => {
     await tick();
     expect(statusLine(memory)).toContain("◎ p   ◇ m   ✦ Think: auto"); // endpoint left of model
     expect(statusLine(memory)).toContain("✦ Think: auto");
-    expect(statusLine(memory)).toContain("🔓 Read/Write");
+    expect(statusLine(memory)).toContain(Sandbox.osAvailable() ? "🔓 Read/Write" : "🔒 Read-only");
     expect(statusLine(memory)).toContain("📝 No-log"); // the harness agent is anonymous
     expect(hintLine(memory)).toContain("↓ settings");
     ui.stop();
@@ -150,32 +152,35 @@ describe("TUI status toolbar", () => {
     expect(hintLine(memory)).toContain("Model: p/m · ⏎ switch model");
     memory.send({ type: "key", key: "right" });
     memory.send({ type: "key", key: "right" });
-    expect(hintLine(memory)).toContain("Tools may write · ⏎ switch to read-only safe mode");
+    expect(hintLine(memory)).toContain(Sandbox.osAvailable()
+      ? "Tools may write · ⏎ switch to read-only safe mode"
+      : "Safe mode on: only read-only tools run · ⏎ allow writes");
     memory.send({ type: "key", key: "up" });
     expect(memory.snapshot().focus).toBe("draft");
     ui.stop();
     await running;
   });
 
-  test("Enter on the safe chip toggles read-only safe mode and keeps toolbar focus", async () => {
+  test("Enter on the safe chip toggles read-only mode when OS enforcement permits writes", async () => {
     const { agent, memory, ui, running } = await harness();
     await tick();
     memory.send({ type: "key", key: "down" });
     for (let i = 0; i < 3; i++) memory.send({ type: "key", key: "right" });
     memory.send({ type: "key", key: "enter" });
-    expect(await until(() => agent.safe === true)).toBe(true);
+    expect(await until(() => agent.can.write === false)).toBe(true);
     await until(() => statusLine(memory).includes("🔒 Read-only"));
     expect(statusLine(memory)).toContain("🔒 Read-only");
     expect(memory.snapshot().focus).toBe("status-tools");
     memory.send({ type: "key", key: "space" });
-    expect(await until(() => agent.safe === false)).toBe(true);
+    if (Sandbox.osAvailable()) expect(await until(() => agent.can.write === true)).toBe(true);
+    else expect(agent.can.write).toBe(false); // a missing OS write sandbox cannot be overridden by a toolbar toggle
     ui.stop();
     await running;
   });
 
   test("typing or pasting while the toolbar has focus returns to the input with the text; Esc returns too", async () => {
     const env = await testEnv();
-    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const app = createApp(await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
     const onToolbar = app.update(app.init().model, { type: "key", key: "down" }).model;
     expect(onToolbar.focus).toBe("toolbar");
     const typed = app.update(onToolbar, { type: "key", key: "h", text: "h" }).model;
@@ -189,7 +194,7 @@ describe("TUI status toolbar", () => {
 
   test("the logging chip pauses and resumes a saved session", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [], contextId: "persistent", createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [], contextId: "persistent", createIO: () => scriptedIO([[{ type: "done" }]]) });
     const memory = GTUI.host.memory({ width: 100, height: 10 });
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(agent, { env }));
@@ -205,7 +210,7 @@ describe("TUI status toolbar", () => {
 
   test("the logging chip starts logging a conversation that was never logged, keeping it", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const memory = GTUI.host.memory({ width: 100, height: 10 });
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(agent, { env }));
@@ -220,7 +225,7 @@ describe("TUI status toolbar", () => {
 
   test("the endpoint chip opens the ^P endpoint menu", async () => {
     const env = await testEnv();
-    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const app = createApp(await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
     const byChip = app.update(app.init().model, { type: "action.select", id: "endpoint", action: "shortcut.ctrl+p" }).model;
     const byKey = app.update(app.init().model, { type: "key", key: "ctrl+p" }).model;
     expect(byChip.overlay.stack.at(-1).title).toBe("Endpoints");
@@ -229,7 +234,7 @@ describe("TUI status toolbar", () => {
 
   test("the thinking chip opens the thinking levels with the current one marked", async () => {
     const env = await testEnv();
-    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const app = createApp(await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
     const opened = app.update(app.init().model, { type: "action.select", id: "thinking", action: "status.thinking" }).model;
     const items = opened.overlay.stack.at(-1).items;
     expect(items[0]).toMatchObject({ label: "default (current)", value: { type: "thinking", value: "default" } });
@@ -237,7 +242,7 @@ describe("TUI status toolbar", () => {
 
   test("a clicked hint takes its key's path: Esc interrupt while a turn runs", async () => {
     const env = await testEnv();
-    const app = createApp(new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
+    const app = createApp(await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) }), { env });
     const running = { ...app.init().model, turnRunning: true };
     const byKey = app.update(running, { type: "key", key: "escape" }).effects;
     const byClick = app.update(running, { type: "action.select", action: "shortcut.escape" }).effects;
@@ -247,10 +252,48 @@ describe("TUI status toolbar", () => {
   });
 });
 
+describe("TUI fork", () => {
+  test("fork retains the source as a separate agent with an independent context and UUID", async () => {
+    const env = await testEnv();
+    const source = await Agent.create({ env, model: "p/m", contextId: false, createIO: () => scriptedIO([[{ type: "done" }]]) });
+    source.context.append(Context.messageUser("original"));
+    const app = createApp(source, { env });
+    const transition = app.update(app.init().model, { type: "key", key: "alt+shift+f" });
+    const fork = transition.effects.find((entry) => entry.type === "task" && entry.key === "agent.fork");
+    expect(fork).toBeDefined();
+    await fork.run({ signal: new AbortController().signal, send: () => {} });
+    const branch = app.currentAgent();
+    expect(branch).not.toBe(source);
+    expect(env.agents()).toContain(source);
+    expect(env.agents()).toContain(branch);
+    expect(source.closed).toBe(false);
+    expect(branch.context.id).not.toBe(source.context.id);
+    expect(branch.context.uuid).not.toBe(source.context.uuid);
+    expect(branch.context.messages()).toEqual(source.context.messages());
+    branch.context.at(0).content[0].text = "branch only";
+    expect(source.context.at(0).content[0].text).toBe("original");
+    await branch.close(); await source.close(); await env.close();
+  });
+});
+
+test("TUI group request permission menu action writes the viewed agent and closes the menu", async () => {
+  const env = await testEnv();
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const app = createApp(agent, { env });
+  try {
+    for (const [choice, expected] of [[true, true], [false, false], [undefined, undefined]]) {
+      const opened = app.update(app.init().model, { type: "app.overlay.openMaster" }).model;
+      const transition = app.update(opened, { type: "menu.select", id: "menu", item: { value: { type: "agent.can.request", value: choice } } });
+      expect(agent.can.request).toBe(expected);
+      expect(transition.model.overlay).toBeNull();
+    }
+  } finally { await agent.close(); await env.close(); }
+});
+
 describe("TUI add-agent", () => {
   test("selecting an endpoint/model creates and views an additional Agent", async () => {
     const env = await testEnv();
-    const original = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const original = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(original, { env });
     const model = app.init().model;
     const opened = app.update(model, { type: "app.overlay.openMaster" }).model;
@@ -260,6 +303,10 @@ describe("TUI add-agent", () => {
       item: { value: { type: "session-add", endpoint: "p", model: "m" } },
     });
 
+    const add = transition.effects.find((entry) => entry.type === "task" && entry.key === "agent.add");
+    expect(add).toBeDefined();
+    let settled;
+    await add.run({ signal: new AbortController().signal, send: (message) => { settled = app.update(transition.model, message); } });
     const added = app.currentAgent();
     expect(added).toBeInstanceOf(Agent);
     expect(added).not.toBe(original);
@@ -272,11 +319,12 @@ describe("TUI add-agent", () => {
 describe("TUI close-agent menu action", () => {
   test("closes a selected non-focused Agent without changing the viewed session", async () => {
     const env = await testEnv();
-    const current = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const other = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const current = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const other = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(current, { env });
     const opened = app.update(app.init().model, { type: "app.overlay.openMaster" }).model;
     const transition = app.update(opened, { type: "menu.select", id: "menu", item: { value: { type: "agent.close", agent: other } } });
+    await other.close();
     expect(other.closed).toBe(true);
     expect(env.agents()).toEqual([current]);
     expect(app.currentAgent()).toBe(current);
@@ -285,11 +333,12 @@ describe("TUI close-agent menu action", () => {
 
   test("closes the focused Agent and switches to another active session", async () => {
     const env = await testEnv();
-    const current = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
-    const other = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const current = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const other = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(current, { env });
     const opened = app.update(app.init().model, { type: "app.overlay.openMaster" }).model;
     const transition = app.update(opened, { type: "menu.select", id: "menu", item: { value: { type: "agent.close", agent: current } } });
+    await current.close();
     expect(current.closed).toBe(true);
     expect(env.agents()).toEqual([other]);
     expect(app.currentAgent()).toBe(other);
@@ -345,8 +394,8 @@ describe("session deletion confirmation", () => {
     const session = new Context({ id: "live", dir, messages: [] });
     const saved = new Context({ id: "saved", dir, messages: [] });
     saved.append({ type: 2, content: [{ type: "text", text: "keep me" }] });
-    saved.close();
-    const agent = new Agent({ env, model: "p/m", context: session, createIO: () => scriptedIO([[{ type: "done" }]]) });
+    await saved.close();
+    const agent = await Agent.create({ env, model: "p/m", context: session, createIO: () => scriptedIO([[{ type: "done" }]]) });
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 100, height: 12 });
     const ui = new GTUI({ host: memory });
@@ -379,7 +428,7 @@ describe("clipboard effects", () => {
   });
 
   test("repeated copies stack one notice that expires; the failure notice expires too", async () => {
-    const { app } = await harness();
+    const { app, ui, running } = await harness();
     let model = app.init().model;
     const copy = (ok) => {
       const transition = app.update(model, { type: "copy.done", id: `transcript-copy:${Math.random()}`, ok });
@@ -411,14 +460,18 @@ describe("clipboard effects", () => {
     // The expiry message removes the error like any other notice.
     const expired = app.update(again.model, { type: "app.notice.expire", id: again.model.notices.at(-1).id }).model;
     expect(expired.notices.some((n) => n.kind === "error")).toBe(false);
+    ui.stop();
+    await running;
   });
 
   test("a turn error notice expires on the shared TTL but still surfaces", async () => {
-    const { app } = await harness();
+    const { app, ui, running } = await harness();
     const model = app.init().model;
     const transition = app.update(model, { type: "agent.turn.failed", error: new Error("boom") });
     expect(transition.model.notices.at(-1)).toMatchObject({ text: "turn failed: boom", kind: "error" });
     expect(transition.effects).toEqual([{ type: "after", ms: 8_000, message: { type: "app.notice.expire", id: transition.model.notices.at(-1).id } }]);
+    ui.stop();
+    await running;
   });
 
   test("Cmd+C copies a keyboard selection in logical bidi order", async () => {
@@ -516,7 +569,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
   test("/continue runs a fresh turn (io actually invoked) with no new user message", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "ok"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 80, height: 10 });
     const ui = new GTUI({ host: memory });
@@ -534,7 +587,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
   test("whitespace-only input behaves like /continue: a fresh turn runs, no message is printed or appended", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "ok"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 80, height: 10 });
     const ui = new GTUI({ host: memory });
@@ -554,7 +607,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
   test("/context-compact runs a REAL compact turn (never the router's \"not available\") and rebuilds the context from the model's summary", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "SUMMARY: earlier work")]]);
-    const agent = new Agent({ env, model: "p/m", context: [
+    const agent = await Agent.create({ env, model: "p/m", context: [
       { type: 2, content: [{ type: "text", text: "old question" }] },
       { type: 3, content: [{ type: "text", text: "old answer" }] },
     ], createIO: () => io });
@@ -600,7 +653,7 @@ describe("/continue, /session-new, and /context-edit reach real effects (not the
   test("/context-edit (bare) moves the last message into the draft via onFillInput", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [{ type: 2, content: [{ type: "text", text: "earlier message" }] }], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [{ type: 2, content: [{ type: "text", text: "earlier message" }] }], createIO: () => io });
     const before = agent.context.length;
     const app = createApp(agent, { env });
     const memory = GTUI.host.memory({ width: 80, height: 10 });

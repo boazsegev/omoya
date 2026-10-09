@@ -1,11 +1,14 @@
 // test/agent-finish.test.js — proof for the reimplemented crash-safe
-// onFinish/armFinishSignals pattern (no import from core/lib):
+// onFinish and App CLI finishSignalsArm pattern (no core/lib import):
 // cleanups run synchronously on exit and on trapped signals (re-raise
 // preserves signal semantics), errors never propagate, real-process
 // flush survives process.exit and SIGTERM.
 import { describe, expect, test, afterEach } from "bun:test";
 import { rmSync, mkdirSync, existsSync, readFileSync } from "node:fs";
-import { onFinish, runFinish, armFinishSignals, _resetFinish } from "../lib/agent/finish.js";
+import { onFinish, runFinish, _resetFinish } from "../lib/agent/finish.js";
+import CLI, { finishSignalsArm } from "../lib/app/cli.js";
+
+const armFinishSignals = finishSignalsArm;
 
 afterEach(() => _resetFinish());
 
@@ -46,7 +49,10 @@ describe("onFinish", () => {
   });
 });
 
-describe("armFinishSignals", () => {
+describe("App.CLI.finishSignalsArm", () => {
+  test("named and CLI static helpers have the same identity", () => {
+    expect(CLI.finishSignalsArm).toBe(finishSignalsArm);
+  });
   test("runs cleanups then re-raises the signal (dies BY the signal)", () => {
     const proc = fakeProc();
     const ran = [];
@@ -65,7 +71,11 @@ describe("armFinishSignals", () => {
     expect(d2).toBe(d1);
     expect(proc.has("SIGINT")).toBe(true);
     d1();
+    d1();
     expect(proc.has("SIGINT")).toBe(false);
+    const d3 = armFinishSignals({ process: proc });
+    expect(d3).not.toBe(d1);
+    d3();
   });
 });
 
@@ -87,7 +97,8 @@ describe("crash safety in a real process", () => {
     mkdirSync(ROOT, { recursive: true });
     const file = `${ROOT}/exit.marker`;
     const { exit, stderr } = await spawnChild(`
-      import { finishAdd as onFinish } from "./lib/agent.js";
+      import Agent from "./lib/agent.js";
+      const onFinish = Agent.finishAdd;
       import { writeFileSync } from "node:fs";
       onFinish(() => writeFileSync(${JSON.stringify(file)}, "flushed"));
       process.exit(0);
@@ -100,10 +111,12 @@ describe("crash safety in a real process", () => {
     mkdirSync(ROOT, { recursive: true });
     const file = `${ROOT}/sigterm.marker`;
     const proc = Bun.spawn(["bun", "-e", `
-      import { finishAdd as onFinish, finishSignalsArm as armFinishSignals } from "./lib/agent.js";
+      import Agent from "./lib/agent.js";
+      const onFinish = Agent.finishAdd;
+      import { App } from "./lib/app.js";
       import { writeFileSync } from "node:fs";
       onFinish(() => writeFileSync(${JSON.stringify(file)}, "flushed"));
-      armFinishSignals();
+      App.CLI.finishSignalsArm();
       setInterval(() => {}, 1000); // stay alive for the signal
     `], { stdout: "pipe", stderr: "pipe" });
     await new Promise((r) => setTimeout(r, 400)); // let it arm

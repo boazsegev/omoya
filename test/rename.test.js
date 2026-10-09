@@ -18,8 +18,8 @@ const ROOT = join(import.meta.dir, "..");
 function sandbox() {
   const dir = mkdtempSync(join(ROOT, "ai-tmp", "rename-test-"));
   cpSync(join(ROOT, "lib", "namespace.js"), join(dir, "lib", "namespace.js"), { recursive: true });
-  cpSync(join(ROOT, "lib", "index.js"), join(dir, "lib", "index.js"));
-  cpSync(join(ROOT, "lib", "index_app.js"), join(dir, "lib", "index_app.js"));
+  cpSync(join(ROOT, "lib", "agent.js"), join(dir, "lib", "agent.js"));
+  cpSync(join(ROOT, "lib", "app.js"), join(dir, "lib", "app.js"));
   cpSync(join(ROOT, "bin", "scripts"), join(dir, "bin", "scripts"), { recursive: true });
   for (const name of readdirSync(join(ROOT, "bin"))) {
     if (statSync(join(ROOT, "bin", name)).isFile()) cpSync(join(ROOT, "bin", name), join(dir, "bin", name));
@@ -71,6 +71,9 @@ describe("bin/scripts/rename (one sandboxed execution — the real tree is never
       expect(readFileSync(join(dir, "bin", "f-app"), "utf8")).toContain('import "./scripts/app";');
       expect(readFileSync(join(dir, "bin", "f"), "utf8")).toContain('import "./scripts/app";');
       expect(statSync(join(dir, "bin", "scripts", "app")).isFile()).toBe(true);
+      expect(readFileSync(join(dir, "bin", "fd"), "utf8")).toContain('import "./scripts/daemon.js";');
+      expect(statSync(join(dir, "bin", "scripts", "daemon.js")).isFile()).toBe(true);
+      expect(readFileSync(join(dir, "bin", "scripts", "daemon.js"), "utf8")).not.toMatch(/\bomd\b|omd-/);
       expect(Object.keys(pkg(dir).bin).sort()).toEqual(names);
       expect(pkg(dir).name).toBe("foo");
     }));

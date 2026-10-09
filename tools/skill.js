@@ -1,27 +1,8 @@
 /** Skill activation: atomic validation, context-idempotent injection, no disk writes. */
 import Env from "../lib/env.js";
-import Agent from "../lib/agent.js";
-
-function normalizeSkillNames(names) {
-  if (names === undefined) return [];
-  const list = typeof names === "string" ? [names] : names;
-  if (!Array.isArray(list) || list.some((name) => typeof name !== "string")) {
-    throw new TypeError("skill: names must be a string or an array of strings");
-  }
-  return [...new Set(list.map((name) => name.trim()).filter(Boolean))];
-}
 
 function activation(env, names, context) {
-  const active = context?.loadedSkills?.() ?? new Set();
-  const pending = names.filter((name) => !active.has(name));
-  const skills = pending.length || !names.length ? env.skills() : new Map();
-  if (!names.length) return Agent.skillCatalog(skills).trimEnd();
-  const unknown = pending.filter((name) => !skills.has(name));
-  if (unknown.length) throw new Error(`Unknown skills: ${unknown.join(", ")}. Call skill without names to list available skills.`);
-  return {
-    result: `Loaded skills: ${names.join(", ")}.`,
-    system: pending.map((name) => Agent.skillSection(skills.get(name))),
-  };
+  return env.skillLoad(names, { active: context?.loadedSkills?.() });
 }
 
 /**
@@ -33,9 +14,12 @@ function activation(env, names, context) {
  * @throws {Error} Invalid arguments/unknown names/registry failure; no instructions are injected.
  */
 export async function skill({ names } = {}, context) {
-  const list = normalizeSkillNames(names);
-  // Without an Agent's Env, the root folder's Env answers (Env.use).
-  return context?.env ? activation(context.env, list, context) : Env.use("/", (env) => activation(env, list, context));
+  if (context?.env) return activation(context.env, names, context);
+  const env = await Env.open(context?.agent?.folder ?? process.cwd(), {
+    init: { providers: false, tools: false, detect: false, models: false },
+  });
+  try { return activation(env, names, context); }
+  finally { await env.close(); }
 }
 
 export function toolDescription() {

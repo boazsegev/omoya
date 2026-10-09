@@ -3,6 +3,7 @@
 // diagnostics-only stderr, explicit args overriding settings.
 import { describe, expect, test, afterEach } from "bun:test";
 import { NAMES } from "../lib/namespace.js";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { cli } from "./bin-names.js";
 
 let server;
@@ -54,6 +55,32 @@ function chatResponse(frames = FRAMES) {
 }
 
 describe("io one-request CLI", () => {
+  test("provider settings overrides stay invocation-only and a scripted provider responds", async () => {
+    mkdirSync("./ai-tmp", { recursive: true });
+    const settingsDir = mkdtempSync("./ai-tmp/io-cli-scripted-");
+    const settingsFile = `${settingsDir}/settings.json`;
+    writeFileSync(settingsFile, JSON.stringify({ providers: {
+      scripted: { provider: "test", url: "test://script", models: { "test-model": {} } },
+    } }));
+    const original = process.env[NAMES.testScriptEnv];
+    process.env[NAMES.testScriptEnv] = JSON.stringify([[{ text: "scripted IO" }]]);
+    try {
+      const proc = Bun.spawn(["bun", cli.io, "--model", "scripted/test-model", "--token", "temporary", "--timeout", "5s"], {
+        stdin: "pipe", stdout: "pipe", stderr: "pipe",
+        env: { ...process.env, [NAMES.settingsEnv]: settingsDir },
+      });
+      proc.stdin.write("hello");
+      proc.stdin.end();
+      const [stdout, stderr, exit] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      expect(exit).toBe(0);
+      expect(stderr).not.toContain("no script");
+      expect(stdout.trim().split("\n").map(JSON.parse).at(-1)).toMatchObject({ type: "done", message: { content: [{ type: "text", text: "scripted IO" }] } });
+      expect(readFileSync(settingsFile, "utf8")).not.toContain("temporary");
+    } finally {
+      if (original === undefined) delete process.env[NAMES.testScriptEnv];
+      else process.env[NAMES.testScriptEnv] = original;
+    }
+  });
   test("streams normalized events on stdout, diagnostics on stderr, exit 0", async () => {
     const requests = [];
     const url = startServer(() => chatResponse(), requests);
@@ -74,7 +101,7 @@ describe("io one-request CLI", () => {
     expect(types.at(-1)).toBe("done");
     const done = events.at(-1);
     expect(done.message.content).toEqual([{ type: "text", text: "Hello world" }]);
-    expect(done.usage).toEqual({ inputTokens: 11, outputTokens: 6, source: "provider" });
+    expect(done.usage).toEqual({ inputTokens: 11, outputTokens: 6, totalTokens: 17, source: "provider" });
 
     // stderr: diagnostics only — usage summary, no JSON events
     expect(stderr).toContain("usage: in=11 out=6 (provider)");

@@ -10,7 +10,7 @@ import { toolsLoad } from "./env-internals.js";
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pN8AAAAASUVORK5CYII=";
 const PATH = "small.png";
 const AnthropicProtocol = await providerClass(Anthropic, "anthropic");
-const ioShape = { modelCurrent: "test/visual", settings: { auth: { type: "api_key", token: "test" } }, tools: () => [] };
+const ioShape = { model: "test/claude-opus-5", settings: { auth: { type: "api_key", token: "test" } }, tools: () => [] };
 
 const adapters = [
   ["OpenAI Responses", (context) => openaiWire(context, ioShape)[1].input, (wire) => {
@@ -28,16 +28,16 @@ describe("scripted agent read PNG → next provider wire", () => {
     it(`sends the PNG read result to ${provider}`, async () => {
       mkdirSync("ai-tmp/visual", { recursive: true });
       const env = await testEnv();
-      writeFileSync(join(env.cwd, PATH), Buffer.from(PNG, "base64"));
+      writeFileSync(join(env.folder, PATH), Buffer.from(PNG, "base64"));
       await toolsLoad(env, { dirs: ["./tools"] });
       const io = scriptedIO([TOOLCALL(0, "shot", "read", { path: PATH, binary: true, annotate: false }), TEXT(0, "I saw it")]);
       const requestWires = [];
       const write = io.write.bind(io);
       io.write = async (context, callbacks, options) => {
-        requestWires.push(serialize(context));
+        requestWires.push(serialize(context.messages()));
         return write(context, callbacks, options);
       };
-      const agent = new Agent({ env, model: "test/visual", context: [USER("inspect the screenshot")], createIO: () => io });
+      const agent = await Agent.create({ env, model: "test/visual", context: [USER("inspect the screenshot")], createIO: () => io });
       try {
         expect((await agent.run()).type).toBe("done");
         expect(requestWires).toHaveLength(2);
@@ -46,7 +46,7 @@ describe("scripted agent read PNG → next provider wire", () => {
       } finally {
         await agent.close();
         await env.close();
-        rmSync(join(env.cwd, PATH), { force: true });
+        rmSync(join(env.folder, PATH), { force: true });
       }
     });
   }

@@ -44,8 +44,8 @@ async function webSearch({ aiio, args, signal, deadline }) {
   const query = String(args?.query ?? "").trim();
   if (query === "" || !aiio?.url) return undefined;
   // the Codex catalog already says when a model cannot use web_search
-  if (aiio.settings?.models?.[aiio.modelCurrent.slice(aiio.modelCurrent.indexOf("/") + 1)]?.webSearch === false) return undefined;
-  const probeKey = `${aiio.url} ${aiio.modelCurrent}`;
+  if (aiio.settings?.models?.[aiio.model.slice(aiio.model.indexOf("/") + 1)]?.webSearch === false) return undefined;
+  const probeKey = `${aiio.url} ${aiio.model}`;
   if (unsupported.has(probeKey)) return undefined;
   const controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("web request cancelled"));
@@ -181,13 +181,13 @@ export default class OpenAIProvider {
     { name: "lm-studio", label: "LM Studio (local)", url: "http://localhost:1234/v1" },
   ];
 
-  static async detect({ endpoints = {}, signal } = {}) {
+  static async detectEnvironment({ endpoints = {} } = {}) {
     const found = {};
     // ambient API keys (pi's environment naming — see ENV_ENDPOINTS):
     // the process environment configures endpoints with no login at
     // all. Each carries its key as `auth` and is DYNAMIC — Env keeps
-    // both in memory only, never persisted (a key removed from the
-    // environment must leave nothing behind).
+    // both in memory only, never persisted (a new Env sees the next
+    // process environment; a running Env keeps its initial key).
     for (const { name, env, url, urlEnv, urlEnvRequired } of ENV_ENDPOINTS) {
       if (endpoints[name]) continue;
       const key = process.env[env];
@@ -201,6 +201,11 @@ export default class OpenAIProvider {
         auth: { type: "api_key", token: key },
       };
     }
+    return found;
+  }
+
+  static async detect({ endpoints = {}, signal } = {}) {
+    const found = {};
     if (!endpoints["lm-studio"]) {
       try {
         const response = await fetch(`${LM_STUDIO_URL}/models`, { headers: { connection: "close" }, signal });

@@ -31,7 +31,7 @@ const started = performance.now();
  * gate aborts the build.
  */
 async function docsGate() {
-  const proc = Bun.spawn(["bun", "test", "test/api-docs.test.js"], {
+  const proc = Bun.spawn(["bun", "test", "./test/api-docs.test.js"], {
     cwd: join(ROOT, ".."),
     stdout: "inherit",
     stderr: "inherit",

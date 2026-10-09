@@ -15,7 +15,7 @@ describe("Agent busy / ioState (public TUI surface)", () => {
       const { emitScript } = await import("./fakes.js");
       return emitScript([...TEXT(0, "answer"), { type: "done" }], callbacks);
     });
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
 
     expect(agent.busy).toBe(false); // fresh: no run
     expect(agent.ioState).toBe("idle"); // no connection yet is NOT a failure
@@ -37,7 +37,7 @@ describe("Agent busy / ioState (public TUI surface)", () => {
       [{ type: "error", error: "connection refused", kind: "network" }],
       [...TEXT(0, "recovered"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
 
     const failed = await agent.run();
     expect(failed.type).toBe("error");
@@ -54,7 +54,7 @@ describe("Agent busy / ioState (public TUI surface)", () => {
     const io = scriptedIO([
       [{ type: "error", error: "cancelled", kind: "cancelled", cancelled: true }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     await agent.run();
     expect(agent.ioState).toBe("idle");
   });

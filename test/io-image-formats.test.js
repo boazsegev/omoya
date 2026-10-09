@@ -6,7 +6,7 @@ import Anthropic from "../providers/anthropic.js";
 import Claude from "../providers/claude.js";
 import Kimi from "../providers/kimi.js";
 
-const io = { modelCurrent: "test/vision", settings: { auth: { type: "oauth", token: "test" } }, tools: () => [] };
+const io = { model: "test/claude-opus-5", settings: { auth: { type: "oauth", token: "test" } }, tools: () => [] };
 const codecs = [["OpenAI", (messages) => openaiWire(messages, io)[1]]];
 for (const [name, Plugin] of [["Anthropic", Anthropic], ["Claude", Claude], ["Kimi", Kimi]]) {
   const Protocol = await providerClass(Plugin, name.toLowerCase());

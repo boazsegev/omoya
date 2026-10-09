@@ -39,7 +39,7 @@ async function authoredCommand(env, args, context) {
   if (!["create", "update"].includes(args.action)) return args;
   let metadata = {}, prompt;
   if (args.action === "update") {
-    const current = await Jobs.schedule(env.cwd, { action: "read", filename: args.filename }, context);
+    const current = await Jobs.schedule(env.folder, { action: "read", filename: args.filename }, context);
     metadata = { ...current.task.metadata }; prompt = current.task.prompt;
   }
   if (args.prompt !== undefined) prompt = args.prompt;
@@ -55,9 +55,9 @@ async function authoredCommand(env, args, context) {
 }
 
 async function available(env, context) {
-  if (!env?.cwd || context?.agent?.safe === true) return false;
+  if (!env?.folder || context?.agent?.can?.write === false) return false;
   try {
-    await Jobs.validate(env.cwd, { settings: env.settings?.jobs ?? {}, cwd: env.cwd, ...(context?.agent ? { folder: context.agent.folder } : {}) });
+    await Jobs.validate(env.folder, { settings: env.settings?.jobs ?? {}, cwd: env.folder, ...(context?.agent ? { folder: context.agent.folder } : {}) });
     return true;
   } catch { return false; }
 }
@@ -65,10 +65,10 @@ async function available(env, context) {
 /** Schedule task files only. Lifecycle/cron mutation and secret settings are never model arguments. */
 export async function jobSchedule(args, context = {}) {
   const { env, agent } = context;
-  if (!env?.cwd) throw new Error("job-schedule requires a project environment");
-  if (agent?.safe === true) throw new Error("job-schedule is unavailable to read-only Agents");
-  const options = { settings: env.settings?.jobs ?? {}, cwd: env.cwd, ...(agent ? { folder: agent.folder } : {}) };
-  const result = await Jobs.schedule(env.cwd, await authoredCommand(env, args, { ...options, agent }), options);
+  if (!env?.folder) throw new Error("job-schedule requires a project environment");
+  if (agent?.can?.write === false) throw new Error("job-schedule is unavailable to read-only Agents");
+  const options = { settings: env.settings?.jobs ?? {}, cwd: env.folder, ...(agent ? { folder: agent.folder } : {}) };
+  const result = await Jobs.schedule(env.folder, await authoredCommand(env, args, { ...options, agent }), options);
   return result;
 }
 export { jobSchedule as "job-schedule" };

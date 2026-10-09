@@ -20,7 +20,7 @@ function metadata(text) {
 }
 
 // Isolate package contents from user/project instruction layers.
-const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settings: {}, skillDirs: ["./skills"] });
+const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settings: {}, skillDirs: ["./skills"] });
 
 describe("shipped authoring skills", () => {
   for (const name of targets) {
@@ -45,10 +45,10 @@ describe("shipped authoring skills", () => {
       expect(entry.name).toBe(name);
       expect(entry.description).toBe(meta.description);
       expect(entry.body).toBe(text.slice(text.indexOf("\n---\n") + 5).trim());
-      expect(Agent.skillCatalog(env.skills())).toContain(`\`${name}\` — ${meta.description}`);
+      expect(env.skillCatalog()).toContain(`\`${name}\` — ${meta.description}`);
       const loaded = await skill({ names: [name] }, { env });
       expect(loaded.result).toBe(`Loaded skills: ${name}.`);
-      expect(loaded.system).toEqual([Agent.skillSection(entry)]);
+      expect(loaded.system).toEqual([env.skillSection(entry)]);
     });
   }
 
@@ -56,7 +56,7 @@ describe("shipped authoring skills", () => {
     mkdirSync("./ai-tmp", { recursive: true });
     const root = mkdtempSync("./ai-tmp/live-authoring-");
     try {
-      const live = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settings: {}, skillDirs: [root] });
+      const live = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settings: {}, skillDirs: [root] });
       const name = "live-contract";
       expect(live.skills().has(name)).toBe(false);
       mkdirSync(join(root, name));

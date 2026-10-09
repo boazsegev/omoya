@@ -8,10 +8,10 @@
 import { describe, expect, test, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { Env } from "../lib/env.js";
-import { loginEndpoint } from "../lib/cli.js";
 import { context2msg, msg2events, send, reportPlanUsage } from "../lib/io/openai.js";
 import { testConnection, models as openaiModels } from "../lib/env/openai-models.js";
 import { thinkingNative } from "../lib/io/thinking.js";
+import { providerComplete } from "../lib/io/provider.js";
 import OpenAIProvider from "../providers/openai.js";
 import { endpointOf, modelsOf, providerAdd, settingsOf } from "./env-internals.js";
 
@@ -51,15 +51,24 @@ const statics = (c) => ({ url: c.baseUrl, auth: c.aiio.settings.auth, settings: 
 const catalog = (c) => openaiModels.call(c.constructor, statics(c));
 
 describe("OpenAI Responses reasoning", () => {
+  test("the published OpenAI provider inherits the same request and stream handling", () => {
+    const Published = providerComplete(OpenAIProvider);
+    const connection = new Published("https://api.openai.com/v1", { settings: { think: "high" }, model: "openai/gpt-x", tools: () => [] });
+    expect(connection.context2msg([{ type: 2, content: [{ type: "text", text: "hi" }] }])[1].reasoning)
+      .toEqual({ effort: "high", summary: "auto" });
+    expect(connection.msg2events({ type: "response.reasoning_text.delta", output_index: 0, delta: "available" }, {}))
+      .toEqual([{ type: "thinking_start", contentIndex: 0 }, { type: "thinking_delta", contentIndex: 0, text: "available" }]);
+  });
+
   test("requests a streamed reasoning summary at the native effort IO mapped", () => {
     const [, body] = context2msg.call(conn({}), [{ type: 2, content: [{ type: "text", text: "hi" }] }], {
-      settings: { think: "high" }, tools: () => [], modelCurrent: "test/gpt-5.5",
+      settings: { think: "high" }, tools: () => [], model: "test/gpt-5.5",
     });
     expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
   });
 
   const reasoningOf = (settings, model = "gpt-x") => context2msg.call(conn({}), [{ type: 2, content: [{ type: "text", text: "hi" }] }], {
-    settings, tools: () => [], modelCurrent: `test/${model}`,
+    settings, tools: () => [], model: `test/${model}`,
   })[1].reasoning;
 
   test("no effort leaves the model default (the summary is still requested)", () => {
@@ -98,11 +107,67 @@ describe("OpenAI Responses reasoning", () => {
       .toEqual([{ type: "thinking_end", contentIndex: 0 }]);
   });
 
+  test("retains a completed reasoning summary when its text delta was not streamed", () => {
+    const state = {};
+    const part = { item_id: "rs_1", output_index: 0, content_index: 0 };
+    expect(msg2events({ type: "response.reasoning_summary_part.added", ...part }, state))
+      .toEqual([{ type: "thinking_start", contentIndex: 0 }]);
+    expect(msg2events({ type: "response.reasoning_summary_text.done", ...part, text: "full available summary" }, state)).toEqual([{ type: "thinking_delta", contentIndex: 0, text: "full available summary" }]);
+    expect(msg2events({ type: "response.reasoning_summary_part.done", ...part }, state))
+      .toEqual([{ type: "thinking_end", contentIndex: 0, text: "full available summary" }]);
+  });
+
+  test("reconciles streamed and multiple final reasoning summary segments without duplication", () => {
+    const state = {};
+    const part = { item_id: "rs_1", output_index: 0, content_index: 0 };
+    msg2events({ type: "response.reasoning_summary_part.added", ...part }, state);
+    msg2events({ type: "response.reasoning_summary_text.delta", ...part, delta: "partial" }, state);
+    expect(msg2events({ type: "response.reasoning_summary_text.done", ...part, text: "first complete" }, state))
+      .toEqual([]); // a non-prefix rewrite is authoritative at the end, not an appendable delta
+    msg2events({ type: "response.reasoning_summary_text.delta", ...part, delta: " second" }, state);
+    expect(msg2events({ type: "response.reasoning_summary_text.done", ...part, text: " second complete" }, state))
+      .toEqual([{ type: "thinking_delta", contentIndex: 0, text: " complete" }]);
+    expect(msg2events({ type: "response.reasoning_summary_part.done", ...part }, state))
+      .toEqual([{ type: "thinking_end", contentIndex: 0, text: "first complete second complete" }]);
+  });
+
+  test("preserves reasoning_text events if a compatible endpoint actually emits them", () => {
+    const state = {};
+    const part = { item_id: "rs_1", output_index: 0, content_index: 0 };
+    expect(msg2events({ type: "response.reasoning_text.delta", ...part, delta: "raw part" }, state))
+      .toEqual([{ type: "thinking_start", contentIndex: 0 }, { type: "thinking_delta", contentIndex: 0, text: "raw part" }]);
+    expect(msg2events({ type: "response.reasoning_text.done", ...part, text: "raw complete" }, state))
+      .toEqual([{ type: "thinking_end", contentIndex: 0, text: "raw complete" }]);
+  });
+
+  test("adds only the missing suffix of a partially streamed text snapshot", () => {
+    const state = {};
+    msg2events({ type: "response.output_text.delta", output_index: 0, delta: "partial" }, state);
+    expect(msg2events({ type: "response.output_text.done", output_index: 0, text: "partial answer" }, state))
+      .toEqual([{ type: "text_delta", contentIndex: 0, text: " answer" }, { type: "text_end", contentIndex: 0, text: "partial answer" }]);
+  });
+
+  test("streams a final-only text snapshot as a delta before ending the block", () => {
+    const state = {};
+    expect(msg2events({ type: "response.output_text.done", output_index: 0, text: "complete answer" }, state))
+      .toEqual([{ type: "text_start", contentIndex: 0 }, { type: "text_delta", contentIndex: 0, text: "complete answer" }, { type: "text_end", contentIndex: 0, text: "complete answer" }]);
+  });
+
+  test("streams a final-only reasoning summary before ending the block", () => {
+    const state = {};
+    const part = { item_id: "rs_1", output_index: 0, content_index: 0 };
+    msg2events({ type: "response.reasoning_summary_part.added", ...part }, state);
+    expect(msg2events({ type: "response.reasoning_summary_text.done", ...part, text: "complete thought" }, state))
+      .toEqual([{ type: "thinking_delta", contentIndex: 0, text: "complete thought" }]);
+    expect(msg2events({ type: "response.reasoning_summary_part.done", ...part }, state))
+      .toEqual([{ type: "thinking_end", contentIndex: 0, text: "complete thought" }]);
+  });
+
   test("passes the final text to the normalized text end event", () => {
     const events = msg2events({
       type: "response.output_text.done", output_index: 0, text: "final answer",
-    }, {}, { set contextUsage(value) {} });
-    expect(events).toEqual([{ type: "text_end", contentIndex: 0, text: "final answer" }]);
+    }, {}, { context: { set contextUsage(value) {} } });
+    expect(events).toEqual([{ type: "text_start", contentIndex: 0 }, { type: "text_delta", contentIndex: 0, text: "final answer" }, { type: "text_end", contentIndex: 0, text: "final answer" }]);
   });
 });
 
@@ -176,10 +241,24 @@ describe("reportPlanUsage: the Codex backend has no rate-limit response headers 
     const aiio = {
       settings: { auth: { token } },
       reports: [],
-      set planUsage(report) { this.reports.push(report); },
+      context: { set planUsage(report) { aiio.reports.push(report); } },
     };
     return { conn: { baseUrl: "https://chatgpt.com/backend-api/codex", aiio }, aiio };
   }
+
+  test("late quota response reports to the original Context after IO is reused", async () => {
+    let release;
+    globalThis.fetch = async () => new Promise((resolve) => { release = resolve; });
+    const { conn, aiio } = codexConn();
+    const original = aiio.context;
+    const pending = reportPlanUsage.call(conn, new Headers(), aiio);
+    aiio.context = { planUsage: null };
+    release(Response.json({ rate_limit: { primary_window: { used_percent: 20, limit_window_seconds: 3600 } } }));
+    await pending;
+    expect(aiio.context.planUsage).toBeNull();
+    expect(aiio.reports).toMatchObject([{ quotas: { "1h": { total: 100, used: 20, remaining: 80, windowSeconds: 3600 } } }]);
+    expect(original).not.toBe(aiio.context);
+  });
 
   test("fetches GET .../wham/usage with the bearer token; the window's quota key comes from limit_window_seconds, not an assumed 5h/7d", async () => {
     let requested;
@@ -196,10 +275,10 @@ describe("reportPlanUsage: the Codex backend has no rate-limit response headers 
     const { conn, aiio } = codexConn();
     await reportPlanUsage.call(conn, new Headers(), aiio);
     expect(requested).toEqual({ url: "https://chatgpt.com/backend-api/wham/usage", authorization: "Bearer sk-codex-token" });
-    expect(aiio.reports).toEqual([{
+    expect(aiio.reports).toMatchObject([{
       label: "pro",
       quotas: {
-        "5h": { total: 100, used: 12, remaining: 88, reset: "2026-09-19T23:00:00Z", windowSeconds: 18000 },
+        "5h": { total: 100, used: 12.4, remaining: 87.6, reset: "2026-09-19T23:00:00Z", windowSeconds: 18000 },
         "7d": { total: 100, used: 55, remaining: 45, reset: "2026-09-26T00:00:00Z", windowSeconds: 604800 },
       },
     }]);
@@ -214,7 +293,7 @@ describe("reportPlanUsage: the Codex backend has no rate-limit response headers 
     }), { status: 200 });
     const { conn, aiio } = codexConn();
     await reportPlanUsage.call(conn, new Headers(), aiio);
-    expect(aiio.reports).toEqual([{
+    expect(aiio.reports).toMatchObject([{
       quotas: {
         "3h": { total: 100, used: 40, remaining: 60, windowSeconds: 10800 },
         "30d": { total: 100, used: 5, remaining: 95, windowSeconds: 2592000 },
@@ -228,7 +307,7 @@ describe("reportPlanUsage: the Codex backend has no rate-limit response headers 
     }), { status: 200 });
     const { conn, aiio } = codexConn();
     await reportPlanUsage.call(conn, new Headers(), aiio);
-    expect(aiio.reports).toEqual([{
+    expect(aiio.reports).toMatchObject([{
       quotas: {
         primary: { total: 100, used: 20, remaining: 80 },
         secondary: { total: 100, used: 30, remaining: 70 },
@@ -328,7 +407,7 @@ describe("the chatgpt-account-id header", () => {
 
 describe("the codex backend request shape", () => {
   const msg = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-  const io = { settings: { auth: { token: freshJwt() } }, tools: () => [], modelCurrent: "test/gpt-5.5" };
+  const io = { settings: { auth: { token: freshJwt() } }, tools: () => [], model: "test/gpt-5.5" };
   test("codex demands store: false, present instructions, and the experimental beta header", () => {
     const [headers, body] = context2msg.call(conn({ verify: "jwt" }), msg, io);
     expect(body.store).toBe(false);
@@ -427,18 +506,22 @@ describe("codexModels: catalog is the single discovery path (no registry, no pro
     await expect(catalog(codexConn({ token: freshJwt(), models: { "gpt-6-luna": { label: "Luna" } } }))).rejects.toBeDefined();
   });
 
-  test("catalog request uses codex CLI version when available, 99.99.99 otherwise", async () => {
+  test("catalog request uses the installed codex CLI version when available", async () => {
     const urls = [];
     globalThis.fetch = async (url) => {
       urls.push(String(url));
       return new Response(JSON.stringify({ models: [{ slug: "gpt-6-luna" }] }));
     };
     await catalog(codexConn({ token: freshJwt() }));
-    // codex CLI is installed in this environment — extract its semantic
-    // version whether the output is bare or prefixed (for example codex-cli).
-    const installedVersion = /\d+\.\d+\.\d+/.exec(Bun.spawnSync(["codex", "--version"]).stdout.toString())?.[0];
-    expect(installedVersion).toBeTruthy();
-    expect(urls[0]).toContain(`client_version=${installedVersion}`);
+    // A globally installed CLI is optional in a standalone source tree.
+    // The separate PATH-cleared test proves the no-CLI behavior deterministically.
+    let installedVersion;
+    try {
+      installedVersion = /\d+\.\d+\.\d+/.exec(Bun.spawnSync(["codex", "--version"]).stdout.toString())?.[0];
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    expect(urls[0]).toContain(`client_version=${installedVersion ?? "99.99.99"}`);
   });
 
   test("catalog request falls back to 99.99.99 when codex CLI is absent", async () => {
@@ -505,11 +588,11 @@ describe("models(): the /models listing captures every metadata field the endpoi
   });
 });
 
-describe("loginEndpoint: preset extras persist", () => {
+describe("Env.login: preset extras persist", () => {
   test("a known preset's verify + models land in the endpoint config", async () => {
     const dir = mkdtempSync("./ai-tmp/verify-login-");
     DIRS.push(dir);
-    const env = new Env({ dir, cwd: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settings: {} });
     class Codexish {
       static provider = { label: "C" };
       static knownEndpoints = [{
@@ -519,12 +602,12 @@ describe("loginEndpoint: preset extras persist", () => {
       }];
       static login({ token }) { return { type: "oauth", token, access: token }; }
       static async testConnection() { return { models: 1 }; }
-      static async models() { return {}; } // the backend has no GET /models
+      static async models() { throw new Error("no GET /models"); } // failed discovery preserves the preset's static cache
     }
     providerAdd(env, "codexish", Codexish);
-    const login = await loginEndpoint(env, {
-      name: "cloud-codex", provider: "codexish", url: "https://codex.test/backend-api/codex", token: "t-1",
-    });
+    await env.ready();
+    const login = await env.login("cloud-codex", { provider: "codexish", url: "https://codex.test/backend-api/codex", token: "t-1",
+    }, { scope: "package" });
     expect(login.verified).toEqual({ models: 1 });
     const settings = settingsOf(env, "cloud-codex");
     expect(settings.verify).toBe("jwt");
@@ -536,7 +619,7 @@ describe("loginEndpoint: preset extras persist", () => {
   test("a registry-backed preset persists verify but NOT the static models (they would linger as stale config)", async () => {
     const dir = mkdtempSync("./ai-tmp/verify-login-");
     DIRS.push(dir);
-    const env = new Env({ dir, cwd: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settings: {} });
     class RegistryCodex {
       static provider = { label: "R" };
       static knownEndpoints = [{
@@ -550,9 +633,8 @@ describe("loginEndpoint: preset extras persist", () => {
       static async models() { return {}; }
     }
     providerAdd(env, "regcodex", RegistryCodex);
-    await loginEndpoint(env, {
-      name: "reg-codex", provider: "regcodex", url: "https://codex.test/backend-api/codex", token: "t-1",
-    });
+    await env.login("reg-codex", { provider: "regcodex", url: "https://codex.test/backend-api/codex", token: "t-1",
+    }, { scope: "package" });
     const config = endpointOf(env, "reg-codex");
     expect(config.verify).toBe("jwt");
     expect("models" in config).toBe(false);

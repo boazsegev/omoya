@@ -5,24 +5,54 @@ import { callbacksNormalize, eventDispatch } from "../lib/context.js";
 import { assemblerCreate } from "../lib/context.js";
 
 /**
- * A fake IO duck-type: { state, write(context, callbacks, options),
- * kill() }. `handler(io, callbacks, options)` returns the terminal event.
- * Every write snapshots the received context (Agent must pass the
- * COMPLETE current context each request).
+ * A fake IO with request-scoped Context, reusable cancel(), and permanent
+ * close(). `handler(io, callbacks, options)` returns the terminal event.
+ * Every write snapshots the COMPLETE current messages. `kills` and `_onKill`
+ * retain the abort hooks used by Agent/App tests; they do not imply closure.
  */
 export function fakeIO(handler) {
   const io = {
     state: "idle",
+    context: null,
     writes: [],
     kills: 0,
+    cancels: 0,
+    closes: 0,
+    _active: null,
+    _onKill: null,
     async write(context, callbacks = {}, options = {}) {
-      io.writes.push({ context: structuredClone(context), options });
-      return handler(io, callbacks, options);
+      if (io.state === "closed" || io.state === "closing") throw new Error("IO.write: IO is closed");
+      if (io._active) throw new Error("IO.write: request already active");
+      io.state = "sending";
+      io.context = context;
+      io.writes.push({ context: structuredClone(context.messages()), options });
+      io._active = (async () => handler(io, callbacks, options))().finally(() => {
+        io._active = null;
+        io._onKill = null;
+        io.context = null;
+        if (io.state !== "closing" && io.state !== "closed") io.state = "idle";
+      });
+      return io._active;
+    },
+    async cancel() {
+      if (!io._active || io.state === "cancelling" || io.state === "closing" || io.state === "closed") return;
+      io.cancels++;
+      io.kills++;
+      io.state = "cancelling";
+      io._onKill?.();
+      await io._active.catch(() => {});
     },
     async close() {
-      io.kills++;
+      if (io.state === "closed") return;
+      if (io.state === "closing") { await io._active?.catch(() => {}); return; }
+      io.closes++;
+      const cancelling = io.state === "cancelling";
+      io.state = "closing";
+      if (io._active) {
+        if (!cancelling) { io.kills++; io._onKill?.(); }
+        await io._active.catch(() => {});
+      }
       io.state = "closed";
-      io._onKill?.();
     },
   };
   return io;
@@ -31,21 +61,24 @@ export function fakeIO(handler) {
 /**
  * A fake IO scripted per turn: script[i] is an array of normalized
  * events for write #i (last entry repeats). Terminal events get the
- * assembled message attached, mirroring real IO behavior.
+ * assembled message attached, mirroring real IO behavior. Optional
+ * onRequest(io, index) writes provider reports through the active Context
+ * before events are dispatched; index is the zero-based request number.
  */
-export function scriptedIO(script) {
+export function scriptedIO(script, { onRequest } = {}) {
   let turn = 0;
   const io = fakeIO(async (_io, callbacks) => {
-    const events = script[Math.min(turn, script.length - 1)];
-    turn++;
-    return emitScript(events, callbacks);
+    const index = turn++;
+    const events = script[Math.min(index, script.length - 1)];
+    if (onRequest) await onRequest(_io, index);
+    return emitScript(events, callbacks, _io.context);
   });
   io.turns = () => turn;
   return io;
 }
 
-/** Dispatch a scripted event list; returns the terminal event. */
-export function emitScript(events, callbacks = {}) {
+/** Dispatch scripted events; optional Context receives provider-envelope input fallback like real IO. */
+export function emitScript(events, callbacks = {}, context) {
   const assembler = assemblerCreate();
   const set = callbacksNormalize(callbacks, {});
   let terminal = null;
@@ -57,6 +90,11 @@ export function emitScript(events, callbacks = {}) {
     }
     assembler.consume(event);
     if (Number.isInteger(event.contentIndex)) event.content = assembler.message().content[event.contentIndex];
+    if ((event.type === "done" || event.type === "error") &&
+        context?.contextUsage.used === undefined && event.usage?.source === "provider" &&
+        Number.isFinite(event.usage.inputTokens)) {
+      context.contextUsage = { used: event.usage.inputTokens };
+    }
     eventDispatch(set, event);
     if (event.type === "done" || event.type === "error") terminal = event;
   }
@@ -108,9 +146,7 @@ export async function testEnv(settings = {}, { cwd } = {}) {
   const { Env } = await import("../lib/env.js");
   vacuumStaleTempDirs();
   const dir = mkdtempSync("./ai-tmp/env-");
-  // cwd isolated too (defaults to process.cwd() — the repo root while
-  // running the suite): resolveSystemPrompt()'s project-local AGENTS.md
-  // layer must never pick up whatever real file happens to sit there.
+  // The throwaway directory isolates the project-local AGENTS.md layer.
   // The user settings layer pins to the same folder (dynamic writes
   // land here, never in the shared suite layer).
   // Deterministic named endpoints let Agent unit tests exercise connection
@@ -118,7 +154,7 @@ export async function testEnv(settings = {}, { cwd } = {}) {
   const providers = Object.fromEntries(
     ["capturing", "fake", "p", "p1", "p2", "test", "x"].map((name) => [name, { provider: "test", url: "test://script" }]),
   );
-  return new Env({ dir, cwd: cwd ?? dir, settings: { providers, ...settings }, settingsDir: dir });
+  return Env.open(cwd ?? dir, { dir, settingsDir: dir, settings: { providers, ...settings }, init: { providers: false, tools: false, detect: false, models: false } });
 }
 
 export const USER = (text) => ({ type: 2, content: [{ type: "text", text }] });

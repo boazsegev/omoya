@@ -1,21 +1,38 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { scriptedIO, testEnv, TEXT, USER } from "./fakes.js";
 
+const trackedAgents = [];
+async function eventAgent(options = {}) {
+  const env = options.env ?? await testEnv();
+  const agent = await Agent.create({ ...options, env });
+  trackedAgents.push({ agent, env });
+  return agent;
+}
+
+afterEach(async () => {
+  for (const { agent } of trackedAgents.toReversed()) await agent.close();
+  for (const env of new Set(trackedAgents.map(({ env }) => env))) await env.close();
+  trackedAgents.length = 0;
+});
+
 describe("Agent event subscriptions", () => {
-  test("constants are dense zero-based integers", () => {
-    expect(Object.values(Agent.EVENT)).toEqual(Array.from({ length: 21 }, (_, index) => index));
+  test("event constants are distinct Symbols", () => {
+    const values = Object.values(Agent.EVENT);
+    expect(values).toHaveLength(21);
+    expect(values.every((value) => typeof value === "symbol")).toBe(true);
+    expect(new Set(values).size).toBe(values.length);
   });
 
-  test("supports multiple and duplicate listeners with independent random handles", async () => {
-    const agent = new Agent({ env: await testEnv() });
+  test("supports multiple and duplicate listeners with deterministic opaque handles", async () => {
+    const agent = await eventAgent();
     const seen = [];
     const callback = (value) => seen.push(value);
     const first = agent.onEvent(Agent.EVENT.LOG, callback);
     const second = agent.onEvent(Agent.EVENT.LOG, callback);
 
     expect(Number.isSafeInteger(first)).toBe(true);
-    expect(second).not.toBe(first);
+    expect(second).toBe(first + 1);
     agent._emit(Agent.EVENT.LOG, "both");
     expect(seen).toEqual(["both", "both"]);
     expect(agent.offEvent(first)).toBe(true);
@@ -27,7 +44,7 @@ describe("Agent event subscriptions", () => {
 
   test("publishes response events to multiple consumers and commits completed messages after storage", async () => {
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env: await testEnv(), model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await eventAgent({ model: "p/m", context: [USER("go")], createIO: () => io });
     const deltas = [[], []];
     agent.onEvent(Agent.EVENT.TEXT_DELTA, (event) => deltas[0].push({ text: event.text, type: event.type, content: event.content?.text }));
     agent.onEvent(Agent.EVENT.TEXT_DELTA, (event) => deltas[1].push({ text: event.text, type: event.type, content: event.content?.text }));
@@ -49,10 +66,10 @@ describe("Agent event subscriptions", () => {
 
   test("forwards a completed child response to its parent without tool registration", async () => {
     const env = await testEnv();
-    const parent = new Agent({ env, model: "p/m" });
+    const parent = await eventAgent({ env, model: "p/m" });
     const forwarded = [];
     parent.send = (message) => { forwarded.push(message); return Promise.resolve({ type: "done" }); };
-    const child = new Agent({
+    const child = await eventAgent({
       env, parent, name: "child", model: "p/m", context: [USER("go")],
       createIO: () => scriptedIO([[{ type: "start" }, ...TEXT(0, "answer"), { type: "done" }]]),
     });
@@ -75,7 +92,7 @@ describe("Agent event subscriptions", () => {
         return { type: "done" };
       },
     };
-    const agent = new Agent({ env: await testEnv(), model: "p/m", context: [USER("first")], createIO: () => io });
+    const agent = await eventAgent({ model: "p/m", context: [USER("first")], createIO: () => io });
     const sent = [];
     agent.onEvent(Agent.EVENT.SENT_MESSAGE, (message) => sent.push(message));
     const running = agent.run();
@@ -88,7 +105,7 @@ describe("Agent event subscriptions", () => {
 
   test("does not commit failed partial messages", async () => {
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "partial"), { type: "error", error: "failed" }]]);
-    const agent = new Agent({ env: await testEnv(), model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await eventAgent({ model: "p/m", context: [USER("go")], createIO: () => io });
     const committed = [];
     agent.onEvent(Agent.EVENT.MESSAGE_COMMITTED, (message) => committed.push(message));
     await agent.run();
@@ -96,9 +113,10 @@ describe("Agent event subscriptions", () => {
   });
 
   test("rejects invalid registrations and ignores invalid removals", async () => {
-    const agent = new Agent({ env: await testEnv() });
+    const agent = await eventAgent();
     expect(() => agent.onEvent(-1, () => {})).toThrow(TypeError);
     expect(() => agent.onEvent(99, () => {})).toThrow(TypeError);
+    expect(() => agent.onEvent(Symbol("LOG"), () => {})).toThrow(TypeError);
     expect(() => agent.onEvent(Agent.EVENT.REQUEST_START, null)).toThrow(TypeError);
     expect(agent.offEvent("not-a-handle")).toBe(false);
   });

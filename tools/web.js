@@ -109,10 +109,16 @@ async function dispatch(kind, args, context, packageBackend) {
     const shortcut = typeof mapping?.server === "string" ? `mcp-${mapping.server}` : undefined;
     if (mapping?.shadow === true && remoteTool && (await context?.agent?.toolCallable?.(shortcut)) !== false) {
       try {
+        // A stalled remote tool must not consume the local backend's entire deadline.
         const remaining = Math.max(1, total.deadline - Date.now());
-        const content = await awaitWithinSignal(context.env.toolCall("mcp", { action: "call", server: mapping.server, tool: remoteTool, arguments: args, timeout: Math.min(MCP_TIMEOUT, remaining) }, { ...context, signal: total.signal }), total.signal);
-        if (typeof content !== "string" || content.trim() === "") throw new Error("MCP web result is empty");
-        return withCodePath(content, `mcp (${mapping.server}/${remoteTool})`, isDebug);
+        const remote = deadlineSignal(total.signal, Math.min(MCP_TIMEOUT, Math.max(1, Math.floor(remaining / 2))));
+        try {
+          const content = await awaitWithinSignal(context.env.toolCall("mcp", { action: "call", server: mapping.server, tool: remoteTool, arguments: args, timeout: Math.min(MCP_TIMEOUT, remote.deadline - Date.now()) }, { ...context, signal: remote.signal }), remote.signal);
+          if (typeof content !== "string" || content.trim() === "") throw new Error("MCP web result is empty");
+          return withCodePath(content, `mcp (${mapping.server}/${remoteTool})`, isDebug);
+        } finally {
+          remote.close();
+        }
       } catch (error) {
         if (total.signal.aborted) throw total.signal.reason;
         mcpError = cleanMcpDetail(error?.mcpDetail ?? error?.message ?? error, context?.env);
@@ -143,7 +149,7 @@ export async function webFetch(args, context) {
  *  `debug` prefixes the taken HTTP access point, `search` holds
  *  backend/engine config, `mcp` the server mapping, and `readability`
  *  the fetch converter toggle. (A provider's own web tool is opted out
- *  through the core `providerTools` setting.) */
+ *  through the core `providers.tools` setting.) */
 export function settingsSchema() {
   return {
     web: {

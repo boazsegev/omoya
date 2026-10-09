@@ -22,7 +22,7 @@ describe("Agent construction", () => {
   test("Env.agentCreate constructs an Agent over its receiver Env", async () => {
     const env = await testEnv();
     const other = await testEnv();
-    const agent = env.agentCreate({ env: other, model: model(env), context: [] });
+    const agent = await env.agentCreate({ env: other, model: model(env), context: [] });
     expect(agent).toBeInstanceOf(Agent);
     expect(agent.env).toBe(env);
     expect(env.agents()).toEqual([agent]);
@@ -31,26 +31,26 @@ describe("Agent construction", () => {
 
   test("normalizes one endpoint/model selector", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: model(env, "p", "org/model") });
+    const agent = await Agent.create({ env, model: model(env, "p", "org/model") });
     expect(agent.endpoint).toBeUndefined();
     expect(agent.model).toBe("p/org/model");
   });
 
   test("rejects malformed, unknown-endpoint, and unknown-model selectors before registration", async () => {
     const env = await testEnv();
-    env._endpoints.p.models = { known: {} };
+    env.settings.providers.p.models = { known: {} };
     for (const value of ["p", "/m", "p/"]) {
-      expect(() => new Agent({ env, model: value })).toThrow(/model selector/);
+      await expect(Agent.create({ env, model: value })).rejects.toThrow(/model selector/);
     }
-    expect(() => new Agent({ env, model: "missing/m" })).toThrow(/unknown endpoint/);
-    expect(() => new Agent({ env, model: "p/missing" })).toThrow(/unknown model/);
+    await expect(Agent.create({ env, model: "missing/m" })).rejects.toThrow(/unknown endpoint/);
+    await expect(Agent.create({ env, model: "p/missing" })).rejects.toThrow(/unknown model/);
     expect(env.agents()).toHaveLength(0);
   });
 
   test("refuses an invalid later selection without changing the active model", async () => {
     const env = await testEnv();
-    env._endpoints.p.models = { known: {} };
-    const agent = new Agent({ env, model: "p/known" });
+    env.settings.providers.p.models = { known: {} };
+    const agent = await Agent.create({ env, model: "p/known" });
     expect(() => (agent.model = "p/missing")).toThrow(/unknown model/);
     expect(agent.model).toBe("p/known");
   });
@@ -58,9 +58,9 @@ describe("Agent construction", () => {
   test("a string session resumes an existing id and otherwise creates it", async () => {
     const dir = mkdtempSync("./ai-tmp/agent-constructor-");
     const env = await testEnv({ sessions: resolve(dir) });
-    const first = new Agent({ env, model: model(env), contextId: "same", context: [USER("first")] });
+    const first = await Agent.create({ env, model: model(env), contextId: "same", context: [USER("first")] });
     first.context.flush();
-    const resumed = new Agent({ env, model: model(env), contextId: "same", context: [USER("second")] });
+    const resumed = await Agent.create({ env, model: model(env), contextId: "same", context: [USER("second")] });
     expect(resumed.context.messages()).toEqual([USER("first\n\nsecond")]);
     expect(resumed.context.id).toBe("same");
     expect(existsSync(resumed.context.file)).toBe(true);
@@ -69,7 +69,7 @@ describe("Agent construction", () => {
   test("a ready Context is used as the agent's context", async () => {
     const env = await testEnv();
     const store = new Context({ id: "injected", dir: mkdtempSync("./ai-tmp/agent-store-") });
-    const agent = new Agent({ env, model: model(env), context: store });
+    const agent = await Agent.create({ env, model: model(env), context: store });
     expect(agent.context).toBe(store);
   });
 });

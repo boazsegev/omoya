@@ -17,6 +17,8 @@ import { mkdtempSync, mkdirSync } from "node:fs";
 import { appAlias, cli } from "./bin-names.js";
 import { Context } from "../lib/context.js";
 import { providersLoad, toolsLoad } from "./env-internals.js";
+import { Agent } from "../lib/agent.js";
+import { Env } from "../lib/env.js";
 
 // spawned children get a THROWAWAY user settings folder (see agent-cancel)
 mkdirSync("./ai-tmp", { recursive: true });
@@ -109,8 +111,9 @@ describe("e2e smoke (MVP gate): scripted test provider + read + sessions + all b
     // (a leading system message, filtered out, is the real package
     // folder's own AGENTS.md prefill — see lib/env.js resolveSystemPrompt
     // — Agent seeds it at construction, ALWAYS the context's first message)
-    const allRecords = readFileSync(sessionFile(), "utf8").trim().split("\n").map(JSON.parse)
-      .filter((record) => record?.type !== "session-metadata");
+    const persisted = readFileSync(sessionFile(), "utf8").trim().split("\n").map(JSON.parse);
+    expect(persisted.filter((record) => record?.type === "io-root")).toHaveLength(1);
+    const allRecords = persisted.filter((record) => record?.type !== "session-metadata" && record?.type !== "io-root");
     expect(allRecords.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     const records = allRecords.filter((m) => m.type !== 1);
     expect(records.map((m) => m.type)).toEqual([2, 3, 4, 3]); // deterministic now
@@ -134,20 +137,15 @@ describe("e2e smoke (MVP gate): scripted test provider + read + sessions + all b
   }, T);
 
   test("library binding: in-process Agent resumes the CLI-written session", async () => {
-    const { default: API } = await import("../lib/index.js");
-    const Env = API.Env;
-    const Agent = API.Agent;
-    const { messageUser } = API.Context;
+    const { messageUser } = Context;
     // resume the CLI-written session from the same pinned settings folder
-    const env = new Env({ settingsDir: SPAWN_SETTINGS });
+    const env = await Env.open(process.cwd(), { settingsDir: SPAWN_SETTINGS });
+    await env.ready();
     await providersLoad(env);
     await toolsLoad(env, { dirs: ["./tools"] }); // explicit root keeps the proof self-contained
 
-    const agent = new Agent({
-      env, model: "test/test-model", contextId: SESSION,
-      // inline script through per-invocation settings (the in-process path)
-      settings: { script: [[{ text: `Still: ${NONCE}` }]] },
-    });
+    env.settings.providers.test.script = [[{ text: `Still: ${NONCE}` }]];
+    const agent = await Agent.create({ env, model: "test/test-model", contextId: SESSION });
     // resume restored the prior exchange before this turn
     expect(agent.context.length).toBeGreaterThanOrEqual(4);
 

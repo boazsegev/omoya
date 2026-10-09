@@ -1,0 +1,22 @@
+# Reproduce CI's Ubuntu/Bun/bubblewrap userspace on Linux container storage.
+# docker build -f Dockerfile.ci -t omoya-ci .
+# docker run --rm --init --security-opt seccomp=unconfined --cap-add SYS_ADMIN omoya-ci
+# Rebuild after editing: bind-mounting a macOS checkout under Docker Desktop can
+# return inconsistent inode identities for open/stat and invalidate read tests.
+# Namespace permissions are needed because Docker's default seccomp blocks bwrap;
+# this runner is for trusted local test code, not untrusted workloads.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+ARG TARGETARCH
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    bubblewrap ca-certificates curl git unzip && \
+    rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in amd64) arch=x64 ;; arm64) arch=aarch64 ;; *) exit 1 ;; esac && \
+    curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v1.4.1/bun-linux-${arch}.zip" -o /tmp/bun.zip && \
+    unzip -q /tmp/bun.zip -d /tmp && install "/tmp/bun-linux-${arch}/bun" /usr/local/bin/bun && \
+    rm -rf /tmp/bun.zip "/tmp/bun-linux-${arch}"
+RUN useradd --uid 1001 --create-home ci
+WORKDIR /workspace
+COPY --chown=ci:ci . .
+RUN chown ci:ci /workspace
+USER ci
+CMD ["bun", "test"]

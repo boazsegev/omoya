@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { Env } from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
 import { question } from "../tools/question.js";
+import { callToolFor } from "../lib/agent/tool-exec.js";
 import { scriptedIO, TOOLCALL } from "./fakes.js";
 import { toolEntry, toolNamesSafe, toolSchemas, toolsLoad } from "./env-internals.js";
 
@@ -16,7 +17,7 @@ const DIRS = [];
 const tmpEnv = async () => {
   const dir = mkdtempSync("./ai-tmp/question-");
   DIRS.push(dir);
-  const env = new Env({ dir, cwd: dir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+  const env = await Env.open(dir, { dir, settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
   await toolsLoad(env, { dirs: ["./tools"] });
   return env;
 };
@@ -112,6 +113,27 @@ describe("question tool: the bridge", () => {
 });
 
 describe("Agent: the question bridge wiring", () => {
+  test("a child cannot ask even with a host bridge and receives only tool unavailable", async () => {
+    const env = await tmpEnv();
+    const parent = await Agent.create({ env });
+    let asked = 0;
+    const io = scriptedIO([
+      [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q()] }), { type: "done" }],
+      [{ type: "start" }, { type: "text_delta", contentIndex: 0, text: "done" }, { type: "done" }],
+    ]);
+    const child = await Agent.create({ env, parent, model: "p/m", context: [], createIO: () => io,
+      question: { ask: async () => { asked++; return [{ labels: ["A"] }]; } } });
+    await child.run();
+    expect(asked).toBe(0);
+    const result = child.context.messages().find((m) => m.type === 4);
+    expect(result.error).toBe(true);
+    expect(result.content[0].text).toBe("tool error: tool unavailable");
+    await expect(callToolFor(child, "write", { ask: true }, { name: "write", callId: "ask-denied" })).rejects.toThrow(/^tool unavailable$/);
+    expect(asked).toBe(0);
+    await child.close();
+    await parent.close();
+    await env.close();
+  });
   test("the constructor option AND setQuestion() supply the bridge to the tool", async () => {
     const env = await tmpEnv();
     const answers = [];
@@ -119,7 +141,7 @@ describe("Agent: the question bridge wiring", () => {
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q()] }), { type: "done" }],
       [{ type: "start" }, { type: "text_delta", contentIndex: 0, text: "done" }, { type: "done" }],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
       question: { ask: async (qs) => { answers.push(qs); return [{ text: "from the constructor" }]; } },
     });
@@ -141,7 +163,7 @@ describe("Agent: the question bridge wiring", () => {
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q()] }), { type: "done" }],
       [{ type: "start" }, { type: "text_delta", contentIndex: 0, text: "done" }, { type: "done" }],
     ]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [], createIO: () => io,
       toolCall: { fork: true }, // the sandbox is ON — the bridge still arrives
       question: { ask: async () => { bridged++; return [{ labels: ["A"] }]; } },
@@ -159,7 +181,7 @@ describe("Agent: the question bridge wiring", () => {
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q()] }), { type: "done" }],
       [{ type: "start" }, { type: "text_delta", contentIndex: 0, text: "done" }, { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     await agent.run();
     const result = agent.context.messages().find((m) => m.type === 4);
     expect(result.error).toBe(true);

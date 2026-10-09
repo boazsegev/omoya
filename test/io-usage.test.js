@@ -8,8 +8,16 @@ import {
   tokensEstimateMessages,
   usageEstimate,
   usageFinalize,
-  usageSummary,
 } from "../lib/context.js";
+import Context, * as ContextModule from "../lib/context.js";
+import { App } from "../lib/app.js";
+const { usageSummary } = App.CLI;
+
+test("the App entry point loads CLI-owned usage formatting without exposing it on Context", () => {
+  expect(typeof usageSummary).toBe("function");
+  expect(Context.usageSummary).toBeUndefined();
+  expect(ContextModule.usageSummary).toBeUndefined();
+});
 
 describe("word count and token estimation", () => {
   test("wordCount splits on whitespace, tolerates junk", () => {
@@ -62,6 +70,7 @@ describe("usageFinalize", () => {
     expect(usageFinalize({ inputTokens: 10, outputTokens: 5 }, context, message)).toEqual({
       inputTokens: 10,
       outputTokens: 5,
+      totalTokens: 15,
       source: "provider",
     });
   });
@@ -101,9 +110,14 @@ describe("provider-reported cost", () => {
 
   test("a finite reported cost rides the envelope (never estimated)", () => {
     const usage = usageFinalize({ inputTokens: 10, outputTokens: 5, cost: 0.0123 }, context, message);
-    expect(usage).toEqual({ inputTokens: 10, outputTokens: 5, source: "provider", cost: 0.0123 });
+    expect(usage).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15, source: "provider", cost: 0.0123 });
     // estimates never invent a cost
     expect(usageFinalize(null, context, message).cost).toBeUndefined();
+  });
+
+  test("the summary hides zero cost and preserves tiny nonzero amounts", () => {
+    expect(usageSummary({ inputTokens: 1, outputTokens: 1, source: "provider", cost: 0 })).not.toContain("$");
+    expect(usageSummary({ inputTokens: 1, outputTokens: 1, source: "provider", cost: 0.000001 })).toContain("$0.000001");
   });
 
   test("the summary appends the cost when present", () => {

@@ -16,6 +16,9 @@ import "../lib/env.js"; // sets the global Env the tool wrappers stamp with
 import { write, toolDescription as writeDescription } from "../tools/write.js";
 import { edit, toolDescription as editDescription } from "../tools/edit.js";
 import { findTraversal, findWriteTraversal, traversalSnippet } from "../tools/guard/paths.js";
+import Agent from "../lib/agent.js";
+import { testEnv } from "./fakes.js";
+import { toolsLoad } from "./env-internals.js";
 
 const ROOT = `./ai-tmp/write-edit-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -43,7 +46,7 @@ describe("write tool (pi semantics)", () => {
     const project = `${ROOT}/project`;
     mkdirSync(project, { recursive: true });
     const source = "import '" + "../" + "lib/inside-project.js';";
-    await write({ path: "nested/out.js", content: source }, { env: { cwd: project } });
+    await write({ path: "nested/out.js", content: source }, { env: { folder: project } });
     expect(readFileSync(`${project}/nested/out.js`, "utf8")).toBe(source);
   });
 
@@ -52,7 +55,7 @@ describe("write tool (pi semantics)", () => {
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
     const source = "import '" + "../" + "shared/module.js';";
-    const context = { env: { cwd: project }, agent: { folder: agentFolder } };
+    const context = { env: { folder: project }, agent: { folder: agentFolder } };
     await write({ path: "out.js", content: source }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe(source);
     await expect(write({ path: "../shared/out.js", content: "sibling" }, context)).rejects.toThrow(/boundary/);
@@ -92,18 +95,18 @@ describe("edit tool (pi semantics)", () => {
     writeFileSync(`${agentFolder}/out.js`, "old\n");
     const sibling = ".." + "/shared/module.js";
     await edit({ path: "out.js", edits: [{ oldText: "old", newText: `import '${sibling}';` }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     });
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toContain(sibling);
     const siblingFile = `${project}/shared/module.js`;
     mkdirSync(`${project}/shared`, { recursive: true });
     writeFileSync(siblingFile, "old sibling\n");
     await expect(edit({ path: sibling, edits: [{ oldText: "old sibling", newText: "new sibling" }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     })).rejects.toThrow(/boundary/);
     expect(readFileSync(siblingFile, "utf8")).toContain("old sibling");
     await expect(edit({ path: "../../outside.txt", edits: [{ oldText: "x", newText: "y" }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     })).rejects.toThrow(/boundary/);
   });
 
@@ -210,18 +213,49 @@ describe("edit tool (pi semantics)", () => {
     expect(readFileSync(rel("m.txt"), "utf8")).toBe("ab ab ab\n");
   });
 
+  test("manual Env.toolCall retains edit rollback storage when writable and honors Agent safe mode", async () => {
+    seed("manual.txt", "alpha\n");
+    const env = await testEnv({}, { cwd: process.cwd() });
+    await toolsLoad(env, { dirs: ["./tools"] });
+    const agent = await Agent.create({ env });
+    const path = rel("manual.txt");
+    try {
+      if (!agent.can.write) {
+        // Linux CI without bubblewrap forces read-only mode at construction;
+        // editing must be refused, never bypass the security gate for this test.
+        await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent }))
+          .rejects.toThrow(/safe mode/);
+        expect(readFileSync(path, "utf8")).toBe("alpha\n");
+        return;
+      }
+      await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, call: { callId: "manual-edit" } }))
+        .resolves.toHaveProperty("result");
+      expect(readFileSync(path, "utf8")).toBe("ALPHA\n");
+      await env.toolCall("edit", { path, rollback: "manual-edit" }, { agent });
+      expect(readFileSync(path, "utf8")).toBe("alpha\n");
+      agent.can.write = false;
+      await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "unsafe" }] }, { agent }))
+        .rejects.toThrow(/safe mode/);
+      expect(readFileSync(path, "utf8")).toBe("alpha\n");
+    } finally {
+      agent.close();
+      env.close();
+    }
+  });
+
   test("edit records live in the CALLING AGENT's session store — another agent cannot roll them back", async () => {
     seed("iso.txt", "alpha\n");
     const storage = {};
-    const agent = { folder: process.cwd(), toolStorage: () => storage };
-    await edit({ path: rel("iso.txt"), edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, call: { callId: "a-1", name: "edit" } });
+    const agent = { folder: process.cwd() };
+    await edit({ path: rel("iso.txt"), edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, storage, call: { callId: "a-1", name: "edit" } });
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("ALPHA\n");
     // a different agent (its own empty store) does not see the id
-    const other = { folder: process.cwd(), toolStorage: () => ({}) };
-    await expect(edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent: other })).rejects.toThrow(/^Use an edit id returned by a recent successful edit/);
+    const other = { folder: process.cwd() };
+    const otherStorage = {};
+    await expect(edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent: other, storage: otherStorage })).rejects.toThrow(/^Use an edit id returned by a recent successful edit/);
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("ALPHA\n"); // untouched
     // the owning agent rolls back fine
-    await edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent });
+    await edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent, storage });
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("alpha\n");
   });
 
@@ -230,9 +264,9 @@ describe("edit tool (pi semantics)", () => {
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
     writeFileSync(`${agentFolder}/out.js`, "old\n");
-    const storage = {}; // a real agent returns the SAME store every call
-    const agent = { folder: agentFolder, toolStorage: () => storage };
-    const context = { env: { cwd: project }, agent, call: { callId: "a-2", name: "edit" } };
+    const storage = {}; // dispatch supplies the SAME store every call
+    const agent = { folder: agentFolder };
+    const context = { env: { folder: project }, agent, storage, call: { callId: "a-2", name: "edit" } };
     await edit({ path: "out.js", edits: [{ oldText: "old", newText: "new" }] }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe("new\n");
     // the rollback resolves against the agent folder (not the process cwd)

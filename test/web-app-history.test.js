@@ -146,4 +146,17 @@ describe("web composer history recall", () => {
     s.composerDraft().submitted.push("sent message");
     expect(s.messageHistory()).toEqual(["older", "sent message"]);
   });
+
+  test("trimmed context echo reconciles by text but recalls the raw whitespace and counts repeats", () => {
+    const s = makeSession(["older", "sent message", "sent message"]);
+    const raw = "  sent message \n ";
+    s.composerDraft().submitted.push(raw, "sent message", raw);
+    expect(s.messageHistory()).toEqual(["older", raw, "sent message", raw]);
+    type(s, "working draft");
+    expect(up(s)).toBe(true);
+    expect(s.textarea.value).toBe(raw);
+    caret(s, raw.length); // Down recalls only from the last visual row.
+    expect(down(s)).toBe(true);
+    expect(s.textarea.value).toBe("working draft");
+  });
 });

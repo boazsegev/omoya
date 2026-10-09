@@ -4,9 +4,9 @@
  *
  * Usage:
  *   <prefix>-agent [--model <endpoint>/<model>] [--url <url>]
- *            [--token <key>] [--timeout <ms>] [--tools <list>]
+ *            [--token <key>] [--timeout <dur>] [--tools <list>]
  *            [--session <id> | --resume <id>]
- *            [--max-turns <n>] [--max-tool-calls <n>] [--login] [--logout <endpoint>] [--help]
+ *            [--login] [--logout <endpoint>] [--help]
  *
  * Contract:
  *   - Reads stdin to EOF (shared grammar: whole JSON context first,
@@ -27,10 +27,11 @@
 
 import { basename } from "node:path";
 import Agent from "../../lib/agent.js";
-import CLI from "../../lib/cli.js";
+import { App } from "../../lib/app.js";
+const { CLI } = App;
 const { Env, IO, NAMES } = Agent;
 const { ProviderError } = IO;
-const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, runMcpLogin, logoutEndpoint, selectEndpointModel, adoptResumeOrigin } = CLI;
+const { parseFlags, EXIT, exitCodeFor, readContextFromStdin, armCancelSignals, runLoginWizard, runMcpLogin, selectEndpointModel, adoptResumeOrigin, usageSummary } = CLI;
 
 // The invoked name, like the TUI's: argv[1] holds the wrapper's file
 // name; a bare `bun bin/scripts/agent` has none, so the namespace-
@@ -41,9 +42,10 @@ const PROGRAM = "{{program}}";
 const HELP_TEMPLATE = `${PROGRAM} — headless tool-loop CLI
 
 usage: ${PROGRAM} [--model <endpoint>/<model>] [--url <url>]
-                [--token <key>] [--timeout <ms>] [--tools <list>]
+                [--token <key>] [--timeout <dur>] [--tools <list>]
                 [--session <id> | --resume <id>]
-                [--max-turns <n>] [--max-tool-calls <n>] [--login] [--logout <endpoint>] [--help]
+                [--login] [--mcp-login <name>]
+                [--logout <endpoint>] [--help]
 
 stdin:   one context, buffered to EOF (whole JSON context, else
          JSON-per-line; non-JSON lines become user messages)
@@ -70,22 +72,18 @@ options:
   --tool-timeout <dur> host override of settings.tools.timeout (default 120s);
                        a ms numeral or unit string ("30s", "5m"); a tool's
                        declared request is capped at tools.timeoutLimit (20m)
-  --tool-async        execute one message's tool calls concurrently
   --session <id>       persist under <settings>/${NAMES.sessionsDir}/
                        (the file name is date + sessionUUID + name — see
                        lib/agent/session.js; <id> stays the stable identity)
   --resume <id>        replay that session log first, then continue it
                        (an explicit id resumes anywhere: the cwd becomes the
                        session's own folder)
-  --max-turns <n>      FALLBACK runaway guard (for when the context window
-                       is unknown): provider requests per invocation (32)
-  --max-tool-calls <n> same fallback: tool executions per invocation (64)
-                       (the PRIMARY guard is context usage, settings.
-                       context.cap/context.turn — 90%/40%)
   --login              configure an endpoint with the interactive wizard, then exit
   --mcp-login <name>   sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
-  --help               show this text and exit
+  --help, -h           show this text and exit
+  --max-turns, --max-tool-calls, --tool-async
+                       unsupported; these flags fail instead of changing behavior
 
 exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
             4 provider error · 5 malformed input · 130 cancelled`;
@@ -101,6 +99,13 @@ const BOOL_FLAGS = ["no-tool-fork", "tool-async", "login"];
 async function main() {
   let args;
   try {
+    // Check the raw argv first: the shared parser short-circuits on --help.
+    // An explicitly supplied unsupported flag must never be silently accepted.
+    for (const argument of process.argv.slice(2)) {
+      if (["--max-turns", "--max-tool-calls", "--tool-async"].includes(argument)) {
+        throw new Error(`${argument} is unsupported: Agent has no turn/tool-call count or async tool-call mode`);
+      }
+    }
     args = parseFlags(process.argv.slice(2), { flags: FLAGS, bools: BOOL_FLAGS });
     if (args.session && args.resume) throw new Error("--session and --resume are mutually exclusive");
     if (typeof args.tools === "string" && args.tools !== "*") args.tools = args.tools.split(",").map((name) => name.trim()).filter(Boolean);
@@ -116,11 +121,11 @@ async function main() {
   const out = (event) => process.stdout.write(JSON.stringify(event) + "\n");
   const log = (line) => process.stderr.write(`${NAME}: ${line}\n`);
 
-  // Resume-anywhere (lib/cli/resume.js): an explicit --resume <id>
+  // Resume-anywhere (lib/app/cli/resume.js): an explicit --resume <id>
   // continues the session in ITS recorded folder — adopted before the
   // environment is built.
   try {
-    adoptResumeOrigin({
+    await adoptResumeOrigin({
       resume: args.resume,
       anonymous: ["0", "false", "anon"].includes(args.session),
     });
@@ -129,74 +134,86 @@ async function main() {
     process.exit(EXIT.usage);
   }
 
-  // Async construction belongs in Env.create(): the returned environment has
-  // its provider and tool registries ready for Agent.
-  const env = await Env.create();
-  if (args["mcp-login"]) {
-    try {
-      const name = args["mcp-login"];
-      await runMcpLogin(env, name);
-      log(`MCP signed in: ${name}`);
-      return;
-    } catch (err) { log(`MCP login failed: ${err.message}`); process.exitCode = EXIT.usage; return; }
+  // Discover the endpoint without exposing invocation credentials to a shared Env.
+  // The selection Env is released before the isolated override Env is acquired.
+  const overrides = args.url !== undefined || args.token !== undefined || args.timeout !== undefined;
+  if (overrides && (args.login || args.logout || args["mcp-login"])) {
+    throw new Error("--url, --token and --timeout cannot be combined with login/logout commands");
   }
-  if (args.login) {
+  let env = await Env.open(process.cwd());
+  if (args["mcp-login"] || args.login || args.logout) {
     try {
-      const result = await runLoginWizard(env);
-      log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
+      if (args["mcp-login"]) {
+        const name = args["mcp-login"];
+        await runMcpLogin(env, name);
+        log(`MCP signed in: ${name}`);
+      } else if (args.login) {
+        const result = await runLoginWizard(env);
+        log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
+      } else {
+        const result = env.logout(args.logout);
+        log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
+      }
       process.exitCode = EXIT.ok;
-      return;
     } catch (err) {
-      log(`login failed: ${err.message}`);
+      log(`${args.login ? "login" : args.logout ? "logout" : "MCP login"} failed: ${err.message}`);
       process.exitCode = EXIT.usage;
-      return;
+    } finally {
+      await env.close();
     }
+    return;
   }
-  if (args.logout) {
-    try {
-      const result = logoutEndpoint(env, args.logout);
-      log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
-      process.exitCode = EXIT.ok;
-      return;
-    } catch (err) {
-      log(`logout failed: ${err.message}`);
-      process.exitCode = EXIT.usage;
-      return;
-    }
-  }
-  // Resolve the --model combo AFTER providers load (needs the registry
-  // and known model lists): explicit combo, cached model match,
-  // provider-only (first available model), or bare model name.
-  let selection;
+  // Never pass --url into shared-Env selection: it may register an endpoint.
+  // For a new qualified URL endpoint, configure its protocol on the isolated
+  // Env and resolve there; existing endpoints retain their configured protocol.
   try {
-    selection = await selectEndpointModel(env, args);
+    let selection = await selectEndpointModel(env, { model: args.model });
+    const explicitEndpoint = args.url && typeof args.model === "string" && args.model.includes("/")
+      ? args.model.slice(0, args.model.indexOf("/")) : undefined;
+    const endpoint = selection?.slice(0, selection.indexOf("/")) ?? explicitEndpoint;
+    if (overrides) {
+      if (!endpoint || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(endpoint) || ["__proto__", "constructor", "prototype"].includes(endpoint)) {
+        throw new Error(selection ? "--url, --token and --timeout require a resolvable endpoint" : "Please load a model with --model <endpoint>/<model> before using --url, --token or --timeout");
+      }
+      const known = env.settings.providers?.[endpoint];
+      // Unknown endpoint names cannot be guessed from URL alone. A named
+      // provider preset (such as ollama) supplies an explicit protocol.
+      const preset = env.loginPresets().find((item) => item.name === endpoint);
+      if (!known?.provider && !known?.url && !preset) throw new Error(`unknown endpoint ${JSON.stringify(endpoint)}; configure its provider first`);
+      const provider = !known?.provider && !known?.url ? { provider: preset.provider ?? endpoint } : {};
+      await env.close();
+      env = await Env.open(process.cwd(), { settings: {
+        providers: { [endpoint]: {
+          ...provider,
+          ...(args.url !== undefined ? { url: args.url } : {}),
+          ...(args.token !== undefined ? { auth: { token: args.token } } : {}),
+          ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
+        } },
+      }, init: { models: false } });
+      selection = await selectEndpointModel(env, { model: selection ?? args.model });
+    }
+    args.model = selection;
+    if (!args.model) throw new Error("Please load a model with --model <endpoint>/<model>");
   } catch (err) {
     log(err.message);
-    process.exit(EXIT.usage);
-  }
-  args.model = selection;
-  if (!args.model) {
-    log("Please load a model with --model <endpoint>/<model>");
-    process.exit(EXIT.usage);
+    await env.close();
+    process.exitCode = EXIT.usage;
+    return;
   }
 
-  const context = await readContextFromStdin();
+  let context;
+  try { context = await readContextFromStdin(); }
+  catch (error) { await env.close(); throw error; }
 
   let agent;
   try {
-    agent = new Agent({
+    agent = await Agent.create({
       env,
       model: args.model,
-      url: args.url,
-      timeout: args.timeout,
-      settings: args.token ? { auth: { token: args.token } } : undefined,
       tools: args.tools,
-      maxTurns: args["max-turns"],
-      maxToolCalls: args["max-tool-calls"],
       toolCall: {
         fork: !args["no-tool-fork"],
         timeout: args["tool-timeout"],
-        async: args["tool-async"] === true,
       },
       contextId: args.session ?? args.resume,
       context,
@@ -211,11 +228,17 @@ async function main() {
     agent.onEvent(Agent.EVENT.LOG, log);
   } catch (err) {
     log(err.message);
-    process.exit(err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage);
+    try { await agent?.close(); }
+    finally { await env.close(); }
+    process.exitCode = err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage;
+    return;
   }
   if (!agent.model) {
     log("no model selected; use --model or provider settings");
-    process.exit(EXIT.usage);
+    try { await agent.close(); }
+    finally { await env.close(); }
+    process.exitCode = EXIT.usage;
+    return;
   }
 
   // Cancellation: graceful async kill — the loop persists the partial
@@ -229,12 +252,16 @@ async function main() {
     },
   });
 
-  const terminal = await agent.run();
-  disarm();
-  close({ env, agent });
-
+  let terminal;
+  try {
+    terminal = await agent.run();
+  } finally {
+    disarm();
+    try { await agent.close(); }
+    finally { await env.close(); }
+  }
   if (terminal?.usage) log(usageSummary(terminal.usage));
-  process.exit(exitCodeFor(terminal));
+  process.exitCode = exitCodeFor(terminal);
 }
 
 main().catch((err) => {

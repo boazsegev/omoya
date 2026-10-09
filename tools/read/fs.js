@@ -24,15 +24,15 @@ export function readBudgets(context) {
 }
 
 export function readScope(context) {
-  const cwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
-  const project = context?.env?.cwd ?? context?.agent?.env?.cwd ?? cwd;
+  const cwd = context?.agent?.folder ?? context?.env?.folder ?? context?.agent?.env?.folder ?? process.cwd();
+  const project = context?.env?.folder ?? context?.agent?.env?.folder ?? cwd;
   return { cwd: resolve(cwd), project: resolve(project), boundary: resolve(cwd) };
 }
 
 /** Reads may use either the Agent tree or the Env project tree, never a third tree. */
 export function selectReadBoundary(path, scope) {
   const target = resolve(scope.cwd, path);
-  const inside = (root) => target === root || target.startsWith(`${root}${sep}`);
+  const inside = (root) => target === root || target.startsWith(root === sep ? root : `${root}${sep}`);
   scope.boundary = inside(scope.cwd) ? scope.cwd : scope.project;
   if (!inside(scope.boundary)) throw new Error("path traversal refused: read path escapes the agent and project boundary");
 }

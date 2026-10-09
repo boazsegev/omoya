@@ -18,7 +18,8 @@
 
 import { basename } from "node:path";
 import Agent from "../../lib/agent.js";
-import CLI from "../../lib/cli.js";
+import { App } from "../../lib/app.js";
+const { CLI } = App;
 const { Env, NAMES } = Agent;
 
 // The invoked name: argv[1] holds the wrapper's file name; a bare
@@ -26,12 +27,14 @@ const { Env, NAMES } = Agent;
 // fills in (never a stale literal).
 const NAME = basename(process.argv[1] ?? "") || `${NAMES.cliPrefix}-skills`;
 
-const USAGE = `Usage: ${NAME} [name...]
+const USAGE = `Usage: ${NAME} [--debug] [name...]
+       ${NAME} --help
 Use when loading domain knowledge: no args prints the merged skill catalog, names print full skill bodies.
 
   ${NAME}            Print the skill catalog: one '- name — description' line per skill
   ${NAME} --debug    Same catalog with the effective source appended
   ${NAME} <name...>  Print the complete content of one or more skills
+  ${NAME} --help     Show this text and exit (-h also works)
 
 Skill roots ACCUMULATE: this package's own \`skills/\` folder, always,
 plus \`settings.skills\` (string or array), plus $${NAMES.skillsEnv}
@@ -49,11 +52,11 @@ async function main() {
   const debug = args.includes("--debug");
   const names = [...new Set(args.filter((arg) => arg !== "--debug").map((arg) => arg.trim()).filter(Boolean))];
   // The factory returns a ready environment; skill lookup is synchronous after it.
-  const env = await Env.create(undefined, { models: false }); // never reads the model catalog
+  const env = await Env.open(process.cwd());
   try {
     const skills = env.skills();
     if (names.length === 0) {
-      process.stdout.write(Agent.skillCatalog(skills, { debug }));
+      process.stdout.write(env.skillCatalog({ debug }));
       return;
     }
     const unknown = names.filter((name) => !skills.has(name));
@@ -62,11 +65,11 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    const sections = names.map((name) => Agent.skillSection(skills.get(name)));
+    const sections = names.map((name) => env.skillSection(skills.get(name)));
     process.stdout.write(`${sections.join("\n\n")}\n`);
   } finally {
     // Every executable closes through the shared teardown boundary.
-    CLI.close({ env });
+    await CLI.close({ env });
   }
 }
 

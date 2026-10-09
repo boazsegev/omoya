@@ -20,10 +20,10 @@ describe("bash tool — current API execution boundaries", () => {
   async function packageEnv() {
     mkdirSync(ROOT, { recursive: true });
     const cwd = resolve(ROOT);
-    return Env.create({ dir: cwd, cwd, settingsDir: cwd, settings: {
-      "env-refuse": [inheritedKey],
+    return Env.open(cwd, { dir: cwd, settingsDir: cwd, settings: {
+      env: { [inheritedKey]: false },
       providers: { fixture: { provider: "test", url: "test://script" } },
-    } }, { providers: false, models: false });
+    }, init: { providers: false, models: false } });
   }
 
   test("registry calls use live child environment policy after tool refresh", async () => {
@@ -36,7 +36,7 @@ describe("bash tool — current API execution boundaries", () => {
       expect(info.sandbox).toBe(true);
       expect(info.safe).toBe(false);
       expect(await env.toolCall("bash", { command, env: { [explicitKey]: "configured" } }, { env })).toBe("absent:configured");
-      env.settings["env-refuse"] = [];
+      delete env.settings.env[inheritedKey];
       await env.toolCall("tool-refresh", {});
       expect(await env.toolCall("bash", { command }, { env })).toBe("must-not-leak:absent");
     } finally {
@@ -57,7 +57,7 @@ describe("bash tool — current API execution boundaries", () => {
       [...TOOLCALL(0, "bash-api", "bash", { command, env: { [explicitKey]: "configured" } }), { type: "done" }],
       [...TEXT(0, "finished"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "fixture/m", createIO: () => io });
+    const agent = await Agent.create({ env, model: "fixture/m", createIO: () => io });
     agent.onEvent(Agent.EVENT.TOOL_DATA, ({ chunk }) => chunks.push(chunk));
     try {
       expect((await agent.run()).type).toBe("done");
@@ -118,13 +118,13 @@ describe("bash tool", () => {
     mkdirSync(folder, { recursive: true });
     writeFileSync(`${project}/project.txt`, "project");
     writeFileSync(`${folder}/agent.txt`, "agent");
-    const context = { env: { cwd: project }, agent: { folder } };
+    const context = { env: { folder: project }, agent: { folder } };
     expect(await bash({ command: "cat agent.txt" }, context)).toBe("agent");
     expect(await bash({ command: "cat ../project.txt" }, context)).toBe("project");
     const separate = `${ROOT}/separate`;
     mkdirSync(separate);
     writeFileSync(`${separate}/own.txt`, "own");
-    const embedded = { env: { cwd: project }, agent: { folder: separate } };
+    const embedded = { env: { folder: project }, agent: { folder: separate } };
     expect(await bash({ command: "cat own.txt && cat ../project/project.txt" }, embedded)).toBe("ownproject");
     await expect(bash({ command: "cat ../../outside.txt" }, context)).rejects.toThrow(/^Keep every visible path/);
   });

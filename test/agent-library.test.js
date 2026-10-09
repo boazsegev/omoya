@@ -8,11 +8,10 @@ import { rmSync, readFileSync, readdirSync } from "node:fs";
 import { providersLoad, toolsLoad } from "./env-internals.js";
 
 const transpiler = new Bun.Transpiler({ loader: "js" });
-import API from "../lib/index.js";
+import API from "../lib/agent.js";
 
-const Env = API.Env;
-const Agent = API.Agent;
-const Context = API.Context;
+const Agent = API;
+const { Env, Context } = Agent;
 const { MessageType, messageUser } = Context;
 import { readFileSync as readFs } from "node:fs";
 import { cli as cliPath } from "./bin-names.js";
@@ -55,12 +54,14 @@ async function libraryRun({ url, callbacks = {}, session } = {}) {
   // dir AND cwd isolated from the real repo root: resolveSystemPrompt()'s
   // package-fallback AND project-local AGENTS.md layers must not seed
   // an extra system message into these exact-context-sequence assertions.
-  const env = new Env({ dir: ROOT, cwd: ROOT, settings: { sessions: resolve(ROOT) } });
+  const env = await Env.open(ROOT, { dir: ROOT, settingsDir: ROOT, settings: {
+    sessions: resolve(ROOT), providers: { ollama: { provider: "ollama", url, models: { m: {} } } },
+  }, init: { providers: false, tools: false, detect: false, models: false } });
+  await env.ready();
   await providersLoad(env, { dirs: ["./providers"], detect: false });
-  env._endpoints.ollama = { provider: "ollama", url };
   await toolsLoad(env, { dirs: ["./tools"] }); // explicit root keeps the proof self-contained
-  const agent = new Agent({
-    env, model: "ollama/m", url,
+  const agent = await Agent.create({
+    env, model: "ollama/m",
     context: [messageUser("read it")],
     ...session,
   });
@@ -79,8 +80,8 @@ async function libraryRun({ url, callbacks = {}, session } = {}) {
 
 describe("library namespaces", () => {
   test("publishes each module namespace directly without environment globals", async () => {
-    expect(API.name).toBeUndefined();
-    expect(API.Agent.name).toBe("Agent");
+    expect(API.name).toBe("Agent");
+    expect(API.Agent).toBeUndefined();
     expect(API.Env.name).toBe("Env");
     expect(API.IO.name).toBe("IO");
     expect(API.Context.name).toBe("Context");
@@ -89,33 +90,36 @@ describe("library namespaces", () => {
     expect(globalThis[`${NAMES.Namespace}Env`]).toBeUndefined();
     expect(globalThis.Env).toBeUndefined();
     expect(API.IO.IO).toBeUndefined();
-    expect(typeof API.Env.create).toBe("function");
+    expect(typeof API.Env.open).toBe("function");
     expect(typeof API.Context.messageUser).toBe("function");
     expect(API.CLI).toBeUndefined();
     expect(API.Markdown).toBeUndefined();
     expect(typeof API.Jobs.run).toBe("function");
-    const core = Bun.spawnSync([process.execPath, "-e", 'import AI from "./lib/index.js"; process.stdout.write(String(AI.App))'], { cwd: process.cwd() });
+    const core = Bun.spawnSync([process.execPath, "-e", 'import AI from "./lib/agent.js"; process.stdout.write(String(AI.App))'], { cwd: process.cwd() });
     expect(core.exitCode).toBe(0);
     expect(core.stdout.toString()).toBe("undefined");
-    // ONE export — the default; importing names it (or `import * as`).
-    const CoreModule = await import("../lib/index.js");
+    // Core exports only default and named Agent; helpers live on Agent.
+    const CoreModule = await import("../lib/agent.js");
     expect(CoreModule.default).toBe(API);
-    expect(Object.keys(CoreModule)).toEqual(["default"]);
+    expect(CoreModule.Agent).toBe(Agent);
     expect(CoreModule.default.NAMES).toBe(NAMES);
-    expect(CoreModule.default.Agent).toBe(Agent);
-    const FullModule = await import("../lib/index_app.js");
+    expect(CoreModule.default.Agent).toBeUndefined();
+    const FullModule = await import("../lib/app.js");
     const { default: FullAPI } = FullModule;
-    expect(Object.keys(FullModule)).toEqual(["default"]);
+    expect(FullModule.App).toBe(FullAPI.App);
     // A FRESH application object over the same core façades — Agent remains
     // core-only no matter which entry point loads first.
     expect(FullAPI).not.toBe(API);
-    expect(FullAPI.Env).toBe(API.Env);
-    expect(FullAPI.Agent).toBe(API.Agent);
-    expect(FullAPI.NAMES).toBe(NAMES);
+    expect(Object.keys(FullModule).sort()).toEqual(["Agent", "App", "default"]);
+    expect(Object.keys(FullAPI).sort()).toEqual(["Agent", "App"]);
+    expect(Object.isFrozen(FullAPI)).toBe(true);
+    expect(FullAPI.Agent).toBe(API);
+    expect(FullAPI.Agent.NAMES).toBe(NAMES);
     expect(API.App).toBeUndefined();
-    expect(typeof FullAPI.CLI.parseFlags).toBe("function");
+    expect(FullAPI.CLI).toBeUndefined();
+    expect(typeof FullAPI.App.CLI.parseFlags).toBe("function");
     expect(typeof FullAPI.App.Markdown.renderMarkdown).toBe("function");
-    expect(FullAPI.Jobs).toBe(API.Jobs);
+    expect(FullAPI.Agent.Jobs).toBe(API.Jobs);
     expect(typeof FullAPI.App.TUI.createRepl).toBe("function");
     expect(typeof FullAPI.App.Web.serve).toBe("function");
     // Presentation lives under App only — no top-level aliases.
@@ -126,43 +130,43 @@ describe("library namespaces", () => {
 });
 
 describe("Agent.folderSet: agent-local tool root", () => {
-  test("accepts existing folders outside env.cwd for embedded agents without changing the environment", () => {
+  test("accepts existing folders outside env.folder for embedded agents without changing the environment", async () => {
     const root = mkdtempSync("./ai-tmp/agent-folder-");
     const child = `${root}/project`;
     mkdirSync(child);
     writeFileSync(`${root}/plain-file`, "not a folder");
-    const env = new Env({ dir: ROOT, cwd: root, settings: {} });
-    const agent = new Agent({ env });
+    const env = await Env.open(root, { dir: ROOT, settings: {} });
+    const agent = await Agent.create({ env });
     agent.folder = "project";
     expect(agent.folder).toBe(resolve(child));
-    expect(env.cwd).toBe(resolve(root));
+    expect(env.folder).toBe(resolve(root));
     expect(() => (agent.folder = "missing")).toThrow(/does not exist/);
     const separate = mkdtempSync("./ai-tmp/agent-separate-");
     agent.folder = resolve(separate);
     expect(agent.folder).toBe(resolve(separate));
-    expect(env.cwd).toBe(resolve(root));
+    expect(env.folder).toBe(resolve(root));
     expect(() => (agent.folder = "plain-file")).toThrow(/not a folder/);
     agent.folder = undefined;
     expect(agent.folder).toBe(resolve(root));
   });
 
-  test("childCreate inherits its parent write root and rejects direct widening", () => {
+  test("childCreate inherits its parent write root and rejects direct widening", async () => {
     const root = mkdtempSync("./ai-tmp/agent-parent-");
     mkdirSync(`${root}/area/deep`, { recursive: true });
     mkdirSync(`${root}/sibling`);
-    const env = new Env({ dir: ROOT, cwd: root, settings: {} });
-    const manager = new Agent({ env, folder: "area", createIO: () => null });
-    const inherited = manager.childCreate({ name: "inherit" });
+    const env = await Env.open(root, { dir: ROOT, settings: {} });
+    const manager = await Agent.create({ env, folder: "area", createIO: () => null });
+    const inherited = await manager.childCreate({ name: "inherit" });
     expect(inherited.folder).toBe(resolve(root, "area"));
     expect(() => (inherited.folder = undefined)).not.toThrow();
     expect(inherited.folder).toBe(resolve(root, "area"));
     expect(() => (inherited.folder = "sibling")).toThrow(/parent folder/);
     expect(() => (inherited.folder = resolve(root))).toThrow(/parent folder/);
     expect(inherited.folder).toBe(resolve(root, "area"));
-    expect(() => manager.childCreate({ name: "wide", folder: "sibling" })).toThrow(/parent folder/);
-    expect(() => manager.childCreate({ name: "outside", folder: resolve(root) })).toThrow(/parent folder/);
+    await expect(manager.childCreate({ name: "wide", folder: "sibling" })).rejects.toThrow(/parent folder/);
+    await expect(manager.childCreate({ name: "outside", folder: resolve(root) })).rejects.toThrow(/parent folder/);
     expect(manager.children.map((child) => child.name)).toEqual(["inherit"]);
-    const narrow = manager.childCreate({ name: "narrow", folder: "area/deep" });
+    const narrow = await manager.childCreate({ name: "narrow", folder: "area/deep" });
     expect(narrow.folder).toBe(resolve(root, "area/deep"));
   });
 });
@@ -177,8 +181,11 @@ describe("library binding: engine over callbacks only", () => {
     expect(requests).toHaveLength(2); // tool loop ran
     expect(events.map((e) => e.type)).toContain("tool_call_start");
     // context held in-process, editable through the Context surface
-    expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3, 4, 3]);
-    expect(agent.context.at(2).callId).toBeDefined();
+    const conversation = agent.context.messages().filter((message) => typeof message.type === "number");
+    expect(conversation.map((message) => message.type)).toEqual([2, 3, 4, 3]);
+    expect(conversation[2].callId).toBeDefined();
+    expect(agent.context.messages().filter((message) => message.type === "io-root")).toHaveLength(1);
+    expect(requests.every((request) => !JSON.stringify(request.messages).includes("io-root"))).toBe(true);
   });
 
   test("parity with the CLI binding: same scenario, same terminal + context", async () => {
@@ -202,12 +209,13 @@ describe("library binding: engine over callbacks only", () => {
     expect(libRun.terminal.usage).toEqual(cliDone.usage);
     // context parity: library in-memory context == CLI's request-2 wire context
     // (excluding a leading "system" role either side may carry — the
-    // spawned CLI's env._dir is the real package folder, unlike the
+    // spawned CLI's harness folder is the real package folder, unlike the
     // library run's isolated one above, so only IT picks up a fresh
     // session's system-prompt prefill; this test is about tool-loop
     // parity, not that)
     const cliWire = cli.requests[1].messages.map((m) => m.role).filter((r) => r !== "system");
-    const libTypes = libRun.agent.context.messages().slice(0, -1).map((m) =>
+    expect(libRun.agent.context.messages().some((message) => message.type === "io-root")).toBe(true);
+    const libTypes = libRun.agent.context.messages().filter((message) => typeof message.type === "number").slice(0, -1).map((m) =>
       ({ 1: "system", 2: "user", 3: "assistant", 4: "tool" })[m.type]).filter((r) => r !== "system");
     expect(libTypes).toEqual(cliWire);
   });
@@ -236,8 +244,13 @@ describe("library binding: engine over callbacks only", () => {
     expect(agent.context).toBeInstanceOf(Context);
     const records = readFileSync(agent.context.file, "utf8").trim().split("\n").map(JSON.parse)
     .filter((record) => record?.type !== "session-metadata");
-    expect(records.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
-    expect(records).toHaveLength(4); // seed + 3 loop messages
+    const roots = records.filter((record) => record.type === "io-root");
+    expect(roots).toHaveLength(1);
+    expect(roots[0]).toMatchObject({ model: "ollama/m", tools: expect.any(String) });
+    const conversation = records.filter((record) => typeof record.type === "number");
+    expect(conversation.every((message) => message.op === undefined)).toBe(true);
+    expect(conversation).toHaveLength(4); // seed + 3 loop messages
+    expect(records).toHaveLength(5); // the persisted IO root is not provider conversation
     rmSync(ROOT, { recursive: true, force: true });
   });
 

@@ -10,10 +10,11 @@ const PROGRAM = "{{program}}";
 const TEMPLATE = `${PROGRAM} — interactive REPL front end
 
 usage: ${PROGRAM} [--model <endpoint>/<model>] [--url <url>]
-              [--token <key>] [--timeout <ms>] [--tools <list>]
+              [--token <key>] [--timeout <dur>] [--tools <list>]
               [--session <id> | --resume <id>] [--safe]
-              [--max-turns <n>] [--max-tool-calls <n>] [--login] [--logout <endpoint>]
-              [--init [--force]] [--help]
+              [--login] [--mcp-login <name>] [--logout <endpoint>]
+              [--init [--force]] [--list]
+              [--serve [--host <host>] [--port <port>]] [--help]
 
 stdin:   interactive lines, one user message per line (piped) or one
          composed multi-line message (real terminal); EOF exits.
@@ -118,7 +119,6 @@ options:
                        a ms numeral or unit string ("30s", "5m"). Tools
                        may request a schema-declared timeout; Agent extracts
                        and caps it at settings.tools.timeoutLimit (default 20m)
-  --tool-async        execute one message's tool calls concurrently
   --safe              safe mode: publish and execute ONLY read-only tools
                       (schemas marked safe: true) — exploration and planning
                       without mutation; unsafe calls are refused with a
@@ -140,11 +140,10 @@ options:
                        native terminal scrollback; alt = the
                        alternate-screen TUI; line = the piped cooked-mode
                        loop
-  --max-turns <n>      FALLBACK runaway guard (for when the context window
-                       is unknown): provider requests per turn (32)
-  --max-tool-calls <n> same fallback: tool executions per turn (64)
-                       (the PRIMARY guard is context usage, settings.
-                       context.cap/context.turn — 90%/40%)
+  --max-turns <n>, --max-tool-calls <n>, --tool-async
+                       unavailable: no turn/tool-call count or async
+                       tool-call mode is implemented; these flags fail
+                       instead of silently changing behavior
   --login              configure an endpoint with the interactive wizard, then exit
   --mcp-login <name>   sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
@@ -154,7 +153,11 @@ options:
                        overwrites an existing file. Then exit
   --list               print one available public model per line as
                        <endpoint>/<model>, then exit
-  --help               show this text and exit
+  --serve              run the Web app instead of the interactive TUI;
+                       stays attached until the Web server stops
+  --host <host>        Web bind host (with --serve)
+  --port <port>        Web port (default: 9900; with --serve)
+  --help, -h           show this text and exit
 
 cancellation: SIGINT during a response kills the in-flight request;
               the partial assistant message renders and persists,

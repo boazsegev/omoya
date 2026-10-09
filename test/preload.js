@@ -20,16 +20,16 @@
 //      (any incidental temp usage) are redirected too — even a test
 //      that exercises DEFAULT resolution touches nothing real. Tests
 //      that exercise a variable set it explicitly per test.
-//   3. ai-tmp hygiene: ./ai-tmp is temporary BY DEFINITION — when the
-//      run finishes with EVERY test passing, every live artifact in
-//      it is deleted (a failing run keeps its artifacts for
-//      debugging). Mechanic: bun test never fires exit/beforeExit
+//   3. ai-tmp hygiene: on success, remove only THIS test process's
+//      sandbox. Sweeping all of ai-tmp here races other concurrently
+//      running test processes and deletes their live fixture folders.
+//      Failed runs keep their sandbox for debugging. Mechanic: bun test never fires exit/beforeExit
 //      handlers, but a preload-registered afterAll DOES fire once at
 //      the very end — it just carries no result, so `test`/`it` and
 //      the lifecycle hooks are WRAPPED to count failures as they
 //      throw (the suite uses plain test/describe only). The folder
 //      itself stays (tests mkdtemp into it).
-import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { NAMES } from "../lib/namespace.js";
@@ -90,14 +90,18 @@ for (const key of ["test", "it", "beforeAll", "beforeEach", "afterAll", "afterEa
 const { Env } = await import("../lib/env.js");
 let envsBefore = new Set();
 originalBeforeEach(() => { envsBefore = new Set(Object.values(Env.envs)); });
-originalAfterEach(() => {
-  for (const env of Object.values(Env.envs)) if (!envsBefore.has(env)) env.close();
+originalAfterEach(async () => {
+  const created = Object.values(Env.envs).filter((env) => !envsBefore.has(env));
+  const results = await Promise.allSettled(created.map((env) => env.close()));
+  const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+  if (errors.length) {
+    failedTests++;
+    throw errors.length === 1 ? errors[0] : new AggregateError(errors, "Test Envs failed to close");
+  }
 });
 originalAfterAll(() => {
   if (failedTests > 0) return; // a failing run keeps its artifacts
   try {
-    for (const entry of readdirSync(TEST_TMP)) {
-      rmSync(join(TEST_TMP, entry), { recursive: true, force: true });
-    }
+    rmSync(SANDBOX, { recursive: true, force: true });
   } catch { /* a missing folder or a locked file never fails the run */ }
-}, 120_000); // many fixture folders on a synced disk can take longer than the default hook timeout
+}, 120_000); // synced folders can take longer than the default hook timeout

@@ -10,11 +10,11 @@ import { binName, cli } from "./bin-names.js";
 
 mkdirSync("./ai-tmp", { recursive: true });
 
-async function run(args, { tools, env = {}, mcpSettings } = {}) {
+async function run(args, { tools, env = {}, mcpSettings, cwd } = {}) {
   const settingsDir = mkdtempSync("./ai-tmp/ai-tool-cli-");
-  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: { folders: [tools] }, ...(mcpSettings ? { mcp: mcpSettings } : {}) }));
-  const proc = Bun.spawn(["bun", cli.tool, ...args], {
-    stdout: "pipe", stderr: "pipe",
+  if (tools) writeFileSync(`${settingsDir}/settings.json`, JSON.stringify({ tools: { folders: { [`${process.cwd()}/${tools}`]: true } }, ...(mcpSettings ? { mcp: mcpSettings } : {}) }));
+  const proc = Bun.spawn(["bun", `${process.cwd()}/${cli.tool}`, ...args], {
+    stdout: "pipe", stderr: "pipe", cwd,
     env: { ...process.env, [NAMES.settingsEnv]: settingsDir, ...env },
   });
   const [stdout, stderr, exit] = await Promise.all([
@@ -39,7 +39,7 @@ describe("the tool CLI wrapper", () => {
     const tools = mkdtempSync("./ai-tmp/ai-tool-env-import-");
     writeFileSync(`${tools}/explicit.js`, `
 import Env from "../../lib/env.js";
-const loadedAt = typeof Env.create;
+const loadedAt = typeof Env.open;
 export function explicit() { return loadedAt; }
 export function toolDescription() {
   return { explicit: { description: "explicit Env import probe", inputSchema: { type: "object", properties: {} } } };
@@ -53,8 +53,8 @@ export function toolDescription() {
 
   test("closes real MCP servers after successful and failed tool calls", async () => {
     const tools = mkdtempSync("./ai-tmp/ai-tool-cleanup-");
-    const marker = `${tools}/closed`;
-    const server = `${tools}/server.js`;
+    const marker = `${process.cwd()}/${tools}/closed`;
+    const server = `${process.cwd()}/${tools}/server.js`;
     writeFileSync(server, `
 import { writeFileSync } from "node:fs";
 process.stdin.setEncoding("utf8");
@@ -102,19 +102,33 @@ export function toolDescription() {
   });
 
   test("a JSON OBJECT passes through as-is: read '{\"path\":...}'", async () => {
-    const { stdout, exit } = await run(["read", '{"path":"README.md"}']);
+    const { stdout, exit } = await run(["read", JSON.stringify({ path: `${process.cwd()}/README.md` })]);
     expect(exit).toBe(0);
     expect(stdout).toContain("A transparent agent harness");
+  });
+
+  test("direct calls accept paths outside the launch folder without a traversal refusal", async () => {
+    const folder = mkdtempSync("./ai-tmp/ai-tool-from-");
+    const source = mkdtempSync("./ai-tmp/ai-tool-source-");
+    writeFileSync(`${source}/source.txt`, "outside launch folder\n");
+    const result = await run(["read", JSON.stringify({ path: `${process.cwd()}/${source}/source.txt`, annotate: false })], { cwd: folder });
+    expect(result.exit).toBe(0);
+    expect(result.stdout.trim()).toBe("outside launch folder");
+    const confined = await run(["read", JSON.stringify({ path: `${process.cwd()}/${source}/source.txt` })], {
+      cwd: folder, env: { [NAMES.toolWorkerEnv]: "1", [NAMES.toolRootEnv]: `${process.cwd()}/${folder}` },
+    });
+    expect(confined.exit).toBe(2);
+    expect(confined.stderr).toContain("path traversal refused");
   });
 
   test("shell-style args support arrays and spaced or joined object values", async () => {
     const array = await run(["skill", "core"]);
     expect(array.exit).toBe(0);
     expect(array.stdout.trim()).not.toBe("");
-    const spaced = await run(["read", "path:", "README.md"]);
+    const spaced = await run(["read", "path:", `${process.cwd()}/README.md`]);
     expect(spaced.exit).toBe(0);
     expect(spaced.stdout).toContain("A transparent agent harness");
-    const joined = await run(["read", "path:README.md"]);
+    const joined = await run(["read", `path:${process.cwd()}/README.md`]);
     expect(joined.exit).toBe(0);
     expect(joined.stdout).toContain("A transparent agent harness");
   });
@@ -147,31 +161,37 @@ export function toolDescription() {
     expect(unknown.stderr).toContain("Unknown skills: not json");
   });
 
-  test("skill-resource reads and exports through the real scanned tool CLI", async () => {
+  test("resource reads and copies through the real scanned tool CLI", async () => {
     const root = mkdtempSync("./ai-tmp/resource-cli-");
     mkdirSync(`${root}/web`);
     writeFileSync(`${root}/web/SKILL.md`, "---\nname: web\ndescription: test\n---\nbody\n");
     writeFileSync(`${root}/web/example.js`, "exact example\n");
     const options = { env: { [NAMES.skillsEnv]: root } };
-    const listed = await run(["skill-resource", JSON.stringify({ name: "web" })], options);
+    const listed = await run(["resource", JSON.stringify({ name: "web", list: true })], options);
     expect(listed.exit).toBe(0);
     expect(listed.stdout).toContain("example.js");
-    const read = await run(["skill-resource", JSON.stringify({ name: "web", path: "example.js" })], options);
+    const read = await run(["resource", JSON.stringify({ name: "web", path: "example.js" })], options);
     expect(read.exit).toBe(0);
-    expect(read.stdout.trim()).toBe("exact example");
-    const saved = await run(["skill-resource", JSON.stringify({ name: "web", path: "example.js", target: `${root}/saved.js` })], options);
+    expect(read.stdout).toContain("skill web:\nexact example");
+    const saved = await run(["resource", JSON.stringify({ name: "web", path: "example.js", list: true, target: `${process.cwd()}/${root}/saved.js` })], options);
     expect(saved.exit).toBe(0);
     expect(readFileSync(`${root}/saved.js`, "utf8")).toBe("exact example\n");
+    const copied = await run(["resource", JSON.stringify({ name: "web", list: true, target: `${process.cwd()}/${root}/copied` })], options);
+    expect(copied.exit).toBe(0);
+    expect(readFileSync(`${root}/copied/example.js`, "utf8")).toBe("exact example\n");
+    const defaultRoot = await run(["resource", JSON.stringify({ name: "web", list: false, target: null })], options);
+    expect(defaultRoot.exit).toBe(0);
+    expect(defaultRoot.stdout).toContain("example.js");
   });
 
   test("nested read queries and read.target execute through the real CLI", async () => {
     const root = mkdtempSync("./ai-tmp/read-query-cli-");
     writeFileSync(`${root}/source.txt`, "one\nTODO\nthree");
-    const query = { path: `${root}/source.txt`, lines: { from: -2 }, annotate: false };
+    const query = { path: `${process.cwd()}/${root}/source.txt`, lines: { from: -2 }, annotate: false };
     const selected = await run(["read", JSON.stringify(query)]);
     expect(selected.exit).toBe(0);
     expect(selected.stdout.trim()).toBe("TODO\nthree");
-    const saved = await run(["read", JSON.stringify({ ...query, annotate: true, target: `${root}/out.txt` })]);
+    const saved = await run(["read", JSON.stringify({ ...query, annotate: true, target: `${process.cwd()}/${root}/out.txt` })]);
     expect(saved.exit).toBe(0);
     expect(readFileSync(`${root}/out.txt`, "utf8")).toBe("TODO\nthree");
   });

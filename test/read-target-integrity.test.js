@@ -9,7 +9,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 function setup(files, settings = {}) {
   mkdirSync(ROOT, { recursive: true });
   for (const [name, bytes] of Object.entries(files)) writeFileSync(`${ROOT}/${name}`, bytes);
-  return { env: { cwd: ROOT, settings } };
+  return { env: { folder: ROOT, settings } };
 }
 
 function saved(name) { return readFileSync(`${ROOT}/${name}`); }

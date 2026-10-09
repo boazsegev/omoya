@@ -1,5 +1,6 @@
 // Proof for IO's overall, connection, and stuck-model timeouts.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { Context } from "../lib/context.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
@@ -9,9 +10,9 @@ import { bodyBytes } from "../lib/io/sanitize.js";
 import { providerAdd, providerOf } from "./env-internals.js";
 
 let dir, env;
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "io-time-")));
-  env = new Env({ dir, cwd: dir });
+  env = await Env.open(dir, { dir });
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -27,19 +28,22 @@ function fakeProvider(hooks = {}) {
   };
 }
 
-function makeIO({ Protocol = fakeProvider(), environment = env, endpoint = {}, ...options } = {}) {
+function makeIO({ Protocol = fakeProvider(), environment = env, endpoint = {}, timeout, connectTimeout, stuckTimeout } = {}) {
   if (!providerOf(environment, "fake")) providerAdd(environment, "fake", Protocol);
-  environment._endpoints.fake = {
+  environment.settings.providers.fake = {
     provider: "fake",
     url: "http://fake",
-    ...(environment._endpoints.fake ?? {}),
+    ...(environment.settings.providers.fake ?? {}),
     ...endpoint,
+    ...(timeout === undefined ? {} : { timeout }),
+    ...(connectTimeout === undefined ? {} : { connectTimeout }),
+    ...(stuckTimeout === undefined ? {} : { stuckTimeout }),
   };
-  return new IO({ env: environment, model: "fake/m", ...options });
+  return new IO({ env: environment, model: "fake/m" });
 }
 
 const hangUntilAbort = (connection) => new Promise((_, reject) => {
-  connection.aiio.requestSignal.addEventListener("abort", () => reject(connection.aiio.requestSignal.reason));
+  connection.signal.addEventListener("abort", () => reject(connection.signal.reason));
 });
 
 describe("IO timeouts: the three-timeout model", () => {
@@ -57,9 +61,9 @@ describe("IO timeouts: the three-timeout model", () => {
     expect(aiio.stuckTimeout).toBe(90_000);
   });
 
-  test("endpoint settings carry timeouts", () => {
+  test("endpoint settings carry timeouts", async () => {
     env.close();
-    const configured = new Env({ dir, cwd: dir, settings: {
+    const configured = await Env.open(dir, { dir, settings: {
       providers: { fake: { provider: "fake", url: "http://fake", stuckTimeout: "45s", timeout: "2h" } },
     } });
     const aiio = makeIO({ environment: configured });
@@ -73,7 +77,7 @@ describe("IO timeouts: the three-timeout model", () => {
       connectTimeout: 30, timeout: 60_000, stuckTimeout: 60_000,
     });
     const message = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-    const terminal = await aiio.write(message);
+    const terminal = await aiio.write(new Context({ messages: message }));
     const budget = connectBudget(30, bodyBytes({ context: message }));
     expect(terminal).toMatchObject({ type: "error", kind: "network" });
     expect(terminal.error).toContain(`connection timeout after ${budget}ms`);
@@ -90,7 +94,7 @@ describe("IO timeouts: the three-timeout model", () => {
       }),
       connectTimeout: 30, timeout: 60_000, stuckTimeout: 60_000,
     });
-    expect((await aiio.write([{ type: 2, content: [{ type: "text", text: "x".repeat(200) }] }])).type).toBe("done");
+    expect((await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "x".repeat(200) }] }] }))).type).toBe("done");
   });
 
   test("stuck model timeout resets after every native message", async () => {
@@ -104,22 +108,22 @@ describe("IO timeouts: the three-timeout model", () => {
     let index = 0;
     const slowRead = async () => { await Bun.sleep(40); return script[index++] ?? null; };
     const aiio = makeIO({ Protocol: fakeProvider({ read: slowRead }), stuckTimeout: 90, timeout: 60_000, connectTimeout: 60_000 });
-    const terminal = await aiio.write([{ type: 2, content: [] }]);
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [] }] }));
     expect(terminal.type).toBe("done");
     expect(terminal.message.content[1]).toEqual({ type: "text", text: "answer" });
   });
 
   test("a silent read and a forever-active stream both obey their caps", async () => {
     const silent = makeIO({ Protocol: fakeProvider({ read: hangUntilAbort }), stuckTimeout: 30, timeout: 60_000, connectTimeout: 60_000 });
-    expect((await silent.write([{ type: 2, content: [] }])).error).toContain("model stuck: no data for 30ms");
+    expect((await silent.write(new Context({ messages: [{ type: 2, content: [] }] }))).error).toContain("model stuck: no data for 30ms");
     let index = 0;
     const chatty = makeIO({
       Protocol: fakeProvider({ read: (connection) => new Promise((resolve, reject) => {
-        connection.aiio.requestSignal.addEventListener("abort", () => reject(connection.aiio.requestSignal.reason), { once: true });
+        connection.signal.addEventListener("abort", () => reject(connection.signal.reason), { once: true });
         setTimeout(() => resolve({ events: [{ type: "text_delta", contentIndex: 0, text: `${index++}` }] }), 5);
       }) }),
       timeout: 60, stuckTimeout: 60_000, connectTimeout: 60_000,
     });
-    expect((await chatty.write([{ type: 2, content: [] }])).error).toContain("overall cap");
+    expect((await chatty.write(new Context({ messages: [{ type: 2, content: [] }] }))).error).toContain("overall cap");
   });
 });

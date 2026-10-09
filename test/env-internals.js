@@ -1,10 +1,9 @@
-// test/env-internals.js — Env's PRIVATE registry steps, for the tests
-// that prove them directly (detection, refresh, provenance). Not a test
-// file. Public consumers read env.models() / env.connection() instead.
+// test/env-internals.js — internal protocol/tool test adapters. Prefer Env's public
+// settings and catalog methods for endpoint assertions and graph-backed setup.
 import { detectEndpoints, refreshModels, isDynamic, endpointRegistered, endpointScope, refreshEndpointSettings } from "../lib/env/endpoints.js";
 import { touchHistory } from "../lib/env/model-history.js";
 import { modelsChanged } from "../lib/env/models-changed.js";
-import { readLastCombo } from "../lib/cli/model.js";
+import { readLastCombo } from "../lib/app/shared/catalog.js";
 
 export const detect = (env, options) => detectEndpoints(env, options);
 export const refresh = (env, options) => refreshModels(env, options);
@@ -47,15 +46,15 @@ export const providerOf = (env, name) => env._providers[name];
 export const providerNamesOf = (env) => Object.keys(env._providers);
 /** Provider scan roots. */
 export const providerRoots = (env) => defaultProviderRoots(env);
-/** Load provider classes (Env.create does this). */
+/** Load provider classes (Env.open does this). */
 export const providersLoad = (env, options) => env._providersLoad(options);
 /** Run fn inside one coalesced settings-write batch. */
-export const batch = (env, fn) => env._writeQueue.batch(fn);
+
 
 // ---- the tool registry's private steps (the public surface is env.tools()/toolCall)
 import { loadTools, refreshTools, refreshToolAvailability, toolsList, updateToolStatus, defaultToolRoots } from "../lib/env/tool-registry.js";
 
-/** Scan tool roots (Env.create does this; tests pass explicit `dirs`). */
+/** Scan tool roots (Env.open does this; tests pass explicit `dirs`). */
 export const toolsLoad = (env, options) => loadTools(env, options);
 /** Rescan the tool roots (the built-in tool-refresh does this). */
 export const toolsRefresh = (env) => refreshTools(env);
