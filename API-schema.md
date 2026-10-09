@@ -1,19 +1,23 @@
 # API schema
 
-Compact contract notation, not executable TypeScript or a validation schema. Getters and setters are listed separately; the full API reference contains their effects and ownership rules.
+Compact contract notation, not executable TypeScript or a validation schema. Accessors share one published property with separate read and write contracts. The full API reference contains their effects and ownership rules.
 
 ### `Env.settings`
 
 ```schema
 {
   "context": {
-    "autocompact": "number",
+    "autocompact": "boolean | number (default 0.4; true = 0.4; fractions < 1 or percentages > 1; false/0/1/100 disable)",
+    "autocompactMax": "nonnegative safe integer (tokens; default 200000; 0 disables)",
     "cap": "number",
     "turn": "number",
   },
-  "env-allow": "string[]",
-  "env-refuse": "string[]",
-  "extensions": "string[]",
+  "env": {
+    "<NAME>": "false | true | string",
+  },
+  "extensions": {
+    "<package-or-folder>": "boolean",
+  },
   "maxActive": "number",
   "mcp": {
     "<server>": {
@@ -25,9 +29,18 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
       "timeout": "number",
     },
   },
-  "projects": {},
-  "prompts": "string | string[]",
-  "providerPaths": "string | string[]",
+  "projects": {
+    "<absolute folder or name alias>": {
+      "description?": "string",
+      "folder": "absolute folder",
+      "groups?": "<group> -> boolean",
+      "models?": "<endpoint>/<model> -> ISO timestamp",
+      "name": "shortest unique folder suffix",
+    },
+  },
+  "prompts": {
+    "<path>": "boolean",
+  },
   "providers": {
     "<endpoint>": {
       "contextWindow": "number",
@@ -37,9 +50,9 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
       "timeout": "number",
       "url": "string",
     },
-  },
-  "providerTools": {
-    "<tool>": "boolean",
+    "tools": {
+      "<tool>": "boolean",
+    },
   },
   "read": {
     "artifactBytes": "number",
@@ -58,10 +71,35 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
     "max": "number",
   },
   "sessions": "string",
-  "skills": "string | string[]",
+  "skills": {
+    "<path>": "boolean",
+  },
+  "themes": {
+    "<theme>": {
+      "<role>": {
+        "bg": "color | {dark, light, default}",
+        "bold": "boolean",
+        "dim": "boolean",
+        "fg": "color | {dark, light, default}",
+        "italic": "boolean",
+        "reverse": "boolean",
+        "strike": "boolean",
+        "underline": "boolean",
+      },
+      "message.thinking.preview": {
+        "maxRows": "positive integer",
+      },
+      "parent": "theme name | default",
+      "tool.preview": {
+        "maxRows": "positive integer",
+      },
+    },
+  },
   "tools": {
     "concurrency": "number",
-    "folders": "string[]",
+    "folders": {
+      "<path>": "boolean",
+    },
     "timeout": "number",
     "timeoutLimit": "number",
   },
@@ -81,27 +119,6 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
       "track": "string",
     },
     "theme": "string",
-    "themes": {
-      "<theme>": {
-        "<role>": {
-          "bg": "color | {dark, light, default}",
-          "bold": "boolean",
-          "dim": "boolean",
-          "fg": "color | {dark, light, default}",
-          "italic": "boolean",
-          "reverse": "boolean",
-          "strike": "boolean",
-          "underline": "boolean",
-        },
-        "message.thinking.preview": {
-          "maxRows": "positive integer",
-        },
-        "parent": "theme name | default",
-        "tool.preview": {
-          "maxRows": "positive integer",
-        },
-      },
-    },
   },
   "web": {
     "autocomplete": "boolean",
@@ -123,7 +140,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.BinaryContent`
+### `Agent.Context.BinaryContent`
 
 ```schema
 {
@@ -134,19 +151,19 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.Content`
+### `Agent.Context.Content`
 
 ```schema
 "TextContent|ImageContent|BinaryContent|ThinkingContent|ToolCallContent|Object"
 ```
 
-### `Context.Context`
+### `Agent.Context.Context`
 
 ```schema
 "Message[]"
 ```
 
-### `Context.ImageContent`
+### `Agent.Context.ImageContent`
 
 ```schema
 {
@@ -156,7 +173,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.Message`
+### `Agent.Context.Message`
 
 ```schema
 {
@@ -165,7 +182,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.TextContent`
+### `Agent.Context.TextContent`
 
 ```schema
 {
@@ -174,7 +191,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.ThinkingContent`
+### `Agent.Context.ThinkingContent`
 
 ```schema
 {
@@ -183,7 +200,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.ToolCallContent`
+### `Agent.Context.ToolCallContent`
 
 ```schema
 {
@@ -194,7 +211,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 }
 ```
 
-### `Context.ToolResultMessage`
+### `Agent.Context.ToolResultMessage`
 
 ```schema
 {
@@ -212,7 +229,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Get
 - PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow) — `lib/env/tool-registry.js`
 - PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx) — `tools/read.js`
 - PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed) — `tools/write.js`
-- PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop) — `tools/process.js`
+- PUBLISHES — Agent-owned background commands: bash(background) and process-list/output/stop — `tools/process.js`
 - PUBLISHES — Agent's current filtered model-facing descriptors — `lib/agent.js`
 - REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them — `lib/agent/tool-context.js`
 - REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx) — `lib/agent/tool-exec.js`
@@ -302,7 +319,7 @@ Source: `tools/bash.js`; flags: sandbox
 }
 ```
 
-Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll: true to replace every occurrence of each oldText. To reverse an edit, pass the edit id returned after it as rollback.
+Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll on an item to replace every occurrence of that item's oldText. Use edit-undo with the returned edit id to reverse it.
 
 Source: `tools/edit.js`; flags: trusted
 
@@ -311,15 +328,27 @@ Source: `tools/edit.js`; flags: trusted
 ```schema
 {
   "ask?": "boolean",
-  "edits?": {
+  "edits": {
     "array": {
+      "matchAll?": "boolean",
       "newText": "string",
       "oldText": "string",
     },
   },
-  "matchAll?": "boolean",
   "path": "string",
-  "rollback?": "string",
+}
+```
+
+Reverse a recent edit using its returned edit id and the same file path. The file must still hold the replacement text at the edited positions; otherwise read the file and make a new targeted edit. Undo itself returns an edit id for redo.
+
+Source: `tools/edit.js`; flags: trusted
+
+### `Env.toolDescription.edit-undo.inputSchema`
+
+```schema
+{
+  "editId": "string",
+  "path": "string",
 }
 ```
 
@@ -367,17 +396,38 @@ Source: `tools/note.js`; flags: safe
 }
 ```
 
-List, read buffered output from, or stop this Agent's background Bash processes. Stop is unavailable in safe mode.
+List this Agent's background Bash processes.
 
 Source: `tools/process.js`; flags: safe
 
-### `Env.toolDescription.process.inputSchema`
+### `Env.toolDescription.process-list.inputSchema`
+
+```schema
+{}
+```
+
+Read buffered output from this Agent's background Bash process.
+
+Source: `tools/process.js`; flags: safe
+
+### `Env.toolDescription.process-output.inputSchema`
 
 ```schema
 {
-  "action": ["list", "output", "stop"],
   "from?": "integer",
-  "id?": "string",
+  "id": "string",
+}
+```
+
+Stop this Agent's background Bash process group. Unavailable in safe mode.
+
+Source: `tools/process.js`; flags: trusted
+
+### `Env.toolDescription.process-stop.inputSchema`
+
+```schema
+{
+  "id": "string",
 }
 ```
 
@@ -459,6 +509,36 @@ Source: `tools/read.js`; flags: safe
 }
 ```
 
+List Projects. Exchange requests / replies with external agents (not your worker/parent). Use to collaborate on complex tasks that require a number of teams to complete, or to file bug reports or ask questions in other projects. Not for delegating tasks to workers. Not for copying resources from other projects (user `resource`). Start an agent with `to: "new:<role-name>@<project>"`; later use the <name>@<project> from the result or from a received request's label. The receiver may refuse. Replies arrive as messages; finish your turn to wait. Projects: this (your own project).
+
+Source: `tools/request.js`; flags: trusted
+
+### `Env.toolDescription.request.inputSchema`
+
+```schema
+{
+  "model?": "string",
+  "prompt": "string",
+  "safe?": "boolean",
+  "to": "string",
+}
+```
+
+List, read or copy files of a skill or a project. A path missing from a skill is looked up in the project of the same name. Copies never overwrite: an existing destination is saved as "<name> 002.<ext>". Symbolic links are never followed: searches and listings skip them; copies refuse them. Projects: this (your own project).
+
+Source: `tools/resource.js`; flags: safe, trusted
+
+### `Env.toolDescription.resource.inputSchema`
+
+```schema
+{
+  "list?": "boolean",
+  "name": "string",
+  "path?": "string",
+  "target?": "string",
+}
+```
+
 Load relevant skills before starting a task and follow their instructions. Omit names to list available skills; pass an array of catalog names to load them.
 
 Source: `tools/skill.js`; flags: safe
@@ -470,20 +550,6 @@ Source: `tools/skill.js`; flags: safe
   "names?": {
     "array": "string",
   },
-}
-```
-
-Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new file inside the Agent folder. Saving is available only if `write` is available.
-
-Source: `tools/skill-resource.js`; flags: safe, trusted
-
-### `Env.toolDescription.skill-resource.inputSchema`
-
-```schema
-{
-  "name": "string",
-  "path?": "string",
-  "target?": "string",
 }
 ```
 
@@ -512,7 +578,7 @@ Source: `tools/web.js`; flags: safe, trusted
 }
 ```
 
-Closes named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
+Close named workers, /regex/ matches, or all with ["*"]. Busy workers are asked to hand off their work first.
 
 Source: `tools/worker-close.js`; flags: trusted
 
@@ -526,7 +592,7 @@ Source: `tools/worker-close.js`; flags: trusted
 }
 ```
 
-Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive as messages; finish your turn rather than waiting.
 
 Source: `tools/worker-create.js`; flags: trusted
 
@@ -541,14 +607,14 @@ Source: `tools/worker-create.js`; flags: trusted
       "model?": "string",
       "name": "string",
       "safe?": "boolean",
-      "subfolder?": "Existing project subfolder inside the leader folder; sets the worker write root. Reads may still access the project. Omit or use \"\", \".\", \"/\", \"./\", false, or null to inherit the leader folder (\"/\" never means the filesystem root). Absolute paths, parent traversal, and escaping symlinks are forbidden.",
+      "subfolder?": "string",
       "thinking?": ["none", "low", "medium", "high", "xhigh", "max"],
     },
   },
 }
 ```
 
-Sends one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Send one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive as messages; finish your turn rather than waiting.
 
 Source: `tools/worker-message.js`; flags: trusted
 
@@ -557,13 +623,13 @@ Source: `tools/worker-message.js`; flags: trusted
 ```schema
 {
   "prompt": "string",
-  "workers": {
+  "to": {
     "array": "string",
   },
 }
 ```
 
-Shows workers grouped by busy/idle, available models, and the commands a worker accepts at the start of a message (/compact, /<prompt>). Omit flags for all; request sections with workers, models, or commands.
+Show workers (busy/idle), models with free capacity, and the commands a message may start with (/compact, /<prompt>). Omit flags for all sections. Not for worker polling / busy waiting (just finish your turn and they will update you when they're done).
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -591,303 +657,93 @@ Source: `tools/write.js`; flags: trusted
 }
 ```
 
-### `Agent module`
-
-```ts
-export const EVENT_CALLBACKS: unknown;
-export const finishAdd: (fn: () => void, { process: proc?: unknown) => () => void;
-export const finishRun: () => void;
-export const finishSignalsArm: (options?: Object) => () => void;
-export const reseat: (agent: object, { id }?: unknown) => object;
-export const TOOL_TIMEOUT_DEFAULT: unknown;
-```
-
 ### `Agent`
 
 ```ts
 export class Agent {
-  backgroundList: () => unknown;
-  backgroundOutput: (id: unknown, from: unknown) => unknown;
-  backgroundStart: (options: unknown) => unknown;
-  backgroundStop: (id: unknown) => unknown;
-  backgroundStopAll: () => unknown;
-  get busy(): unknown;
-  cancel: () => unknown;
-  childCreate: (options?: object) => Agent;
-  get children(): unknown;
-  close: () => boolean;
-  get closed(): unknown;
-  get closeMarked(): unknown;
-  compact: (focus?: string) => Promise<{ok: boolean, before: number, summaryText?: string}>;
-  constructor(options?: Object);
-  context: Context;
-  static Context: unknown;
-  contextFork: (id: string|false) => {id: string, file: string, save: boolean};
-  contextNew: (id: string|false) => {id: string, file: string, save: boolean};
-  contextResume: (id: string) => {id: string, file: string};
-  get contextUsage(): {used: number, total: number|null, approximate: boolean};
-  get description(): unknown;
-  set description(value: string);
-  env: Env;
-  static Env: unknown;
+  static Context: typeof Agent.Context;
+  static Env: typeof Agent.Env;
+  static IO: typeof Agent.IO;
+  static Jobs: typeof Agent.Jobs;
   static EVENT: unknown;
   static EVENT_CALLBACKS: unknown;
+  static NAMES: unknown;
+  busy: { read: unknown };
+  can: {read: boolean, write: boolean, delegate: *, interact: boolean, [capability: string]: *};
+  cancel: () => unknown;
+  childCreate: (options?: object) => Promise<Agent>;
+  children: { read: unknown };
+  close: () => Promise<void>;
+  closeMarked: { read: unknown };
+  closed: { read: unknown };
+  compact: (focus?: string) => Promise<{ok: boolean, before: number, summaryText?: string}>;
+  constructor(options?: Object, construction: unknown);
+  contacts: { read: string[] };
+  context: { read: Context };
+  contextUsage: { read: {used: number, total: number|null, approximate: boolean} };
+  static create: (options?: object) => Promise<Agent>;
+  description: { read: unknown; write: (value: string) => void };
+  env: { read: Env };
   static finishAdd: (fn: () => void, { process: proc?: unknown) => () => void;
   static finishRun: () => void;
-  static finishSignalsArm: (options?: Object) => () => void;
-  set folder(folder: string|undefined|null);
-  get folder(): unknown;
-  static folderResolve: (env: Env, folder: string|undefined|null) => string;
-  static IO: unknown;
-  get ioState(): "idle"|"working"|"disconnected";
-  set model(selector: string|undefined);
-  get model(): string|undefined;
-  get name(): unknown;
-  set name(value: string);
-  static NAMES: unknown;
+  folder: { read: unknown; write: (folder: string|undefined|null) => void };
+  fork: (options?: object) => Promise<Agent>;
+  io: { read: IO|undefined; write: (value: IO) => void };
+  ioState: { read: "idle"|"working"|"disconnected" };
+  model: { read: string|undefined; write: (selector: string|undefined) => void };
+  name: { read: unknown; write: (value: string) => void };
   offEvent: (handle: unknown) => unknown;
-  onEvent: (event: number, callback: (payload: object) => void) => number;
-  get parent(): unknown;
-  pathInfo: (path: string, options?: unknown) => Promise<{path:string,isFolder:boolean,mimetype?:string}>;
-  get pending(): unknown;
+  onEvent: (event: symbol, callback: (payload: object) => void) => number;
+  parent: { read: unknown };
+  pending: { read: unknown };
   pendingPop: () => Array;
-  get planUsage(): {label?: string, quotas: Object}|null;
-  get policy(): Readonly<object>;
-  static promptCatalog: (prompts: Map<string, object>, options: unknown) => string;
-  set question(callbacks: unknown);
-  get question(): object|null;
-  questionInstall: (bridge: unknown) => unknown;
-  questionTimeoutReset: () => unknown;
-  static reseat: (agent: object, { id }?: unknown) => object;
+  question: { read: object|null; write: (callbacks: unknown) => void };
+  request: (request: unknown) => Promise<string>;
   run: (options?: Object) => Promise<object|null>;
-  get safe(): boolean;
-  set safe(value: boolean);
-  send: (message: object) => Promise<object>;
+  send: (message: object|string) => Promise<object>;
   sendFile: (fileName: string) => Promise<object>;
-  settings: object|undefined;
-  static skillCatalog: (skills: Map<string, object>, options: unknown) => string;
-  static skillSection: (skill: unknown) => string;
-  get spawnPermission(): *;
-  set spawnPermission(value: *);
-  get thinking(): string|undefined;
-  set thinking(level: string);
-  get throttledUntil(): unknown;
-  timeout: number|string|undefined;
-  static TOOL_TIMEOUT_DEFAULT: unknown;
+  skillLoad: (names: string|string[]) => string;
+  thinking: { read: string|undefined; write: (level: string) => void };
+  throttledUntil: { read: unknown };
   toolMessages: () => Array<{name: string, text: string}>;
-  toolMessagesDetect: () => Promise<Array<{name: string, text: string}>>;
-  toolMessageSet: (name: string, text: string|null) => string|null;
-  get tools(): Promise<Map<string, object>>;
-  toolStorage: (toolname: string) => object;
-  toolStorageClear: (toolname: string) => void;
-  url: string|undefined;
-  get usage(): {inputTokens: number, outputTokens: number, cost: number};
+  tools: { read: Promise<Map<string, object>> };
+  usage: { read: {inputTokens: number, outputTokens: number, cost: number, totalTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cacheWrite5mTokens?: number, cacheWrite1hTokens?: number, uncachedInputTokens?: number, reasoningTokens?: number, serviceTier?: string, inferenceGeo?: string, details?: object} };
 }
 ```
 
-### `App`
-
-```ts
-export class App {
-  static GTUI: unknown;
-  static Markdown: unknown;
-  static TUI: unknown;
-  static Web: unknown;
-}
-```
-
-### `CLI module`
-
-```ts
-export const adoptResumeOrigin: (options?: Object) => string|null;
-export const armCancelSignals: (options?: Object) => () => void;
-export const close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
-export const completeOAuthPaste: (input: string) => boolean;
-export const defaultUrl: (provider: string) => string;
-export const endpointPolicies: (env: object) => Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>;
-export const endpointPolicySet: (env: object, selector: string, change: unknown) => void;
-export const execute: (command: unknown) => unknown;
-export const EXIT: unknown;
-export const exitCodeFor: (terminal: unknown) => number;
-export const formatToolResult: (result: *) => string;
-export const listEndpointModels: (env: object) => {name: string, models: string[], loginRequired?: boolean}[];
-export const listEndpoints: (env: object) => string[];
-export const listModelCandidates: (env: object) => string[];
-export const listModels: (env: object) => Promise<{name: string, models: string[]}[]>;
-export const loginEndpoint: (env: object, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => Promise<*>;
-export const logoutEndpoint: (env: object, name: string) => {name: string, dynamic: boolean};
-export const oauthPasteOnly: (descriptor: object) => boolean;
-export const parseAuthorizationInput: (input: string) => {code?: string, state?: string};
-export const parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown, "max-tool-calls"] }: unknown) => Object;
-export const readContextFromStdin: () => Promise<Array<object>>;
-export const readLastCombo: (env: object) => string|null;
-export const readStdin: () => Promise<string>;
-export const refreshOAuthTokens: (descriptor: object, refresh: string, { signal }?: unknown) => Promise<object>;
-export const renderSettingsTemplate: (env: unknown) => string;
-export const resolveCliToolArgs: (argv: string[], entry: unknown) => object;
-export const resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
-export const resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
-export const runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
-export const runMcpLogin: (env: object, name: string, { input?: unknown, output?: unknown) => Promise<{name: string}>;
-export const runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
-export const selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
-export const tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
-export const unwrapToolResult: (value: *) => {result: *, system: string[], display: string[]};
-export const usageSummary: (usage: object) => string;
-export const writeSettingsTemplate: (env: unknown, { force?: unknown) => string;
-```
-
-### `CLI`
-
-```ts
-export class CLI {
-  static adoptResumeOrigin: (options?: Object) => string|null;
-  static armCancelSignals: (options?: Object) => () => void;
-  static close: (options?: object) => {agent?: object, session: {id: string, file?: string}|null};
-  static completeOAuthPaste: (input: string) => boolean;
-  static defaultUrl: (provider: string) => string;
-  static endpointPolicies: (env: object) => Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>;
-  static endpointPolicySet: (env: object, selector: string, change: unknown) => void;
-  static execute: (command: unknown) => unknown;
-  static EXIT: unknown;
-  static exitCodeFor: (terminal: unknown) => number;
-  static formatToolResult: (result: *) => string;
-  static listEndpointModels: (env: object) => {name: string, models: string[], loginRequired?: boolean}[];
-  static listEndpoints: (env: object) => string[];
-  static listModelCandidates: (env: object) => string[];
-  static listModels: (env: object) => Promise<{name: string, models: string[]}[]>;
-  static loginEndpoint: (env: object, { name: unknown, provider: unknown, url: unknown, token: unknown, auth: unknown, scope?: unknown, }?: unknown) => Promise<*>;
-  static logoutEndpoint: (env: object, name: string) => {name: string, dynamic: boolean};
-  static oauthPasteOnly: (descriptor: object) => boolean;
-  static parseAuthorizationInput: (input: string) => {code?: string, state?: string};
-  static parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown, "max-tool-calls"] }: unknown) => Object;
-  static readContextFromStdin: () => Promise<Array<object>>;
-  static readLastCombo: (env: object) => string|null;
-  static readStdin: () => Promise<string>;
-  static refreshOAuthTokens: (descriptor: object, refresh: string, { signal }?: unknown) => Promise<object>;
-  static renderSettingsTemplate: (env: unknown) => string;
-  static resolveCliToolArgs: (argv: string[], entry: unknown) => object;
-  static resolveModelCombo: (value: string, env: object) => Promise<string|undefined>;
-  static resolveToolArgs: (raw: string|undefined, entry: unknown) => object;
-  static runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
-  static runMcpLogin: (env: object, name: string, { input?: unknown, output?: unknown) => Promise<{name: string}>;
-  static runOAuthFlow: (descriptor: object, options?: object) => Promise<object>;
-  static selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
-  static tokensToAuth: (tokens: object, previous?: object) => {type: string, access: string, token: string, refresh?: string, expires?: number};
-  static unwrapToolResult: (value: *) => {result: *, system: string[], display: string[]};
-  static usageSummary: (usage: object) => string;
-  static writeSettingsTemplate: (env: unknown, { force?: unknown) => string;
-}
-```
-
-### `Context module`
-
-```ts
-export const assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object<string, function(object): void>;
-export const assemblerCreate: () => {consume: (event: object) => void, message: () => object};
-export const callbacksNormalize: (callbacks?: Object, binding?: Object) => Object;
-export const contentBinary: (path: string, buffer: Uint8Array) => {type: "binary", mimetype: string, filename: string, content: string};
-export const contentIndexer: () => {of: (key: *) => number, next: () => number};
-export const contentText: (text: *) => TextContent;
-export const ContentType: unknown;
-export const eventCallbackName: (eventName: string) => string;
-export const eventDispatch: (set: Object, event: object) => void;
-export const EventType: unknown;
-export const eventValid: (event: *) => boolean;
-export const eventValidate: (event: *) => object;
-export const FALLBACK_CONTEXT_WINDOWS: unknown;
-export const fallbackContextWindow: (model: *) => number|null;
-export const messageAppend: (context: Array<object>, message: object, { merge?: unknown) => object;
-export const messageAssistant: (content?: Content[]) => Message;
-export const messageErrorText: (msg: *) => string;
-export const messageFile: (path: string, buffer: Uint8Array) => {type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>};
-export const messageHasContent: (msg: *) => boolean;
-export const messageHasError: (msg: *) => boolean;
-export const messageIsRecord: (msg: *) => boolean;
-export const messageRebuild: (msg: object) => object;
-export const messagesParse: (input: string) => Array<object>;
-export const messagesValid: (ctx: *) => boolean;
-export const messagesValidate: (ctx: *) => Array;
-export const messageSystem: (text: *) => Message;
-export const MessageType: unknown;
-export const messageUser: (text: string|Content[]|*, metadata?: *) => Message;
-export const messageValid: (msg: *) => boolean;
-export const messageValidate: (msg: *, at?: string) => object;
-export const MIME_BY_EXTENSION: unknown;
-export const mimeDetect: (options?: object) => string;
-export const mimeOf: (block: Object|null|undefined) => string|undefined;
-export const TOKENS_PER_WORD: unknown;
-export const tokensEstimate: (text: *) => number;
-export const tokensEstimateMessages: (context?: Array) => number;
-export const usageEstimate: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
-export const usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string, cost?:number};
-export const usageSummary: (usage: object) => string;
-export const wordCount: (text: *) => number;
-```
-
-### `Context`
+### `Agent.Context`
 
 ```ts
 export class Context {
-  append: (message: object, options: unknown) => object;
-  static assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object<string, function(object): void>;
-  static assemblerCreate: () => {consume: (event: object) => void, message: () => object};
+  append: (message: object, options: unknown) => object|undefined;
   at: (i: number) => object|undefined;
   blockAt: (i: number, j: number) => object;
-  static callbacksNormalize: (callbacks?: Object, binding?: Object) => Object;
-  close: () => void;
+  close: () => Promise<void>;
   constructor(options?: Object);
-  static contentBinary: (path: string, buffer: Uint8Array) => {type: "binary", mimetype: string, filename: string, content: string};
-  static contentIndexer: () => {of: (key: *) => number, next: () => number};
-  static contentText: (text: *) => TextContent;
-  static ContentType: unknown;
-  created: string;
+  contextUsage: { read: {used: number|undefined, total: number|undefined}; write: (options?: object) => void };
+  contextUsageInvalidate: (options?: object) => void;
+  created: { read: string };
   static deleteAll: (options?: Object) => {deleted: number};
   static deleteById: (options?: Object) => {deleted: number};
-  dir: string|undefined;
+  dir: { read: string|undefined };
+  dirty: { read: false|number };
   edit: (i: number, message: object) => object;
   editBlock: (i: number, j: number, block: object) => object;
   errorPop: () => object|undefined;
-  static eventCallbackName: (eventName: string) => string;
-  static eventDispatch: (set: Object, event: object) => void;
-  static EventType: unknown;
-  static eventValid: (event: *) => boolean;
-  static eventValidate: (event: *) => object;
-  static FALLBACK_CONTEXT_WINDOWS: unknown;
-  static fallbackContextWindow: (model: *) => number|null;
-  file: string|undefined;
+  file: { read: string|undefined };
   static fileOf: (options?: object) => string|undefined;
   flush: () => void;
   flushAsync: () => Promise<void>;
-  id: string;
-  static idAnonymous: (id: *) => boolean;
+  id: { read: string|undefined };
   static latest: (options?: Object) => string|undefined;
-  get length(): number;
+  length: { read: number };
   static list: (options?: Object) => Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>;
   static listAsync: (options?: object) => Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>>;
-  static messageAppend: (context: Array<object>, message: object, { merge?: unknown) => object;
-  static messageAssistant: (content?: Content[]) => Message;
-  static messageErrorText: (msg: *) => string;
-  static messageFile: (path: string, buffer: Uint8Array) => {type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>};
-  static messageHasContent: (msg: *) => boolean;
-  static messageHasError: (msg: *) => boolean;
-  static messageIsRecord: (msg: *) => boolean;
-  static messageRebuild: (msg: object) => object;
   messages: () => object[];
-  static messagesParse: (input: string) => Array<object>;
-  static messagesValid: (ctx: *) => boolean;
-  static messagesValidate: (ctx: *) => Array;
-  static messageSystem: (text: *) => Message;
-  static MessageType: unknown;
-  static messageUser: (text: string|Content[]|*, metadata?: *) => Message;
-  static messageValid: (msg: *) => boolean;
-  static messageValidate: (msg: *, at?: string) => object;
-  static MIME_BY_EXTENSION: unknown;
-  static mimeDetect: (options?: object) => string;
-  static mimeOf: (block: Object|null|undefined) => string|undefined;
   name: string|undefined;
-  origin: string;
+  origin: { read: string };
   static originOf: (options?: Object) => string|undefined;
+  planUsage: { read: unknown; write: (report?: object) => void };
   pop: () => object|undefined;
   prepend: (messages: object[]) => unknown;
   remove: (indexes: number[]) => object[];
@@ -895,45 +751,290 @@ export class Context {
   static renameById: (options?: Object) => {id: string, file: string};
   static resume: (options?: Object) => Context;
   rollback: (i: number) => object[];
-  get save(): boolean;
-  set save(value: boolean);
-  get settings(): object|undefined;
-  set settings(value: object);
-  get summary(): string;
+  save: { read: boolean; write: (value: boolean) => void };
+  settings: { read: object|undefined; write: (value: object) => void };
+  summary: { read: string };
   toJSON: () => unknown;
-  static TOKENS_PER_WORD: unknown;
-  static tokensEstimate: (text: *) => number;
-  static tokensEstimateMessages: (context?: Array) => number;
   update: (fn: (messages: object[]) => boolean) => boolean;
-  static usageEstimate: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
-  static usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, source:string, cost?:number};
-  static usageSummary: (usage: object) => string;
-  uuid: string;
-  static wordCount: (text: *) => number;
+  uuid: { read: string };
 }
 ```
 
-### `Env`
+### `Agent.Context.ContentType`
+
+```ts
+export const ContentType: unknown;
+```
+
+### `Agent.Context.EventType`
+
+```ts
+export const EventType: unknown;
+```
+
+### `Agent.Context.FALLBACK_CONTEXT_WINDOWS`
+
+```ts
+export const FALLBACK_CONTEXT_WINDOWS: unknown;
+```
+
+### `Agent.Context.MIME_BY_EXTENSION`
+
+```ts
+export const MIME_BY_EXTENSION: unknown;
+```
+
+### `Agent.Context.MessageType`
+
+```ts
+export const MessageType: unknown;
+```
+
+### `Agent.Context.TOKENS_PER_WORD`
+
+```ts
+export const TOKENS_PER_WORD: unknown;
+```
+
+### `Agent.Context.assemblerCallbacks`
+
+```ts
+export const assemblerCallbacks: (assembler: ReturnType<typeof createAssembler>) => Object<string, function(object): void>;
+```
+
+### `Agent.Context.assemblerCreate`
+
+```ts
+export const assemblerCreate: () => {consume: (event: object) => void, message: () => object};
+```
+
+### `Agent.Context.callbacksNormalize`
+
+```ts
+export const callbacksNormalize: (callbacks?: Object, binding?: Object) => Object;
+```
+
+### `Agent.Context.contentBinary`
+
+```ts
+export const contentBinary: (path: string, buffer: Uint8Array) => {type: "binary", mimetype: string, filename: string, content: string};
+```
+
+### `Agent.Context.contentIndexer`
+
+```ts
+export const contentIndexer: () => {of: (key: *) => number, next: () => number};
+```
+
+### `Agent.Context.contentText`
+
+```ts
+export const contentText: (text: *) => TextContent;
+```
+
+### `Agent.Context.eventCallbackName`
+
+```ts
+export const eventCallbackName: (eventName: string) => string;
+```
+
+### `Agent.Context.eventDispatch`
+
+```ts
+export const eventDispatch: (set: Object, event: object) => void;
+```
+
+### `Agent.Context.eventValid`
+
+```ts
+export const eventValid: (event: *) => boolean;
+```
+
+### `Agent.Context.eventValidate`
+
+```ts
+export const eventValidate: (event: *) => object;
+```
+
+### `Agent.Context.fallbackContextWindow`
+
+```ts
+export const fallbackContextWindow: (model: *) => number|null;
+```
+
+### `Agent.Context.messageAppend`
+
+```ts
+export const messageAppend: (context: Array<object>, message: object, { merge?: unknown) => object|undefined;
+```
+
+### `Agent.Context.messageAssistant`
+
+```ts
+export const messageAssistant: (content?: Content[]) => Message;
+```
+
+### `Agent.Context.messageErrorText`
+
+```ts
+export const messageErrorText: (msg: *) => string;
+```
+
+### `Agent.Context.messageFile`
+
+```ts
+export const messageFile: (path: string, buffer: Uint8Array) => {type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>};
+```
+
+### `Agent.Context.messageHasContent`
+
+```ts
+export const messageHasContent: (msg: *) => boolean;
+```
+
+### `Agent.Context.messageHasError`
+
+```ts
+export const messageHasError: (msg: *) => boolean;
+```
+
+### `Agent.Context.messageIsRecord`
+
+```ts
+export const messageIsRecord: (msg: *) => boolean;
+```
+
+### `Agent.Context.messageRebuild`
+
+```ts
+export const messageRebuild: (msg: object) => object;
+```
+
+### `Agent.Context.messageSystem`
+
+```ts
+export const messageSystem: (text: *) => Message;
+```
+
+### `Agent.Context.messageUser`
+
+```ts
+export const messageUser: (text: string|Content[]|*, metadata?: *) => Message;
+```
+
+### `Agent.Context.messageValid`
+
+```ts
+export const messageValid: (msg: *) => boolean;
+```
+
+### `Agent.Context.messageValidate`
+
+```ts
+export const messageValidate: (msg: *, at?: string) => object;
+```
+
+### `Agent.Context.messagesParse`
+
+```ts
+export const messagesParse: (input: string) => Array<object>;
+```
+
+### `Agent.Context.messagesValid`
+
+```ts
+export const messagesValid: (ctx: *) => boolean;
+```
+
+### `Agent.Context.messagesValidate`
+
+```ts
+export const messagesValidate: (ctx: *) => Array;
+```
+
+### `Agent.Context.mimeDetect`
+
+```ts
+export const mimeDetect: (options?: object) => string;
+```
+
+### `Agent.Context.mimeOf`
+
+```ts
+export const mimeOf: (block: Object|null|undefined) => string|undefined;
+```
+
+### `Agent.Context.tokensEstimate`
+
+```ts
+export const tokensEstimate: (text: *) => number;
+```
+
+### `Agent.Context.tokensEstimateMessages`
+
+```ts
+export const tokensEstimateMessages: (context?: Array) => number;
+```
+
+### `Agent.Context.usageAdd`
+
+```ts
+export const usageAdd: (total: object, reported: *) => object;
+```
+
+### `Agent.Context.usageDetails`
+
+```ts
+export const usageDetails: (value: *) => *;
+```
+
+### `Agent.Context.usageEstimate`
+
+```ts
+export const usageEstimate: (context?: Array, message: object) => {inputTokens:number, outputTokens:number, source:"estimate"};
+```
+
+### `Agent.Context.usageFinalize`
+
+```ts
+export const usageFinalize: (reported: *, context: Array, message: object) => {inputTokens:number, outputTokens:number, totalTokens:number, source:string, cost?:number, [key: string]: *};
+```
+
+### `Agent.Context.usageHeaders`
+
+```ts
+export const usageHeaders: (headers: Headers|object, { exclude?: unknown) => Object<string, string>;
+```
+
+### `Agent.Context.usageNormalize`
+
+```ts
+export const usageNormalize: (reported: *) => object;
+```
+
+### `Agent.Context.wordCount`
+
+```ts
+export const wordCount: (text: *) => number;
+```
+
+### `Agent.Env`
 
 ```ts
 export class Env {
-  _attachHooks: (agent: unknown) => unknown;
-  _detachHooks: (agent: unknown) => unknown;
-  _hooksRefresh: () => unknown;
-  agentAdd: (agent: object) => object;
-  agentCreate: (options?: object) => object;
-  agentRemove: (agent: object) => boolean;
-  agents: () => object[];
-  close: () => unknown;
-  get closed(): boolean;
-  connection: (selector: string, { remember?: unknown) => object;
-  constructor(options?: Object);
-  static create: (options: ConstructorParameters<typeof Env>[0], initOptions?: unknown) => Promise<Env>;
-  get cwd(): string;
-  static get envs(): Readonly<Object<string, Env>>;
   static EVENT: unknown;
+  static SettingsStore: unknown;
+  agentCreate: (options?: object) => Promise<Agent>;
+  agents: () => object[];
+  static close: () => Promise<void>;
+  close: () => Promise<void>;
+  closed: { read: boolean };
+  connection: (selector: string, { remember?: unknown) => object;
+  constructor(options?: Object, acquisition: unknown);
+  static envs: { read: Readonly<Object<string, Env>> };
   static extend: (plugin: unknown) => {EVENT: Object<string, symbol>, emit: (env: object, event: symbol, payload: object) => void};
-  get folders(): ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}>;
+  folder: { read: string };
+  folders: { read: ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}> };
   login: (name: string, config: unknown, options: unknown) => Promise<{name: string, endpoint: object, auth: object|undefined, scope: string|undefined, verified: *}>;
   loginPresets: () => object[];
   logout: (name: string) => {name: string, dynamic: boolean};
@@ -941,36 +1042,272 @@ export class Env {
   mcpPaste: (input: string) => boolean;
   mcpStatus: () => Array<{name: string, state: string}>;
   models: (secret?: boolean) => Map<string, object>;
-  get modelsReady(): Promise<void>;
-  get name(): string;
+  modelsReady: { read: Promise<void> };
+  name: { read: string };
   offEvent: (handle: number) => boolean;
   onEvent: (event: symbol, callback: (payload: object) => void) => number;
+  static open: (path: string, options: object) => Promise<Env>;
+  promptCatalog: (options?: unknown) => string;
   prompts: () => Map<string, {name: string, description: string, file: string, source: string, body: string}>;
-  get settings(): Object;
+  static ready: () => Promise<Object>;
+  ready: () => Promise<Env>;
+  static settings: { read: Object };
+  settings: { read: Object };
+  static settingsFlush: () => Promise<void>;
+  settingsFlush: () => Promise<void>;
   settingsSchema: () => Object} key -> {default, description;
-  skillResource: (name: string, path: string) => Promise<Buffer|string[]>;
-  skills: () => Map<string, {name: string, description: string, file: string, source: string, body: string}>;
+  skillCatalog: (options?: unknown) => string;
+  skillLoad: (names: string|string[], { active?: unknown) => string|{result: string, system: string[]};
+  skillSection: (skill: unknown) => string;
+  skills: () => Map<string, {name: string, description: string, file: string, source: string, body: string, directories: string[]}>;
   systemPrompt: () => string[];
   toolAdd: (name: string, fn: Function, schema: object, { builtin?: unknown, file }?: unknown) => Function;
   toolCall: (name: string, args: object, context: object) => Promise<*>;
   tools: (safe?: boolean, selector: string) => Promise<Map<string, object>>;
-  static use: (cwd: string, fn: (env: Env) => T|Promise<T>) => Promise<T>;
 }
 ```
 
-### `GTUI module`
+### `Agent.IO`
+
+```ts
+export class IO {
+  Provider: Function;
+  authSet: (auth: object, options: unknown) => object;
+  cancel: () => Promise<void>;
+  close: () => Promise<void>;
+  connectTimeout: { read: number };
+  connectionCreate: (options?: object) => object;
+  constructor(options?: Object);
+  context: ?Context;
+  env: Env;
+  fetch: (url: string|URL, init?: object, { deadline: unknown, connectTimeout }?: unknown) => Promise<Response>;
+  model: { read: string; write: (selector: unknown) => void };
+  name: string;
+  protocol: string;
+  provider: object;
+  settings: { read: object };
+  settingsSet: (key: string, value: *) => void;
+  state: { read: "idle"|"sending"|"reading"|"cancelling"|"closing"|"closed" };
+  stuckTimeout: { read: number };
+  timeout: { read: number };
+  tools: () => Array<{name: string, ...Object}>;
+  url: { read: string };
+  write: (context: Context, callbacks?: Object, options?: Object) => Promise<object>;
+}
+```
+
+### `Agent.IO.ProviderError`
+
+```ts
+export class ProviderError {
+  constructor(kind: "auth"|"network"|"provider"|"malformed", message: string, detail?: object);
+}
+```
+
+### `Agent.IO.Context`
+
+```ts
+export const Context: unknown;
+```
+
+### `Agent.IO.Env`
+
+```ts
+export const Env: unknown;
+```
+
+### `Agent.IO.THINKING_LEVELS`
+
+```ts
+export const THINKING_LEVELS: unknown;
+```
+
+### `Agent.IO.timeoutsResolve`
+
+```ts
+export const timeoutsResolve: (options?: unknown) => unknown;
+```
+
+### `Agent.Jobs`
+
+```ts
+export class Jobs {
+
+}
+```
+
+### `Agent.Jobs.JobsError`
+
+```ts
+export class JobsError {
+  constructor(code: string, message: string, details?: object);
+}
+```
+
+### `Agent.Jobs.daemonRun`
+
+```ts
+export const daemonRun: (projectRoot: string, options?: object) => Promise<void>;
+```
+
+### `Agent.Jobs.disable`
+
+```ts
+export const disable: (projectRoot: string, options?: object) => Promise<{enabled: boolean}>;
+```
+
+### `Agent.Jobs.init`
+
+```ts
+export const init: (projectRoot: string, settings?: object, options?: object) => Promise<{enabled: boolean}>;
+```
+
+### `Agent.Jobs.run`
+
+```ts
+export const run: (projectRoot: string, options?: object) => Promise<object>;
+```
+
+### `Agent.Jobs.schedule`
+
+```ts
+export const schedule: (root: string, command: object, options?: object) => Promise<object>;
+```
+
+### `Agent.Jobs.status`
+
+```ts
+export const status: (projectRoot: string, options?: object) => Promise<object>;
+```
+
+### `Agent.Jobs.validate`
+
+```ts
+export const validate: (root: string, options?: object) => Promise<object>;
+```
+
+### `App`
+
+```ts
+export class App {
+  static CLI: typeof App.CLI;
+  static GTUI: typeof App.GTUI;
+  static Markdown: typeof App.Markdown;
+  static TUI: typeof App.TUI;
+  static Web: typeof App.Web;
+}
+```
+
+### `App.CLI`
+
+```ts
+export class CLI {
+
+}
+```
+
+### `App.CLI.EXIT`
+
+```ts
+export const EXIT: unknown;
+```
+
+### `App.CLI.adoptResumeOrigin`
+
+```ts
+export const adoptResumeOrigin: (options?: Object) => Promise<string|null>;
+```
+
+### `App.CLI.armCancelSignals`
+
+```ts
+export const armCancelSignals: (options?: Object) => () => void;
+```
+
+### `App.CLI.close`
+
+```ts
+export const close: (options?: object) => Promise<{agent?: object, session: {id: string, file?: string}|null}>;
+```
+
+### `App.CLI.exitCodeFor`
+
+```ts
+export const exitCodeFor: (terminal: unknown) => number;
+```
+
+### `App.CLI.finishSignalsArm`
+
+```ts
+export const finishSignalsArm: (options?: Object) => () => void;
+```
+
+### `App.CLI.parseFlags`
+
+```ts
+export const parseFlags: (argv: string[], { flags: unknown, bools?: unknown, durations?: unknown, numbers?: unknown) => Object;
+```
+
+### `App.CLI.readContextFromStdin`
+
+```ts
+export const readContextFromStdin: () => Promise<Array<object>>;
+```
+
+### `App.CLI.readStdin`
+
+```ts
+export const readStdin: () => Promise<string>;
+```
+
+### `App.CLI.runLoginWizard`
+
+```ts
+export const runLoginWizard: (env: object, { input?: unknown, output?: unknown, }?: unknown) => Promise<*>;
+```
+
+### `App.CLI.runMcpLogin`
+
+```ts
+export const runMcpLogin: (env: object, name: string, { input?: unknown, output?: unknown) => Promise<{name: string}>;
+```
+
+### `App.CLI.selectEndpointModel`
+
+```ts
+export const selectEndpointModel: (env: object, args: object, { lastUsed?: unknown, log?: unknown) => Promise<string|undefined>;
+```
+
+### `App.CLI.usageSummary`
+
+```ts
+export const usageSummary: (usage: unknown) => string;
+```
+
+### `App.CLI.writeSettingsTemplate`
+
+```ts
+export const writeSettingsTemplate: (env: unknown, { force?: unknown) => string;
+```
+
+### `App.GTUI`
+
+```ts
+export class GTUI {
+  constructor(options?: object);
+  dispatch: (message: object) => void;
+  run: (app: unknown) => Promise<{reason: string, code: number}>;
+  stop: (reason?: string, code?: number) => void;
+}
+```
+
+### `App.GTUI.effect`
 
 ```ts
 export const effect: unknown;
-export const event: unknown;
-export const host: unknown;
-export const memory: (options?: object) => object;
-export const scrollGlyph: (value: *, fallback: *) => *;
-export const terminal: (options?: object) => object;
-export const view: unknown;
 ```
 
-### `GTUI.effect`
+### `App.GTUI.effect members`
 
 ```ts
 after: (ms: number, message: object) => object;
@@ -984,7 +1321,13 @@ task: (key: *, run: Function) => object;
 theme: (tokens: object) => object;
 ```
 
-### `GTUI.event`
+### `App.GTUI.event`
+
+```ts
+export const event: unknown;
+```
+
+### `App.GTUI.event members`
 
 ```ts
 copyDone: (payload: object) => object;
@@ -1003,29 +1346,54 @@ taskDone: (payload: object) => object;
 taskFailed: (payload: object) => object;
 ```
 
-### `GTUI.host`
+### `App.GTUI.host`
+
+```ts
+export const host: unknown;
+```
+
+### `App.GTUI.host members`
 
 ```ts
 memory: (: unknown) => unknown;
 terminal: (: unknown) => unknown;
 ```
 
-### `GTUI.memory`
+### `App.GTUI.memory`
 
 ```ts
-_effect: (value: object, send: Function) => void;
-_render: (next: object) => void;
-_restore: () => void;
-_setTheme: (theme: object) => void;
-_start: (listener: Function, binding: Function) => void;
-get effects(): object[];
+export const memory: (options?: object) => object;
+```
+
+### `App.GTUI.memory members`
+
+```ts
+effects: { read: object[] };
 flush: () => void;
-get restoreCount(): number;
+restoreCount: { read: number };
 send: (message: object) => void;
 snapshot: () => object;
 ```
 
-### `GTUI.view`
+### `App.GTUI.scrollGlyph`
+
+```ts
+export const scrollGlyph: (value: *, fallback: *) => *;
+```
+
+### `App.GTUI.terminal`
+
+```ts
+export const terminal: (options?: object) => object;
+```
+
+### `App.GTUI.view`
+
+```ts
+export const view: unknown;
+```
+
+### `App.GTUI.view members`
 
 ```ts
 button: (props?: object, label?: *) => object;
@@ -1044,176 +1412,7 @@ text: (props?: object, content?: *) => object;
 toolbar: (: unknown) => object;
 ```
 
-### `GTUI`
-
-```ts
-export class GTUI {
-  constructor(options?: object);
-  dispatch: (message: object) => void;
-  run: (app: unknown) => Promise<{reason: string, code: number}>;
-  stop: (reason?: string, code?: number) => void;
-}
-```
-
-### `index module`
-
-```ts
-export const default: unknown;
-```
-
-### `index.default`
-
-```ts
-Agent: unknown;
-Context: unknown;
-Env: unknown;
-EVENT: unknown;
-EVENT_CALLBACKS: unknown;
-finishAdd: unknown;
-finishRun: unknown;
-finishSignalsArm: unknown;
-IO: unknown;
-Jobs: unknown;
-NAMES: unknown;
-reseat: unknown;
-TOOL_TIMEOUT_DEFAULT: unknown;
-```
-
-### `index_app module`
-
-```ts
-export const default: unknown;
-```
-
-### `index_app.default`
-
-```ts
-Agent: unknown;
-App: unknown;
-CLI: unknown;
-Context: unknown;
-Env: unknown;
-EVENT: unknown;
-EVENT_CALLBACKS: unknown;
-finishAdd: unknown;
-finishRun: unknown;
-finishSignalsArm: unknown;
-IO: unknown;
-Jobs: unknown;
-NAMES: unknown;
-reseat: unknown;
-TOOL_TIMEOUT_DEFAULT: unknown;
-```
-
-### `IO module`
-
-```ts
-export const Context: unknown;
-export const Env: unknown;
-export const THINKING_LEVELS: unknown;
-export const timeoutsResolve: (options?: object) => unknown;
-```
-
-### `IO`
-
-```ts
-export class IO {
-  authSet: (auth: object, options: unknown) => object;
-  close: () => Promise<void>;
-  connectionCreate: (options?: object) => object;
-  connectTimeout: number;
-  constructor(options?: Object);
-  static Context: unknown;
-  get contextUsage(): {used: number|undefined, total: number|undefined};
-  set contextUsage(options?: object);
-  env: Env;
-  static Env: unknown;
-  fetch: (url: string|URL, init?: object, { deadline: unknown, connectTimeout }?: unknown) => Promise<Response>;
-  get model(): string;
-  set model(selector: unknown);
-  get modelCurrent(): string;
-  name: string;
-  get planUsage(): {label?: string, quotas: Object}|null;
-  set planUsage(options?: object);
-  protocol: string;
-  Provider: Function;
-  provider: object;
-  static ProviderError: unknown;
-  get requestSignal(): AbortSignal|undefined;
-  get settings(): object;
-  settingsSet: (key: string, value: *) => void;
-  get state(): "idle"|"sending"|"reading"|"closed";
-  stuckTimeout: number;
-  static THINKING_LEVELS: unknown;
-  timeout: number;
-  static timeoutsResolve: (options?: object) => unknown;
-  tools: () => Array<{name: string, ...Object}>;
-  url: string;
-  write: (context: Array, callbacks?: Object, options?: Object) => Promise<object>;
-}
-```
-
-### `ProviderError`
-
-```ts
-export class ProviderError {
-  constructor(kind: "auth"|"network"|"provider"|"malformed", message: string, detail?: object);
-}
-```
-
-### `Jobs module`
-
-```ts
-export const daemonRun: (projectRoot: string, options?: object) => Promise<void>;
-export const disable: (projectRoot: string, options?: object) => Promise<{enabled: boolean}>;
-export const init: (projectRoot: string, settings?: object, options?: object) => Promise<{enabled: boolean}>;
-export const run: (projectRoot: string, options?: object) => Promise<object>;
-export const schedule: (root: string, command: object, options?: object) => Promise<object>;
-export const status: (projectRoot: string, options?: object) => Promise<object>;
-export const validate: (root: string, options?: object) => Promise<object>;
-```
-
-### `Jobs`
-
-```ts
-export class Jobs {
-  static daemonRun: (projectRoot: string, options?: object) => Promise<void>;
-  static disable: (projectRoot: string, options?: object) => Promise<{enabled: boolean}>;
-  static init: (projectRoot: string, settings?: object, options?: object) => Promise<{enabled: boolean}>;
-  static JobsError: unknown;
-  static run: (projectRoot: string, options?: object) => Promise<object>;
-  static schedule: (root: string, command: object, options?: object) => Promise<object>;
-  static status: (projectRoot: string, options?: object) => Promise<object>;
-  static validate: (root: string, options?: object) => Promise<object>;
-}
-```
-
-### `JobsError`
-
-```ts
-export class JobsError {
-  constructor(code: string, message: string, details?: object);
-}
-```
-
-### `Markdown module`
-
-```ts
-export const classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
-export const lexMarkdown: (text: string) => Promise<Array<object>>;
-export const markdownEngine: () => Promise<"marked"|"builtin">;
-export const mathBlockAt: (lines: string[], start: number) => {end: number, text: string, source: string, tree: object}|null;
-export const mathText: (node: object|null|undefined) => string;
-export const parseGitDiff: (text: string) => object|null;
-export const parseInline: (text: string|null|undefined) => Array<{type: string, text: string, href?: string, source?: string, tree?: object}>;
-export const parseMath: (source: *) => {type: string, [key: string]: any};
-export const renderInline: (text: string, renderer?: object) => string;
-export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
-export const sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
-export const walkTokens: (tokens: Array<object>|null|undefined, renderer?: object) => string;
-```
-
-### `BashSanitizer`
+### `App.Markdown.BashSanitizer`
 
 ```ts
 export class BashSanitizer {
@@ -1223,76 +1422,129 @@ export class BashSanitizer {
 }
 ```
 
-### `Markdown`
+### `App.Markdown`
 
 ```ts
 export class Markdown {
-  static BashSanitizer: unknown;
-  static classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
-  static lexMarkdown: (text: string) => Promise<Array<object>>;
-  static markdownEngine: () => Promise<"marked"|"builtin">;
-  static mathBlockAt: (lines: string[], start: number) => {end: number, text: string, source: string, tree: object}|null;
-  static mathText: (node: object|null|undefined) => string;
-  static parseGitDiff: (text: string) => object|null;
-  static parseInline: (text: string|null|undefined) => Array<{type: string, text: string, href?: string, source?: string, tree?: object}>;
-  static parseMath: (source: *) => {type: string, [key: string]: any};
-  static renderInline: (text: string, renderer?: object) => string;
-  static renderMarkdown: (text: string, renderer?: object) => Promise<string>;
-  static sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
-  static walkTokens: (tokens: Array<object>|null|undefined, renderer?: object) => string;
+
 }
 ```
 
-### `Sandbox`
+### `App.Markdown.classifyLine`
 
 ```ts
-export class Sandbox {
-  static backgroundList: (agent: unknown) => unknown;
-  static backgroundOutput: (agent: unknown, id: unknown, from: unknown) => unknown;
-  static backgroundStart: (agent: unknown, options: unknown) => unknown;
-  static backgroundStop: (agent: unknown, id: unknown) => unknown;
-  static backgroundStopAll: (agent: unknown) => unknown;
-  static osAvailable: () => boolean;
-  static osKind: () => "seatbelt"|"bwrap"|"delegated"|null;
-  static osWrap: (file: string, args: string[], cwd: string, workingDirectory: string) => [string, string[]];
-  static processStop: (child: import("node:child_process").ChildProcess, options: unknown) => Promise<void>;
-  static scope: () => ProcessScope;
-  static spawn: (file: string, args: string[], options: import("node:child_process").SpawnOptions) => import("node:child_process").ChildProcess;
-}
+export const classifyLine: (line: string, state?: unknown) => {kind: "fence", lang: string, raw: string;
 ```
 
-### `TUI module`
+### `App.Markdown.lexMarkdown`
 
 ```ts
-export const close: (runtime: unknown) => {agent?: object, session?: {id: string, file?: string}|null};
-export const createLineRepl: (options?: object) => object;
-export const createRepl: (options?: Object) => {start: () => Promise<void>, close: () => void};
-export const run: (state: object) => Promise<{code: number, agent: object, session: object|null}>;
-export const TUI_ENGINES: unknown;
+export const lexMarkdown: (text: string) => Promise<Array<object>>;
 ```
 
-### `TUI`
+### `App.Markdown.markdownEngine`
+
+```ts
+export const markdownEngine: () => Promise<"marked"|"builtin">;
+```
+
+### `App.Markdown.mathBlockAt`
+
+```ts
+export const mathBlockAt: (lines: string[], start: number) => {end: number, text: string, source: string, tree: object}|null;
+```
+
+### `App.Markdown.mathText`
+
+```ts
+export const mathText: (node: object|null|undefined) => string;
+```
+
+### `App.Markdown.parseGitDiff`
+
+```ts
+export const parseGitDiff: (text: string) => object|null;
+```
+
+### `App.Markdown.parseInline`
+
+```ts
+export const parseInline: (text: string|null|undefined) => Array<{type: string, text: string, href?: string, source?: string, tree?: object}>;
+```
+
+### `App.Markdown.parseMath`
+
+```ts
+export const parseMath: (source: *) => {type: string, [key: string]: any};
+```
+
+### `App.Markdown.renderInline`
+
+```ts
+export const renderInline: (text: string, renderer?: object) => string;
+```
+
+### `App.Markdown.renderMarkdown`
+
+```ts
+export const renderMarkdown: (text: string, renderer?: object) => Promise<string>;
+```
+
+### `App.Markdown.sanitizeText`
+
+```ts
+export const sanitizeText: (text: string, { markdown?: unknown, state?: unknown, open?: unknown) => string;
+```
+
+### `App.Markdown.walkTokens`
+
+```ts
+export const walkTokens: (tokens: Array<object>|null|undefined, renderer?: object) => string;
+```
+
+### `App.TUI`
 
 ```ts
 export class TUI {
-  static close: (runtime: unknown) => {agent?: object, session?: {id: string, file?: string}|null};
-  static createApp: unknown;
-  static createLineRepl: (options?: object) => object;
-  static createRepl: (options?: Object) => {start: () => Promise<void>, close: () => void};
-  static run: (state: object) => Promise<{code: number, agent: object, session: object|null}>;
-  static TUI_ENGINES: unknown;
+  static createApp: (agent: object, { env?: unknown, cwd?: unknown, sources: unknown, completionIO: unknown, log: unknown, open: unknown, columns: unknown, rows }?: unknown) => {init: Function, update: Function, view: Function, bindings: Function, currentAgent: Function, closeWorkspace: Function, dispose: Function, abandonPending: Function, theme: object};
 }
 ```
 
-### `Web`
+### `App.TUI.TUI_ENGINES`
+
+```ts
+export const TUI_ENGINES: unknown;
+```
+
+### `App.TUI.close`
+
+```ts
+export const close: (runtime: unknown) => Promise<{agent?: object, session?: {id: string, file?: string}|null}>;
+```
+
+### `App.TUI.createLineRepl`
+
+```ts
+export const createLineRepl: (options?: object) => object;
+```
+
+### `App.TUI.createRepl`
+
+```ts
+export const createRepl: (options?: Object) => {start: () => Promise<void>, close: () => void};
+```
+
+### `App.TUI.run`
+
+```ts
+export const run: (state: object) => Promise<{code: number, agent: object, session: object|null}>;
+```
+
+### `App.Web`
 
 ```ts
 export class Web {
-  static AgentSession: unknown;
-  static createWebServer: unknown;
-  static MAX_WS_PAYLOAD_LENGTH: unknown;
-  static parseClientMessage: unknown;
-  static serve: unknown;
+  static serve: (state?: unknown) => unknown;
 }
 ```
 

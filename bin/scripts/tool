@@ -25,9 +25,12 @@
  * call linkage — an interactive tool (the `question` tool, `chat`'s
  * peer operations) refuses or no-ops exactly as it does for a forked,
  * sandboxed tool call (see the Tool contract's REQUIRES section).
- * Also UNSANDBOXED: unlike Agent's dispatch, a `sandbox: true` tool
- * (write, edit) runs in THIS process, no OS write jail — this is a
- * manual door, not a hardened one.
+ * Normally paths resolve from filesystem root (/): direct calls are
+ * unrestricted by the launch directory. Inside an Agent's forked tool
+ * worker (including a delegated bash), the worker marker selects its
+ * working directory instead, preserving that Agent's file-tool boundary.
+ * This wrapper does not create an OS sandbox; the Agent's existing jail
+ * remains responsible for enforcing sandboxed writes.
  *
  * stdout: the tool's `result` — a string printed as-is, anything else
  * JSON-pretty-printed. A `system`/`display` side payload prints to
@@ -37,9 +40,11 @@
 
 import { basename } from "node:path";
 import Agent from "../../lib/agent.js";
-import CLI from "../../lib/cli.js";
+import { App } from "../../lib/app.js";
+import { resolveCliToolArgs, unwrapToolResult, formatToolResult } from "../../lib/app/shared/tool-run.js";
+const { CLI } = App;
 const { Env, NAMES } = Agent;
-const { resolveCliToolArgs, unwrapToolResult, formatToolResult, close } = CLI;
+const { close } = CLI;
 
 // The invoked name: argv[1] holds the wrapper's file name; a bare
 // `bun bin/scripts/tool` has none, so the namespace-derived prefix
@@ -53,15 +58,17 @@ const USAGE = `Usage: ${NAME} [<name> [json-args]] [--list] [--help]
   ${NAME} <name> '<json>'  Call it with these arguments (a JSON object),
                         or a bare JSON value as shorthand for the
                         tool's FIRST schema property (see below)
+  ${NAME} --list           List every registered tool (same as no args)
+  ${NAME} --help           Show this usage and exit (-h also works)
   ${NAME} <name> --help    Show THAT tool's help: its full description
                         and input schema (JSON)
 
 Example: ${NAME} skill '["core"]'  ==  the long way to load the "core"
 skill (a bare array becomes {names: [...]}, skill's first property).
 
-Runs OUTSIDE any Agent — no question bridge, no calling agent: an
-interactive tool refuses or no-ops exactly as it does for a forked,
-sandboxed tool call.
+Runs without a calling Agent — no question bridge or peer operations.
+Direct calls resolve paths from /; calls inside an Agent tool worker
+resolve paths from that worker's working directory.
 `;
 
 /** Print the catalog: one "- name — description" line per tool. */
@@ -99,7 +106,11 @@ async function main(argv) {
     return 0;
   }
   // Direct tool calls need the complete registry, so use the async factory.
-  env = await Env.create(undefined, { models: false }); // never reads the model catalog
+  // A manual call is not project-bound. Forked dispatch explicitly passes
+  // its Agent folder; a marker alone may be inherited by unrelated calls.
+  const cwd = process.env[NAMES.toolWorkerEnv] === "1" && process.env[NAMES.toolRootEnv]
+    ? process.env[NAMES.toolRootEnv] : "/";
+  env = await Env.open(cwd);
   const catalog = await env.tools(); // every tool, secret ones included (the human's door)
   if (!help && (argv.includes("--list") || argv.length === 0)) {
     printCatalog(catalog);
@@ -147,6 +158,6 @@ try {
   console.error(`${NAME}: ${error instanceof Error ? error.message : String(error)}`);
   exitCode = 1;
 } finally {
-  close({ env });
+  await close({ env });
 }
 process.exit(exitCode);

@@ -61,7 +61,7 @@ function context2msg(context, aiio) {
   if (token) headers.authorization = `Bearer ${token}`;
 
   const body = {
-    model: aiio?.modelCurrent?.slice(aiio.modelCurrent.indexOf("/") + 1),
+    model: aiio?.model?.slice(aiio.model.indexOf("/") + 1),
     messages: ollamaMessages(context),
     stream: true,
   };
@@ -259,12 +259,14 @@ function msg2events(msg, state = {}, aiio) {
     closeText();
     // the exact context consumption the server measured for this request
     if (Number.isFinite(msg.prompt_eval_count)) {
-      (aiio && (aiio.contextUsage = { used: msg.prompt_eval_count }));
+      (aiio?.context && (aiio.context.contextUsage = { used: msg.prompt_eval_count }));
     }
-    const usage =
-      Number.isFinite(msg.prompt_eval_count) && Number.isFinite(msg.eval_count)
-        ? { inputTokens: msg.prompt_eval_count, outputTokens: msg.eval_count }
-        : undefined;
+    // Ollama supplies usage/timing fields on the terminal frame, not a
+    // separate usage object. Preserve every field except response metadata.
+    const { message, model, created_at, done, done_reason, ...fields } = msg;
+    const usage = Object.keys(fields).length > 0
+      ? Context.usageNormalize(fields)
+      : undefined;
     events.push({
       type: "done",
       usage,

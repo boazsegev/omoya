@@ -11,7 +11,7 @@ test("pending queue projects first two messages, count, and Alt+Up then drains",
   let release;
   const held = new Promise((resolve) => { release = resolve; });
   const io = fakeIO(async () => { await held; return { type: "done" }; });
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const host = GTUI.host.memory({ width: 80, height: 20 });
   const ui = new GTUI({ host });
   const running = ui.run(createApp(agent));
@@ -40,7 +40,7 @@ test("pending queue projects first two messages, count, and Alt+Up then drains",
 
 test("narrow queue is capped to three rows and retains its Alt+Up hint", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => fakeIO(async () => ({ type: "done" })) });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => fakeIO(async () => ({ type: "done" })) });
   agent.send({ type: 2, content: [{ type: "text", text: "first pending message that is deliberately long" }] });
   agent.send({ type: 2, content: [{ type: "text", text: "second pending message that is deliberately long" }] });
   const host = GTUI.host.memory({ width: 24, height: 20 });

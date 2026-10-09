@@ -112,9 +112,9 @@ function scriptServer(texts, { models } = {}) {
     // test's own model list so a live local server (this dev machine's
     // ollama) never poisons the spawn settings dir with real model names
     // that would reject the suite's synthetic "ollama/m" on a later spawn.
-    if (models && new URL(req.url).pathname === "/api/tags") {
-      return Response.json({ models });
-    }
+    const path = new URL(req.url).pathname;
+    if (path === "/api/tags") return Response.json({ models: models ?? [{ name: "m" }] });
+    if (path === "/api/show") return Response.json({ model_info: { "llama.context_length": 8192 } });
     requests.push(await req.json());
     return frames(DONE_FRAME(texts[Math.min(requests.length - 1, texts.length - 1)]));
   });
@@ -170,7 +170,7 @@ describe("the TUI REPL: one long-lived Agent across turns", () => {
   });
 
   test("/endpoint-model between turns switches the combo the next request carries", async () => {
-    const { requests, url } = scriptServer(["answer one", "answer two"], { models: [{ name: "m" }] });
+    const { requests, url } = scriptServer(["answer one", "answer two"], { models: [{ name: "m" }, { name: "other-model" }] });
     const { stdout, stderr, exit } = await runRepl({
       input: "question one\n/endpoint-model ollama/other-model\nquestion two\n",
       args: ["--model", "ollama/m", "--url", url, "--session", "0"],
@@ -231,8 +231,8 @@ describe("the TUI REPL: one long-lived Agent across turns", () => {
       args: ["--url", url, "--session", "0"],
       settingsDir: SPAWN_SETTINGS, // the test seeds last-model.json here
     });
-    expect(exit).toBe(0);
-    expect(stderr).toContain("Please load a model");
+    expect(exit).toBe(1);
+    expect(stderr).toContain("qualified endpoint/model");
     expect(stderr).not.toContain("(last used)");
     expect(requests).toHaveLength(0); // nothing reached the provider
     // (last-model.json lives in the per-test SPAWN_SETTINGS now)
@@ -275,7 +275,7 @@ describe("ai REPL: session persistence", () => {
     expect(file).not.toBeUndefined();
     expect(existsSync(file)).toBe(true);
     const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
-      .filter((record) => record?.type !== "session-metadata"); // the first, origin line
+      .filter((record) => record?.type !== "session-metadata" && record?.type !== "io-root"); // the first, origin line
     expect(records.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     // a leading system message (type 1) is the real package folder's own
     // AGENTS.md prefill (see lib/env.js resolveSystemPrompt) — legitimate
@@ -340,7 +340,7 @@ describe("ai REPL: session persistence", () => {
     expect(file).not.toBeUndefined();
     expect(existsSync(file)).toBe(true);
     const records = readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
-      .filter((record) => record?.type !== "session-metadata"); // the first, origin line
+      .filter((record) => record?.type !== "session-metadata" && record?.type !== "io-root"); // the first, origin line
     expect(records.every((m) => typeof m.type === "number" && m.op === undefined)).toBe(true);
     // a leading system message (type 1) is the real package folder's own
     // AGENTS.md prefill (see lib/env.js resolveSystemPrompt) — legitimate
@@ -375,33 +375,35 @@ describe("ai REPL: session persistence", () => {
       "--session", sessionId,
     ], { settingsDir: SPAWN_SETTINGS });
     proc.stdin.write("question one\n");
-    // wait for the completed turn, then roll it back, then ^C at the prompt.
-    // rollback index 1 keeps only message 0 — a possible leading system
-    // message (the real package folder's own AGENTS.md prefill; see
-    // lib/env.js resolveSystemPrompt) means that's no longer necessarily
-    // the user message, so roll back to AFTER whatever message 0 turns
-    // out to be instead of hardcoding "1".
+    // Wait for the completed turn, then roll back the assistant answer.
+    // Indices address the entire Context, including an io-root record and
+    // any seeded system message; only the session-metadata file header is
+    // outside the Context. Never derive an index from filtered numeric records.
     let file; // resolved once the subprocess's Agent creates its file
-    const readRecords = () => {
-      const text = readFileSync(file, "utf8").trim();
-      return text === "" ? [] : text.split("\n").map(JSON.parse)
-        .filter((record) => record?.type !== "session-metadata"); // the first, origin line
-    };
+    const readRecords = () => readFileSync(file, "utf8").trim().split("\n").map(JSON.parse)
+      .filter((record) => record?.type !== "session-metadata");
     await until(() => {
       file = Context.fileOf({ dir: dir, id: sessionId });
       return file !== undefined && readFileSync(file, "utf8").includes("answer one");
     });
-    const keep = readRecords().length - 1; // drop just the assistant answer, keep everything up to the user's question
+    const before = readRecords();
+    const keep = before.length - 1; // full context index of the assistant answer
+    expect(before.at(-1).type).toBe(3);
+    expect(before.at(-2).type).toBe(2);
     proc.stdin.write(`/context-rollback ${keep}\n`);
-    await until(() => readRecords().length === keep);
+    const rolledBack = await until(() => {
+      const records = readRecords();
+      if (records.length !== keep || records.at(-1)?.type !== 2) return false;
+      return Context.resume({ dir, id: sessionId }).messages().length === keep;
+    });
+    expect(rolledBack).toBe(true); // persisted rewrite AND resumability before the signal
     proc.kill("SIGINT"); // at the prompt: no cancel armed — dies by the signal
-    const { exit } = await done;
-
+    const { exit, stderr } = await done;
+    expect(stderr).toContain(`context now ${keep}`);
     expect(exit).toBe(130);
-    // rewrite-on-flush: the rolled-back file holds only the remaining message(s)
     const records = readRecords();
-    expect(records).toHaveLength(keep);
-    if (keep > 0) expect(records.at(-1).type).toBe(2); // the user's question survived
+    expect(records).toEqual(before.slice(0, keep)); // removed answer did not reappear
+    expect(Context.resume({ dir, id: sessionId }).messages()).toEqual(records);
     rmSync(file, { force: true });
   }, 20000);
 });
@@ -489,7 +491,7 @@ describe("the TUI: --help contract and usage errors (matching the io/agent CLIs)
     // (last-model.json lives in the per-test SPAWN_SETTINGS now)
     const url = startServer(() => frames(DONE_FRAME("x")));
     const { exit, stderr } = await runRepl({ input: "hi\n", args: ["--url", url, "--session", "0"] });
-    expect(exit).toBe(0);
-    expect(stderr).toContain("Please load a model");
+    expect(exit).toBe(1);
+    expect(stderr).toContain("qualified endpoint/model");
   });
 });

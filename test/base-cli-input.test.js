@@ -10,7 +10,7 @@ import { describe, expect, test } from "bun:test";
 // then parse. Runs in a child process so stdin/EOF are real.
 async function runCliInputHelper(stdinText, { holdOpenMs = 0 } = {}) {
   const child = Bun.spawn(
-    ["bun", "-e", `import { readContextFromStdin } from "${import.meta.dir}/../lib/cli.js";
+    ["bun", "-e", `import { readContextFromStdin } from "${import.meta.dir}/../lib/app/cli.js";
       const ctx = await readContextFromStdin();
       process.stdout.write(JSON.stringify(ctx));`],
     { stdin: "pipe", stdout: "pipe" },

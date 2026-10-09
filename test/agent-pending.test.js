@@ -20,7 +20,7 @@ describe("Agent pending queue", () => {
     mkdirSync(join(env._dir, "prompts"), { recursive: true });
     writeFileSync(join(env._dir, "prompts", "handoff.md"), "---\nname: handoff\ndescription: handoff\n---\nPrepare a handoff.\n");
     const io = scriptedIO([[...TEXT(0, "done"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     agent.send(USER("/handoff next steps\nsecond line"));
     await agent.run();
     expect(io.writes[0].context[0]).toEqual(USER("Prepare a handoff.\nnext steps\nsecond line"));
@@ -31,7 +31,7 @@ describe("Agent pending queue", () => {
     mkdirSync(join(env._dir, "prompts"), { recursive: true });
     writeFileSync(join(env._dir, "prompts", "handoff.md"), "---\nname: handoff\ndescription: handoff\n---\nPrepare a handoff.\n");
     const io = scriptedIO([[...TEXT(0, "done"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("/handoff seeded")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("/handoff seeded")], createIO: () => io });
     agent.context.append(USER("/handoff directly appended"), { merge: false });
     await agent.run();
     expect(io.writes[0].context.slice(0, 2)).toEqual([
@@ -45,7 +45,7 @@ describe("Agent pending queue", () => {
     writeFileSync(join(env._dir, "prompts", "handoff.md"), "---\nname: handoff\ndescription: handoff\n---\n/other\n");
     writeFileSync(join(env._dir, "prompts", "other.md"), "---\nname: other\ndescription: other\n---\nWRONG\n");
     const io = scriptedIO([[...TEXT(0, "first"), { type: "done" }], [...TEXT(0, "second"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("/handoff")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("/handoff")], createIO: () => io });
     await agent.run();
     await agent.run();
     expect(io.writes[0].context[0]).toEqual(USER("/other"));
@@ -57,7 +57,7 @@ describe("Agent pending queue", () => {
     mkdirSync(join(env._dir, "prompts"), { recursive: true });
     writeFileSync(join(env._dir, "prompts", "handoff.md"), "---\nname: handoff\ndescription: handoff\n---\nPrepare a handoff.\n");
     const { io, release } = pausableIO();
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const turn = agent.run();
     expect(agent.send(USER("//handoff details"))).toBe(turn);
     agent.send(USER("/unknown details"));
@@ -71,16 +71,16 @@ describe("Agent pending queue", () => {
   test("await send resolves to the terminal event for the active run", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const terminal = await agent.send(USER("hello"));
     expect(terminal.type).toBe("done");
     expect(io.writes[0].context.at(-1)).toEqual(USER("hello"));
   });
 
   test("a busy send shares its run terminal even when the queue survives an error", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ retry: { attempts: 1 } });
     const io = scriptedIO([[{ type: "error", error: "failed" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const turn = agent.run();
     const sent = agent.send(USER("later"));
     expect(sent).toBe(turn);
@@ -94,7 +94,7 @@ describe("Agent pending queue", () => {
       [...TEXT(0, "first answer"), { type: "done" }],
       [...TEXT(0, "second answer"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     agent.send(USER("queued mid-turn")); // lands after the first flush: mid-turn
     const terminal = await run;
@@ -115,7 +115,7 @@ describe("Agent pending queue", () => {
   test("identical consecutive submissions are ignored", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const first = agent.send(USER("submit once"));
     expect(agent.send(USER("submit once"))).toBe(first);
     await agent.run();
@@ -129,7 +129,7 @@ describe("Agent pending queue", () => {
       [...TEXT(0, "answer one"), { type: "done" }],
       [...TEXT(0, "answer two"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     agent.send(USER("queued one"));
     agent.send(USER("queued two"));
@@ -148,7 +148,7 @@ describe("Agent pending queue", () => {
       [...TOOLCALL(0, "c1", "fake-tool", {}), { type: "done" }],
       [...TEXT(0, "final answer"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     agent.send(USER("queued during tools"));
     const terminal = await run;
@@ -160,12 +160,12 @@ describe("Agent pending queue", () => {
   });
 
   test("an interrupted (error) turn leaves the queue behind — nothing is silently sent", async () => {
-    const env = await testEnv();
+    const env = await testEnv({ retry: { attempts: 1 } });
     const io = scriptedIO([
       [{ type: "error", error: "provider exploded" }],
       [...TEXT(0, "recovered"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     agent.send(USER("still waiting"));
     const terminal = await run;
@@ -183,7 +183,7 @@ describe("Agent pending queue", () => {
   test("pendingPop recalls every message queued while busy (the TUI's Alt+↑ edit recall)", async () => {
     const env = await testEnv();
     const { io, release } = pausableIO();
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const turn = agent.run();
     agent.send(USER("one"));
     agent.send(USER("two"));
@@ -203,7 +203,7 @@ describe("Agent pending queue", () => {
       expect(await Bun.file(file).text()).toContain("durable before read");
       return { type: "done" };
     });
-    const agent = new Agent({ env, model: "p/m", contextId: "pending-durable", createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", contextId: "pending-durable", createIO: () => io });
     file = agent.context.file;
     agent.send(USER("durable before read"));
     await agent.run();
@@ -212,7 +212,7 @@ describe("Agent pending queue", () => {
   test("send starts an idle run and flushes the submitted message before IO", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const terminal = await agent.send(USER("the question"));
     expect(terminal.type).toBe("done");
     expect(agent.context.messages().map((m) => m.type)).toEqual([2, 3]);

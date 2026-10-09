@@ -8,9 +8,15 @@ import { escapeHtml, page } from "./html.js";
 import { markdownHtml } from "./markdown.js";
 import { site } from "../site.js";
 import { settingsSchemaValues } from "../../test/api-schema.js";
+import { publicMembers } from "../../test/api-reference.js";
 
-/** "Env" → "env", for /api/<slug>/ paths. */
+/** "Agent.Env" → "agent.env", for /api/<slug>/ paths. */
 export const slugOf = (name) => name.toLowerCase();
+
+function memberAnchor(module, symbol, member) {
+  const shared = publicMembers(module, symbol).some((other) => other.name === member.name && other.static !== member.static);
+  return `${symbol.name}-${member.name}${shared && member.static ? "-static" : ""}`;
+}
 
 /**
  * The cross-reference index: every documented API point (module export or
@@ -36,23 +42,29 @@ export function buildApiLinks(data) {
     bareCandidates.set(name, candidates);
   };
   for (const mod of data.modules) {
-    if (mod.name === "index") continue;
     const slug = slugOf(mod.name);
     for (const symbol of mod.exports) {
       // A class that shares its module's name (Agent in the Agent module) IS
       // the module's namesake: `Agent.EVENT` means the class's static, never
       // the bare "Agent.Agent" path, so register it under the short path.
-      const symbolPath = symbol.name === mod.name ? mod.name : `${mod.name}.${symbol.name}`;
+      const symbolPath = symbol.name === mod.name.split(".").at(-1) ? mod.name : `${mod.name}.${symbol.name}`;
       register(symbolPath, slug, symbol.name);
-      for (const member of symbol.members ?? []) {
+      for (const member of publicMembers(mod, symbol)) {
         // Qualify every member anchor by its owning symbol. Multiple classes
         // on one module page commonly share names such as close()/flush().
-        const anchor = `${symbol.name}-${member.name}`;
+        const anchor = memberAnchor(mod, symbol, member);
         register(`${symbolPath}.${member.name}`, slug, anchor);
         // A member of the module's same-named class is addressable directly
         // as Module.member (Agent.onEvent for class Agent's method).
-        if (symbol.name === mod.name) register(`${mod.name}.${member.name}`, slug, anchor);
+        if (symbol.name === mod.name.split(".").at(-1)) register(`${mod.name}.${member.name}`, slug, anchor);
       }
+    }
+  }
+  // Core class statics point to their own namespace pages rather than
+  // expanding the same class contracts a second time on Agent's page.
+  for (const name of ["Context", "Env", "IO", "Jobs"]) {
+    if (data.modules.some((mod) => mod.name === `Agent.${name}`)) {
+      exact.set(`Agent.${name}`, { slug: slugOf(`Agent.${name}`), hash: name });
     }
   }
   return {
@@ -60,6 +72,7 @@ export function buildApiLinks(data) {
      *  A dotted mention that matches nothing exactly falls back to its
      *  longest known PREFIX (`Agent.EVENT.REQUEST_START` → `Agent.EVENT`). */
     resolve(mention, moduleName) {
+      if (mention.split(".").some((part) => part.startsWith("_"))) return null;
       const bare = bareCandidates.get(mention);
       const direct = mention.includes(".")
         ? exact.get(`${moduleName}.${mention}`) ?? exact.get(mention)
@@ -124,6 +137,9 @@ function docBodyHtml(doc, moduleName, links) {
   if (doc.returns && (doc.returns.type || doc.returns.description)) {
     parts.push(`<p class="returns">Returns${doc.returns.type ? ` <code>${escapeHtml(doc.returns.type)}</code>` : ""}${doc.returns.description ? ` — ${linkApiReferences(escapeHtml(doc.returns.description), links, moduleName)}` : ""}</p>`);
   }
+  for (const tag of doc.tags ?? []) {
+    if (tag.tag === "throws" || tag.tag === "effects") parts.push(`<p>${tag.tag === "throws" ? "Throws" : "Effects"} — ${linkApiReferences(escapeHtml(tag.text), links, moduleName)}</p>`);
+  }
   return parts.join("\n");
 }
 
@@ -143,30 +159,28 @@ function symbolHtml(symbol, moduleName, links) {
 
 /** One class/namespace member block (signature + doc + params/returns). */
 function memberHtml(member, moduleName, links, anchor = member.name) {
+  const body = member.kind === "property"
+    ? [member.accessors.get && ["Read", member.accessors.get], member.accessors.set && ["Write", member.accessors.set]]
+      .filter(Boolean).map(([label, accessor]) => `<div class="accessor"><h5>${label}: <code>${escapeHtml(accessor.signature)}</code></h5>${docBodyHtml(accessor.doc ?? {}, moduleName, links)}</div>`).join("\n")
+    : member.reference
+      ? `<p>Constructor namespace; see <a href="/api/${slugOf(member.reference.module)}/#${escapeHtml(member.reference.symbol)}"><code>${escapeHtml(member.reference.module)}</code></a> for its full contract.</p>`
+      : docBodyHtml(member.doc ?? {}, moduleName, links);
   return `<section class="symbol member" id="${escapeHtml(anchor)}">
   <h4><code>${escapeHtml(member.signature)}</code> <span class="kind">${escapeHtml(member.kind)}</span></h4>
-  ${docBodyHtml(member.doc ?? {}, moduleName, links)}
+  ${body}
 </section>`;
 }
 
 /** The exports/members of a module, in render order, shared by the page body
  *  and the sidebar section list so anchors can never drift apart. */
-function moduleAnchors(symbol) {
-  const seen = new Map();
-  return (symbol.members ?? []).map((m) => {
-    const count = seen.get(m.name) ?? 0;
-    seen.set(m.name, count + 1);
-    const base = `${symbol.name}-${m.name}`;
-    return { member: m, anchor: count === 0 ? base : `${base}-${count}` };
-  });
+function moduleAnchors(mod, symbol) {
+  return publicMembers(mod, symbol).map((member) => ({ member, anchor: memberAnchor(mod, symbol, member) }));
 }
 
 /** A whole public module page: module doc, then every export with members. */
 function modulePageBody(mod, links) {
   const exports = mod.exports.map((symbol) => {
-    // get/set pairs collect as two same-named members; one anchor can only
-    // ever carry one target, so the later blocks get a suffixed id
-    const members = moduleAnchors(symbol)
+    const members = moduleAnchors(mod, symbol)
       .map(({ member, anchor }) => memberHtml(member, mod.name, links, anchor)).join("\n");
     return `${symbolHtml(symbol, mod.name, links)}${members}`;
   }).join("\n");
@@ -217,7 +231,7 @@ ${layers}
 <h2 id="built-in-io-modes">Built-in IO modes</h2>
 <p>${connectors}</p>
 <h2 id="environment-auto-detection">Environment auto-detection</h2>
-<p>At startup <a href="/api/env/#Env-create"><code>Env.create()</code></a> loads providers and, by default, lets them probe the process environment and the local network. Discoveries are marked <code>dynamic: true</code> — environment-defined endpoints are never persisted, re-detected every startup, and never override an endpoint already configured in settings. No key is ever written to disk by detection. Dynamic model discovery may take time; configuring an API-key endpoint lets the model list be cached for later use.</p>
+<p>At startup <a href="/api/agent.env/#Env-open"><code>Agent.Env.open(path)</code></a> loads providers and detects endpoints from process environment keys and local-server probes. Environment-only discovery is cached once per Env and provider; local probes and custom detectors remain live, and settings-file discovery continues. Detected connection facts and credentials stay in memory, while endpoint and model preferences can persist through <code>env.settings</code>. Repeated identical detection preserves learned catalogs and runtime edits. Explicit settings retain precedence over detected facts; no key is written to disk by detection.</p>
 <table>
   <thead><tr><th>environment</th><th>detected endpoint</th></tr></thead>
   <tbody>
@@ -257,7 +271,7 @@ function contractSourceHtml(source, links) {
       ${td.properties.length ? `<dl class="params">${td.properties.map((p) => `<dt><code>${escapeHtml(p.name)}</code> <span class="type">${escapeHtml(p.type)}</span></dt><dd>${linkApiReferences(escapeHtml(p.description), links, "")}</dd>`).join("")}</dl>` : ""}</div>`).join("\n"));
   }
   if (source.symbols) {
-    parts.push(`<ul class="compact">${source.symbols.map((s) => `<li><code>${escapeHtml(s.signature ?? s.name)}</code>${s.doc?.description ? ` — ${linkApiReferences(escapeHtml(firstSentence(s.doc.description)), links, "")}` : ""}</li>`).join("")}</ul>`);
+    parts.push(source.symbols.map((symbol) => `<section class="contract-symbol"><h5><code>${escapeHtml(symbol.signature ?? symbol.name)}</code></h5>${docBodyHtml(symbol.doc ?? {}, "", links)}${publicMembers({ exports: source.symbols }, symbol).map((member) => memberHtml(member, "", links, `${symbol.name}-${member.name}`)).join("\n")}</section>`).join("\n"));
   }
   if (source.members) {
     parts.push(`<ul class="compact">${source.members.map((m) => `<li><code>${escapeHtml(m.signature)}</code>${m.doc?.description ? ` — ${linkApiReferences(escapeHtml(firstSentence(m.doc.description)), links, "")}` : ""}</li>`).join("")}</ul>`);
@@ -326,13 +340,12 @@ ${schema.entries.map((entry) => `<section class="symbol" id="${escapeHtml(entry.
 }
 
 /** Sidebar sub-sections for one module page: every export and its members,
- *  mirroring the anchor scheme the page renderer uses (Symbol-member, with
- *  numeric suffixes for repeated get/set-style member names). */
+ *  mirroring the anchor scheme the page renderer uses (Symbol-member). */
 function moduleSections(mod) {
   return mod.exports.map((symbol) => ({
     hash: symbol.name,
     label: symbol.name,
-    children: moduleAnchors(symbol).map(({ member, anchor }) => ({ hash: anchor, label: member.name })),
+    children: moduleAnchors(mod, symbol).map(({ member, anchor }) => ({ hash: anchor, label: member.name })),
   }));
 }
 
@@ -360,7 +373,7 @@ export function apiPages(data) {
     [...data.architecture.layers.map((l) => ({ hash: slugOf(l.name), label: l.name })),
       ...["Executables", "Built-in IO modes", "Environment auto-detection", "Harness environment variables"].map((label) => ({ hash: slugOf(label).replaceAll(" ", "-"), label }))]);
   for (const mod of data.modules) {
-    const text = [mod.doc, ...mod.exports.flatMap((e) => [e.name, e.signature, e.doc?.description, ...(e.members ?? []).map((m) => `${m.name} ${m.doc?.description ?? ""}`)])].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 6000);
+    const text = [mod.doc, ...mod.exports.flatMap((e) => [e.name, e.signature, e.doc?.description, ...publicMembers(mod, e).map((m) => `${m.name} ${m.doc?.description ?? ""}`)])].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 6000);
     add(`/api/${slugOf(mod.name)}/`, `${mod.name} module`, `Omoya ${mod.name} module (${mod.file}) — generated API reference.`,
       modulePageBody(mod, links), text, moduleSections(mod));
   }

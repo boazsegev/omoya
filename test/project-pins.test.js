@@ -1,25 +1,43 @@
 // Pinned projects: settings.projects persists to the user projects.json; a
 // pinned project's model memory is selected before the global memory.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
 import { NAMES } from "../lib/namespace.js";
-import { readLastCombo, endpointPolicySet } from "../lib/cli.js";
+import { readLastCombo } from "../lib/app/shared/catalog.js";
+import { endpointPolicySet } from "../lib/app/shared/endpoint-policy.js";
 
 /** A settings folder shared by project Envs over one stub provider. */
-function pinEnv(settingsDir, cwd) {
+async function pinEnv(settingsDir, cwd) {
   class Wire { static provider = {}; static async models() { return {}; } }
-  return new Env({ dir: settingsDir, cwd, settingsDir, providers: { wire: Wire }, settings: {
-    providers: { one: { provider: "wire", url: "http://one" }, two: { provider: "wire", url: "http://two" } },
-    one: { models: { a: null, b: null } },
-    two: { models: { c: null } },
+  const env = await Env.open(cwd, { dir: settingsDir, settingsDir, providers: { wire: Wire }, settings: {
+    providers: {
+      one: { provider: "wire", url: "http://one", models: { a: null, b: null } },
+      two: { provider: "wire", url: "http://two", models: { c: null } },
+    },
   } });
+  await env.ready();
+  return env;
+}
+
+/** Await a selection's persisted global history notification. */
+function rememberPair(env, selector) {
+  const previous = env.models(true).get(selector)?.lastUsed;
+  return new Promise((resolve) => {
+    const handle = env.onEvent(Env.EVENT.MODELS_CHANGED, () => {
+      const current = env.models(true).get(selector)?.lastUsed;
+      if (current == null || current === previous) return;
+      env.offEvent(handle);
+      resolve();
+    });
+    env.connection(selector);
+  });
 }
 
 /** Fresh settings folder plus two project folders. */
 function folders() {
-  const root = resolve(mkdtempSync("./ai-tmp/project-pins-")); // env.cwd is absolute: so are projects keys
+  const root = resolve(mkdtempSync("./ai-tmp/project-pins-")); // env.folder is absolute: so are projects keys
   const settings = join(root, "settings");
   const alpha = join(root, "alpha");
   const beta = join(root, "beta");
@@ -27,50 +45,72 @@ function folders() {
   return { settings, alpha, beta };
 }
 
-/** Parse the persisted projects.json. */
-const projectsFile = (settings) => JSON.parse(readFileSync(join(settings, "projects.json"), "utf8"));
-
 describe("pinned projects", () => {
-  test("pins persist to projects.json and the pinned project's last model wins over the global one", () => {
+  test("pins persist to the global projects registry and the pinned project's last model wins over the global one", async () => {
     const { settings, alpha, beta } = folders();
-    const a = pinEnv(settings, alpha);
-    a.settings.projects[alpha] = { name: "alpha", models: {} };
-    a.connection("one/a"); // alpha remembers one/a
-    a._writeQueue.drain();
-    expect(Object.keys(projectsFile(settings).projects)).toEqual([alpha]);
-    expect(Object.keys(projectsFile(settings).projects[alpha].models)).toEqual(["one/a"]);
-    expect(existsSync(join(settings, "settings.json"))).toBe(false);
+    await Env.ready();
+    Env.settings.projects[alpha] = { models: {} };
+    let a, b, again;
+    try {
+      a = await pinEnv(settings, alpha);
+      await rememberPair(a, "one/a"); // alpha remembers one/a
+      await Env.settingsFlush();
+      expect(Object.keys(Env.settings.projects[alpha].models)).toEqual(["one/a"]);
+      expect(existsSync(join(settings, "settings.json"))).toBe(false);
 
-    const b = pinEnv(settings, beta); // unpinned: global memory only
-    b.connection("two/c");
-    expect(readLastCombo(b)).toBe("two/c");
-    b._writeQueue.drain();
-    expect(Object.keys(projectsFile(settings).projects)).toEqual([alpha]);
+      b = await pinEnv(settings, beta); // unpinned: global memory only
+      await rememberPair(b, "two/c");
+      expect(readLastCombo(b)).toBe("two/c");
+      expect(Object.keys(Env.settings.projects).filter((path) => path === alpha)).toEqual([alpha]);
 
-    a.close(); // one open Env per folder
-    const again = pinEnv(settings, alpha); // a new env for alpha: project memory first
-    expect(again.models().get("one/a").projectLastUsed).toEqual(expect.any(String));
-    expect(again.models().get("two/c").projectLastUsed).toBe(null);
-    expect(readLastCombo(again)).toBe("one/a");
-    // unavailable project pairs fall back to the global list
-    endpointPolicySet(again, "one", { disabled: true });
-    expect(readLastCombo(again)).toBe("two/c");
+      await a.close(); // one open Env per folder
+      a = undefined;
+      again = await pinEnv(settings, alpha); // a new env for alpha: project memory first
+      await new Promise((resolve) => {
+        const handle = again.onEvent(Env.EVENT.MODELS_CHANGED, () => {
+          if (again.models().get("two/c")?.lastUsed == null) return;
+          again.offEvent(handle);
+          resolve();
+        });
+        if (again.models().get("two/c")?.lastUsed != null) { again.offEvent(handle); resolve(); }
+      });
+      expect(again.models().get("one/a").projectLastUsed).toEqual(expect.any(String));
+      expect(again.models().get("two/c").projectLastUsed).toBe(null);
+      expect(readLastCombo(again)).toBe("one/a");
+      // unavailable project pairs fall back to the global list
+      endpointPolicySet(again, "one", { disabled: true });
+      expect(readLastCombo(again)).toBe("two/c");
+    } finally {
+      delete Env.settings.projects[alpha];
+      await Env.settingsFlush();
+      await Promise.all([a?.close(), b?.close(), again?.close()]);
+    }
   });
 
-  test("a project's memory keeps the newest pairs; unpinning deletes its entry", () => {
+  test("a project's memory keeps the newest pairs; external unpinning removes its entry", async () => {
     const { settings, alpha } = folders();
-    const env = pinEnv(settings, alpha);
-    env.settings.projects[alpha] = { name: "alpha", models: {} };
-    for (const pair of ["one/a", "one/b", "two/c", "one/a"]) env.connection(pair);
-    expect(Object.keys(env.settings.projects[alpha].models)).toEqual(["one/a", "two/c", "one/b"]);
-    delete env.settings.projects[alpha];
-    env._writeQueue.drain();
-    expect(projectsFile(settings).projects).toEqual({});
+    await Env.ready();
+    Env.settings.projects[alpha] = { models: {} };
+    const env = await pinEnv(settings, alpha);
+    try {
+      for (const pair of ["one/a", "one/b", "two/c", "one/a"]) await rememberPair(env, pair);
+      expect(Object.keys(Env.settings.projects[alpha].models)).toEqual(["one/a", "two/c", "one/b"]);
+      delete Env.settings.projects[alpha];
+      expect(env.settings.projects.toJSON().this).toEqual({ name: "this", folder: alpha });
+      expect(env.settings.projects.toJSON()[alpha]).toEqual({ name: "this", folder: alpha });
+    } finally {
+      delete Env.settings.projects[alpha];
+      await Env.settingsFlush();
+      await env.close();
+    }
   });
 
-  test("project settings cannot pin projects", () => {
+  test("project settings cannot pin projects", async () => {
     const { settings, alpha, beta } = folders();
     writeFileSync(join(alpha, NAMES.projectSettings), JSON.stringify({ projects: { [beta]: { name: "beta" } } }));
-    expect(pinEnv(settings, alpha).settings.projects[beta]).toBeUndefined();
+    const env = await pinEnv(settings, alpha);
+    expect(env.settings.projects.toJSON().this).toEqual({ name: "this", folder: alpha });
+      expect(env.settings.projects.toJSON()[alpha]).toEqual({ name: "this", folder: alpha });
+    await env.close();
   });
 });

@@ -41,7 +41,7 @@ describe("httpConnect", () => {
 
 describe("httpSend composition", () => {
   test("send composes sendHeaders(msg[0]) + sendBody(msg[1])", async () => {
-    const conn = httpConnect("http://x/chat", { requestSignal: undefined });
+    const conn = httpConnect("http://x/chat", { signal: undefined });
     await httpSend(conn, [{ "content-type": "application/json" }, { a: 1 }]);
     const [url, init] = mock.calls[0];
     expect(url).toBe("http://x/chat");
@@ -57,9 +57,10 @@ describe("httpSend composition", () => {
     expect(mock.calls[0][1].body).toBeUndefined();
   });
 
-  test("aiio.requestSignal is wired into fetch", async () => {
+  test("connection.signal is wired into fetch", async () => {
     const ctrl = new AbortController();
-    const conn = httpConnect("http://x/chat", { requestSignal: ctrl.signal });
+    const conn = httpConnect("http://x/chat", {});
+    conn.signal = ctrl.signal;
     await httpSend(conn, [{}, { a: 1 }]);
     expect(mock.calls[0][1].signal).toBe(ctrl.signal);
   });
@@ -115,6 +116,22 @@ describe("httpRead blocking-await line reader", () => {
     expect(await httpRead(conn)).toEqual({ type: "response.created" });
     expect(await httpRead(conn)).toEqual({ type: "response.output_text.delta", delta: "hi" });
     expect(await httpRead(conn)).toBeNull();
+  });
+
+  test("delivers each SSE frame before the response finishes", async () => {
+    let push;
+    const encoder = new TextEncoder();
+    mock.handler = () => new Response(new ReadableStream({ start(controller) { push = controller; } }));
+    const conn = httpConnect("http://x/chat", {});
+    await httpSend(conn, [{}, {}]);
+    push.enqueue(encoder.encode('data: {"type":"response.reasoning_summary_text.delta","delta":"thinking"}\n\n'));
+    expect(await Promise.race([httpRead(conn), new Promise((resolve) => setTimeout(() => resolve("late"), 100))]))
+      .toEqual({ type: "response.reasoning_summary_text.delta", delta: "thinking" });
+    push.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"answer"}\n\n'));
+    expect(await Promise.race([httpRead(conn), new Promise((resolve) => setTimeout(() => resolve("late"), 100))]))
+      .toEqual({ type: "response.output_text.delta", delta: "answer" });
+    push.close();
+    await httpClose(conn);
   });
 
   test("buffers messages split across stream chunks", async () => {

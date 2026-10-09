@@ -65,6 +65,20 @@ test("authoritative history keeps a card's expansion state on its existing row",
   expect(blocks[0].open).toBe(true);
 });
 
+test("message action controls float at the bottom edge, not above the message", () => {
+  const rule = css.match(/\.block-controls:not\(\.always\)\s*\{([^}]+)\}/)?.[1];
+  expect(rule).toBeDefined();
+  expect(rule).toMatch(/bottom:\s*[^;]+;/);
+  expect(rule).not.toMatch(/(?:^|;)\s*top:/);
+});
+
+test("composer dock stacks its jump links above hovered message rows", () => {
+  const dock = css.match(/\.composer-dock\s*\{([^}]+)\}/)?.[1];
+  const hoveredRow = css.match(/\.message-row:hover, \.message-row:focus-within\s*\{([^}]+)\}/)?.[1];
+  expect(dock).toMatch(/position:\s*relative/);
+  expect(Number(dock.match(/z-index:\s*(\d+)/)?.[1])).toBeGreaterThan(Number(hoveredRow.match(/z-index:\s*(\d+)/)?.[1]));
+});
+
 test("motion is disabled when the user requests reduced motion", () => {
   expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
   expect(css).toContain(".message-row.entering");

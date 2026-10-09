@@ -16,7 +16,7 @@
  *      folders and `bin/*`; CONTRACTS (context/provider/
  *      tool/timeout/auth/settings schemas) are collected FROM SOURCE —
  *      module docs, @typedef blocks, exported symbols, class members,
- *      const keys, a README table, and live settings — never copied as
+ *      const keys, a GUIDE table, and live settings — never copied as
  *      prose here, so code and docs are picked up on the next run. The
  *      TOOL CATALOG is AUTO-DETECTED the same
  *      way: every package `tools/*.js` module is imported and its
@@ -47,20 +47,17 @@ const SOURCE_EXTENSIONS = new Set([".js"]);
 const isSourceFile = (entry) => entry.isFile() && SOURCE_EXTENSIONS.has(extname(entry.name));
 
 const PUBLIC_MODULES = [
-  { name: "Sandbox", file: "lib/sandbox.js" },
-  { name: "Markdown", file: "lib/app/markdown/index.js" },
-  { name: "Context", file: "lib/context.js" },
-  { name: "Env", file: "lib/env.js" },
-  { name: "IO", file: "lib/io.js" },
+  { name: "App.Markdown", file: "lib/app/markdown/index.js" },
+  { name: "Agent.Context", file: "lib/context.js" },
+  { name: "Agent.Env", file: "lib/env.js" },
+  { name: "Agent.IO", file: "lib/io.js" },
   { name: "Agent", file: "lib/agent.js" },
-  { name: "CLI", file: "lib/cli.js" },
-  { name: "Jobs", file: "lib/jobs.js" },
+  { name: "App.CLI", file: "lib/app/cli.js" },
+  { name: "Agent.Jobs", file: "lib/jobs.js" },
   { name: "App", file: "lib/app.js" },
-  { name: "TUI", file: "lib/app/tui/index.js" },
-  { name: "Web", file: "lib/app/web/index.js" },
-  { name: "GTUI", file: "lib/app/gtui/gtui.js" },
-  { name: "index", file: "lib/index.js" },
-  { name: "index_app", file: "lib/index_app.js" },
+  { name: "App.TUI", file: "lib/app/tui/index.js" },
+  { name: "App.Web", file: "lib/app/web/index.js" },
+  { name: "App.GTUI", file: "lib/app/gtui/gtui.js" },
 ];
 
 /* ========================================================== contracts */
@@ -110,7 +107,7 @@ const CONTRACTS = [
       { label: "PUBLISHES — registration and the catalog (Env.tools(safe, selector) -> ToolInfo; provider tools shadow)", file: "lib/env/tool-registry.js", symbols: ["registerTool", "toolsList", "callTool"] },
       { label: "PUBLISHES — a worked example: the minimal wrapper shape (read-only, no ctx)", file: "tools/read.js", example: true },
       { label: "PUBLISHES — a worked example: sandboxed (`sandbox: true`, forked, write-jailed)", file: "tools/write.js", example: true },
-      { label: "PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop)", file: "tools/process.js", symbols: ["process", "toolDescription"] },
+      { label: "PUBLISHES — Agent-owned background commands: bash(background) and process-list/output/stop", file: "tools/process.js", symbols: ["processList", "processOutput", "processStop", "toolDescription"] },
       { label: "PUBLISHES — Agent's current filtered model-facing descriptors", file: "lib/agent.js", members: { class: "Agent", names: ["tools"] } },
       { label: "REQUIRES — internal dispatch constructs every in-process call's (args, ctx); tools receive capabilities, hosts do not construct them", file: "lib/agent/tool-context.js", symbols: ["toolContextFor"] },
       { label: "REQUIRES — dispatch: which tools fork (sandboxed worker, REDUCED ctx) vs stay in-process (full ctx)", file: "lib/agent/tool-exec.js", symbols: ["callToolFor"] },
@@ -122,19 +119,19 @@ const CONTRACTS = [
   {
     name: "Skills — activation, explicit composition, and resource overlays",
     sources: [
-      { file: "lib/env.js", members: { class: "Env", names: ["skills", "skillResource"] } },
+      { file: "lib/env.js", members: { class: "Env", names: ["skills"] } },
       { file: "tools/skill.js", symbols: ["skill"] },
-      { file: "tools/skill-resource.js", symbols: ["skillResource"] },
+      { file: "tools/resource.js", symbols: ["resource"] },
     ],
   },
   {
     name: "Agent identity and delegation metadata",
     sources: [
-      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "description", "spawnPermission"] } },
+      { file: "lib/agent.js", members: { class: "Agent", names: ["parent", "children", "childCreate", "name", "description", "can"] } },
       { label: "Env plugins: how a higher layer installs its Env members (Env.extend)", file: "lib/env/extend.js", moduleDoc: true },
       { label: "Agent's Env plugin: the active-Agent registry, agentCreate, capacity, AGENT_* events", file: "lib/agent/env-plugin.js", moduleDoc: true },
       { label: "Trusted Agent event hooks: scan roots, lifecycle and observer diagnostics", file: "lib/agent/hooks.js", moduleDoc: true },
-      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend", "envs", "use", "closed", "name"] } },
+      { file: "lib/env.js", members: { class: "Env", names: ["onEvent", "offEvent", "EVENT", "extend", "envs", "open", "closed", "name"] } },
     ],
   },
   {
@@ -148,7 +145,6 @@ const CONTRACTS = [
     name: "Agent policy — settings resolved once per Agent (context guard, retries, tool timeouts)",
     sources: [
       { file: "lib/agent/policy.js", moduleDoc: true, symbols: ["POLICY_SETTINGS", "agentPolicy", "retryDelay"] },
-      { label: "agent.policy", file: "lib/agent.js", members: { class: "Agent", names: ["policy"] } },
       { file: "lib/agent/run.js", symbols: ["contextGuardTrip"] },
       { file: "lib/agent/tool-timeout-settings.js", moduleDoc: true, symbols: ["DEFAULT_TOOL_TIMEOUT", "DEFAULT_TOOL_TIMEOUT_LIMIT", "TOOL_ON_TIMEOUT_LIMIT"] },
       { file: "lib/agent/tool-timeout.js", moduleDoc: true, symbols: ["prepareToolTimeout", "runWithToolTimeout"] },
@@ -179,10 +175,16 @@ const CONTRACTS = [
     ],
   },
   {
+    name: "Settings store — Env.SettingsStore, the settings aggregator",
+    sources: [
+      { file: "lib/env/settings-store.js", moduleDoc: true, symbols: ["SettingsStore"] },
+    ],
+  },
+  {
     name: "Settings schema — the merged settings tree",
     sources: [
       { file: "lib/env/settings.js", moduleDoc: true },
-      { file: "README.md", table: "Settings" },
+      { file: "GUIDE.md", table: "Settings" },
     ],
   },
 ];
@@ -307,7 +309,7 @@ function blockEnd(src, open) {
  * @returns {Array<{name: string, kind: string, signature: string, doc: object|null}>}
  */
 function frozenObjectMembers(body) {
-  const candidates = [...body.matchAll(/^(\s*)(?:(get|set)\s+)?([\w$]+)\s*(?::\s*(async\s*)?)?\(/gm)];
+  const candidates = [...body.matchAll(/^(\s*)(?:(get|set)\s+)?(?:(async)\s+)?([\w$]+)\s*(?::\s*(async\s*)?)?\(/gm)];
   const indents = [...body.matchAll(/^(\s*)\S/gm)].map((m) => m[1].length);
   const indent = Math.min(...indents);
   if (!Number.isFinite(indent)) return [];
@@ -321,8 +323,8 @@ function frozenObjectMembers(body) {
     // arrow property (`name: () =>`). Do not mistake calls in a value for it.
     if (!(following.startsWith("{") || following.startsWith("=>"))) continue;
     const accessor = m[2];
-    const name = m[3];
-    const async = Boolean(m[4]);
+    const name = m[4];
+    const async = Boolean(m[3] || m[5]);
     const params = compactParams(paramList(body, open));
     members.push({
       name,
@@ -486,6 +488,9 @@ function collectModule(file, cache) {
   // Imported names can be re-exported through a façade. Resolve them so the
   // public reference documents the owning module's actual contract.
   const imports = new Map();
+  for (const m of src.matchAll(/^import\s+([\w$]+)\s+from\s*["']([^"']+)["'];/gm)) {
+    imports.set(m[1], { imported: "default", file: resolve(dirname(file), m[2]) });
+  }
   for (const m of src.matchAll(/^import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["'];/gm)) {
     for (const spec of m[1].split(",").map((s) => s.trim()).filter(Boolean)) {
       const [imported, local = imported] = spec.split(/\s+as\s+/).map((s) => s.trim());
@@ -502,7 +507,10 @@ function collectModule(file, cache) {
       const [local, exported = local] = spec.split(/\s+as\s+/).map((s) => s.trim());
       const imported = !m[2] && imports.get(local);
       const target = imported ? collectModule(imported.file, cache) : directTarget;
-      const found = target.exports.find((e) => e.name === (imported?.imported ?? local));
+      // A default-exported class can also be re-exported by the importing
+      // façade under its local name (Agent's imported Jobs class).
+      const found = target.exports.find((e) => e.name === (imported?.imported ?? local))
+        ?? (imported?.imported === "default" ? target.exports.find((e) => e.kind === "class" && e.name === local) : null);
       if (!found) {
         if (target === mod) continue; // a local symbol exported by name: covered above
         // `default as Name` has no named source entry to resolve. Its
@@ -537,11 +545,17 @@ function collectModule(file, cache) {
     const open = assignment.index + assignment[0].lastIndexOf("{");
     const body = src.slice(open + 1, blockEnd(src, open));
     for (const entry of body.split(",").map((item) => item.trim()).filter(Boolean)) {
-      const name = /^(\w+)/.exec(entry)?.[1];
-      if (!name || owner.members.some((member) => member.name === name)) continue;
-      const exported = mod.exports.find((symbol) => symbol.name === name);
+      const match = /^(\w+)(?:\s*:\s*(\w+))?/.exec(entry);
+      const name = match?.[1];
+      if (!name || name.startsWith("_") || owner.members.some((member) => member.name === name)) continue;
+      const local = match[2] ?? name;
+      const imported = imports.get(local);
+      const targetModule = imported && collectModule(imported.file, cache);
+      const target = targetModule?.exports.find((symbol) => symbol.name === imported.imported)
+        ?? (imported?.imported === "default" ? targetModule?.exports.find((symbol) => symbol.kind === "class" && symbol.name === local) : undefined);
+      const exported = mod.exports.find((symbol) => symbol.name === name) ?? target;
       const doc = exported?.doc ?? { description: `Public ${name} namespace member; see its owning module for the contract.`, params: [], returns: null, tags: [] };
-      owner.members.push({ name, kind: exported?.kind === "function" ? "method" : "field", static: true,
+      owner.members.push({ name, kind: exported?.kind === "class" ? "class" : exported?.kind === "function" ? "method" : "field", static: true,
         signature: exported?.kind === "function" ? exported.signature.replace(/^(?:async )?\w+/, name) : `static ${name}`, doc });
     }
   }
@@ -550,14 +564,10 @@ function collectModule(file, cache) {
   if (namespace) {
     const open = src.indexOf("{", namespace.index);
     const body = src.slice(open + 1, blockEnd(src, open));
-    const members = [...body.matchAll(/(?:^|,)\s*([\w$]+)\s*(?=:|,|$)/g)].map((match) => ({
+    const members = [...body.matchAll(/(?:^|,)\s*([\w$]+)\s*(?=:|,|$)/g)].filter((match) => !match[1].startsWith("_")).map((match) => ({
       name: match[1], kind: "field", signature: match[1],
       doc: { description: `Public ${match[1]} namespace member; see its owning module for the contract.`, params: [], returns: null, tags: [] },
     }));
-    if (body.includes("...Core")) {
-      const core = collectModule(resolve(dirname(file), "index.js"), cache);
-      members.unshift(...core.exports.find((symbol) => symbol.name === "default").members);
-    }
     mod.exports.push({ name: "default", kind: "namespace", from: file, signature: "default namespace", members,
       doc: { description: mod.doc || "Public package namespace.", params: [], returns: null, tags: [] } });
   }
@@ -798,7 +808,7 @@ export async function collectSettingsSchema() {
   await import("../lib/agent.js"); // Env plugins contribute their settings (Env.extend)
   // No host settings, project config, or credentials may enter generated docs.
   const isolated = mkdtempSync(join(ROOT, "ai-tmp", "api-settings-"));
-  const env = new Env({ dir: isolated, cwd: isolated, settingsDir: null });
+  const env = await Env.open(isolated, { dir: isolated, settingsDir: null, init: { providers: false, tools: false, detect: false, models: false } });
   try {
     const core = JSON.parse(JSON.stringify(env.settings));
     await toolsLoad(env, { dirs: [join(ROOT, "tools")] });
@@ -927,25 +937,27 @@ function classifyHelperGroups(ownedDirs, publicByFile) {
  */
 export function collectArchitecture(modules = PUBLIC_MODULES) {
   const publicByFile = new Map(modules.map((m) => [m.file, m.name]));
-  const libDir = join(ROOT, "lib");
-  const helperDirs = readdirSync(libDir, { withFileTypes: true }).filter((e) => e.isDirectory());
-  const layers = modules.map(({ name, file }) => {
+  const layers = [...modules].sort(byName).map(({ name, file }) => {
     const facadeImports = sourceImports(join(ROOT, file));
+    // A nested index/GTUI facade owns its containing folder; other facades
+    // own their sibling basename folder. Namespace spelling never sets paths.
+    const container = dirname(join(ROOT, file));
     const base = basename(file, ".js");
-    // A façade folder holding only sub-areas (lib/app/{gtui,shared,tui,web})
-    // lists those areas as its helper groups.
-    const ownedDirs = helperDirs
-      .filter((entry) => entry.name === base || entry.name.startsWith(`${base}-`))
-      .flatMap((entry) => {
-        const dir = join(libDir, entry.name);
+    const roots = base === "index" || basename(container) === base ? [container]
+      : readdirSync(container, { withFileTypes: true }).filter((entry) => entry.isDirectory() &&
+        (entry.name === base || entry.name.startsWith(`${base}-`))).map((entry) => join(container, entry.name));
+    const ownedDirs = roots
+      .flatMap((dir) => {
         const children = readdirSync(dir, { withFileTypes: true });
         const areas = children.filter((child) => child.isDirectory());
-        return areas.length > 0 && !children.some((child) => child.isFile() && child.name.endsWith(".js"))
-          ? areas.map((area) => ({ name: `${entry.name}/${area.name}`, dir: join(dir, area.name) }))
-          : [{ name: entry.name, dir }];
+        return areas.length > 0 && (dir === join(ROOT, "lib", "app") ||
+          !children.some((child) => child.isFile() && child.name.endsWith(".js")))
+          ? areas.map((area) => ({ name: rootPath(join(dir, area.name)), dir: join(dir, area.name) }))
+          : [{ name: rootPath(dir), dir }];
       })
+      .sort(byName)
       .map(({ name: dirName, dir }) => {
-        const files = sourceFiles(dir);
+        const files = sourceFiles(dir).sort();
         const dirImports = [...new Set(files.flatMap((f) => sourceImports(join(ROOT, f))))].sort();
         return { name: dirName, path: rootPath(dir), files, imports: dirImports };
       });
@@ -957,7 +969,7 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
       name,
       file,
       imports: allImports,
-      publicDependencies: [...new Set(allImports.map((target) => publicByFile.get(target)).filter(Boolean))],
+      publicDependencies: [...new Set(allImports.map((target) => publicByFile.get(target)).filter((target) => target && target !== name))].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })),
       helperGroups,
     };
   });
@@ -965,10 +977,10 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   // forward to (the shims are generated; the docs live with the scripts)
   const binDir = join(ROOT, "bin");
   const shimFiles = readdirSync(binDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name !== ".DS_Store")
+    .filter((entry) => entry.isFile() && extname(entry.name) === "")
     .map((entry) => join(binDir, entry.name));
   const scriptFiles = readdirSync(join(binDir, "scripts"), { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name !== ".DS_Store")
+    .filter((entry) => entry.isFile() && extname(entry.name) === "")
     .map((entry) => join(binDir, "scripts", entry.name));
   const executables = [...shimFiles, ...scriptFiles].map((file) => ({
     name: basename(file), file: rootPath(file), doc: sourceDoc(file), imports: sourceImports(file),
@@ -979,7 +991,7 @@ export function collectArchitecture(modules = PUBLIC_MODULES) {
   const connectors = [...modeList.matchAll(/["']([^"']+)["']/g)].map((match) => ({
     name: match[1], file: rootPath(cliRunFile), doc: "Built-in IO mode.", imports: sourceImports(cliRunFile),
   }));
-  return { layers, executables, connectors };
+  return { layers, executables: executables.sort(byName), connectors: connectors.sort(byName) };
 }
 
 /** Members a layer installs on another public class after the fact — an
@@ -1013,19 +1025,13 @@ function installedPluginMembers(src) {
  * @param {Array<{name: string, file: string}>} modules
  * @returns {Promise<{generated: string, root: string, architecture: object, contracts: Array, contractDrift: string[], modules: Array}>} the JSON document
  */
-/** The one alphabetical order every generated API artifact shares:
- *  case-insensitive by name, so API.md, API-schema.md, and the website
- *  pages/nav/search all present the same A–Z listing regardless of the
- *  source files' declaration order. */
+/** Case-insensitive A–Z ordering within each shared API category. */
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
 
-/** A module's exports: object-like symbols (classes, namespaces, frozen
- *  constant objects — anything carrying members) first, then plain
- *  functions, each group alphabetical. Members stay alphabetical. */
-const byKindThenName = (a, b) => {
-  const rank = (e) => (e.kind === "function" ? 1 : 0);
-  return rank(a) - rank(b) || byName(a, b);
-};
+/** Namespace constructors first, then case-sensitive A–Z/a–z symbol names. */
+const byKindThenName = (a, b) =>
+  Number(b.kind === "class") - Number(a.kind === "class") ||
+  (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
 export async function collect(modules = PUBLIC_MODULES) {
   const cache = new Map();
@@ -1049,7 +1055,11 @@ export async function collect(modules = PUBLIC_MODULES) {
     const mod = collectModule(join(ROOT, file), cache);
     return {
       name, file, doc: mod.doc,
-      exports: mod.exports.map((e) => ({ ...e, from: e.from.startsWith(ROOT) ? e.from.slice(ROOT.length) : e.from })),
+      // The entry points publish their own classes only. Core namespace
+      // statics on Agent link to their individual owning pages.
+      exports: mod.exports.filter((e) => (name !== "App" || e.name === "App" || e.name === "default") &&
+        (name !== "Agent" || e.kind !== "class" || e.name === "Agent"))
+        .map((e) => ({ ...e, from: e.from.startsWith(ROOT) ? e.from.slice(ROOT.length) : e.from })),
     };
   });
   // A public module's own folder (lib/<module>/) may hold its plugins.
@@ -1060,7 +1070,7 @@ export async function collect(modules = PUBLIC_MODULES) {
   };
   for (const sourceFile of modules.flatMap(({ file }) => moduleFiles(file))) {
     for (const installed of installedPluginMembers(readFileSync(sourceFile, "utf8"))) {
-      const ownerModule = collectedModules.find((mod) => mod.exports.some((symbol) => symbol.kind === "class" && symbol.name === installed.owner));
+      const ownerModule = collectedModules.find((mod) => mod.name.split(".").at(-1) === installed.owner && mod.exports.some((symbol) => symbol.kind === "class" && symbol.name === installed.owner));
       const owner = ownerModule?.exports.find((symbol) => symbol.kind === "class" && symbol.name === installed.owner);
       if (owner && !owner.members.some((member) => member.name === installed.member.name)) {
         owner.members.push({ ...installed.member, from: sourceFile.startsWith(ROOT) ? sourceFile.slice(ROOT.length) : sourceFile });
@@ -1069,7 +1079,18 @@ export async function collect(modules = PUBLIC_MODULES) {
   }
   for (const mod of collectedModules) {
     mod.exports.sort(byKindThenName);
-    for (const symbol of mod.exports) symbol.members?.sort(byName);
+    for (const symbol of mod.exports) {
+      for (const member of symbol.members ?? []) {
+        if (!member.static) continue;
+        const namespace = collectedModules.find((entry) => entry.name === `${mod.name}.${member.name}`);
+        const constructor = namespace?.exports.find((entry) => entry.kind === "class" && entry.name === member.name);
+        if (!constructor) continue;
+        member.kind = "class";
+        member.reference = { module: namespace.name, symbol: constructor.name };
+        member.doc = { description: `Constructor namespace; see [${namespace.name}](#${namespace.name.toLowerCase().replaceAll(".", "")}) for its full contract.`, params: [], returns: { type: `typeof ${namespace.name}`, description: "The shared constructor namespace." }, tags: [] };
+      }
+      symbol.members?.sort(byKindThenName);
+    }
   }
   collectedModules.sort(byName);
   return {
@@ -1080,6 +1101,50 @@ export async function collect(modules = PUBLIC_MODULES) {
     contractDrift: missing,
     modules: collectedModules,
   };
+}
+
+/**
+ * Public renderable members of a collected symbol. All reference formats use
+ * this one projection: internal plugin hooks and separately exported static
+ * aliases are not standalone entries. Accessors with the same name become one
+ * property carrying both original contracts in `accessors.get`/`.set`.
+ * The raw collector remains available for
+ * contract validation and source ownership.
+ * @param {object} module Collected module owning the symbol.
+ * @param {object} symbol Collected export.
+ * @returns {object[]} Visible members, in collector order; inputs unchanged.
+ */
+export function publicMembers(module, symbol) {
+  const visible = (symbol.members ?? []).filter((member) =>
+    !member.name.startsWith("_") &&
+    !(member.static && module.exports.some((entry) => entry.name === member.name)));
+  const properties = new Map();
+  const result = [];
+  for (const member of visible) {
+    if (member.kind !== "getter" && member.kind !== "setter") {
+      result.push(member);
+      continue;
+    }
+    const key = `${member.static ? "static" : "instance"}:${member.name}`;
+    let property = properties.get(key);
+    if (!property) {
+      property = { name: member.name, kind: "property", static: member.static,
+        signature: `${member.static ? "static " : ""}${member.name}`, accessors: {} };
+      properties.set(key, property);
+      result.push(property);
+    }
+    property.accessors[member.kind === "getter" ? "get" : "set"] = member;
+  }
+  for (const property of properties.values()) {
+    const { get, set } = property.accessors;
+    property.doc = {
+      description: [get?.doc?.description && `Read: ${get.doc.description}`,
+        set?.doc?.description && `Write: ${set.doc.description}`].filter(Boolean).join("\n\n"),
+      params: set?.doc?.params ?? [], returns: get?.doc?.returns ?? null,
+      tags: [...(get?.doc?.tags ?? []), ...(set?.doc?.tags ?? [])],
+    };
+  }
+  return result.sort(byKindThenName);
 }
 
 /** Shared live tool data for Markdown, compact schema, and website renderers. */
@@ -1108,7 +1173,7 @@ export function renderWith(data, callbacks) {
     push(callbacks.module?.(module, ctx));
     for (const symbol of module.exports) {
       push(callbacks.symbol?.(symbol, { ...ctx, symbol }));
-      for (const member of symbol.members ?? []) {
+      for (const member of publicMembers(module, symbol)) {
         push(callbacks.member?.(member, { ...ctx, symbol, member }));
       }
     }
@@ -1135,7 +1200,6 @@ export const markdown = {
   },
   module(module) { return "## " + module.name + "\n\n"; },
   symbol(symbol, { module }) {
-    if (module.name === "index") return apiEntry(symbol.signature, symbol.doc);
     if (symbol.kind === "class" || symbol.kind === "namespace") {
       // The class/namespace itself documents the object; its members follow.
       return apiEntry(symbol.signature, symbol.doc);
@@ -1149,11 +1213,15 @@ export const markdown = {
   },
   member(member, context) {
     const { module, symbol } = context;
-    const signature = member.kind === "field" ? member.name : member.signature.replace(/^static\s+/, "");
-    const owner = module.name !== "index" && symbol.name !== module.name
-      ? `${module.name}.${symbol.name}`
-      : symbol.name;
-    const qualified = symbol.kind === "namespace" ? symbol.name + "." + member.name : owner + "." + signature;
+    const signature = ["field", "property", "class"].includes(member.kind) ? member.name : member.signature.replace(/^static\s+/, "");
+    const owner = symbol.name === module.name.split(".").at(-1)
+      ? module.name : `${module.name}.${symbol.name}`;
+    const qualified = owner + "." + (symbol.kind === "namespace" ? member.name : signature);
+    if (member.kind === "property") {
+      const contracts = Object.entries(member.accessors).map(([mode, accessor]) =>
+        `**${mode === "get" ? "Read" : "Write"}** — \`${accessor.signature}\`\n\n${markdownDoc(accessor.doc)}`).join("\n");
+      return `### \`${qualified}\`\n\n${contracts}\n`;
+    }
     return apiEntry(qualified, member.doc);
   },
 };
@@ -1173,6 +1241,9 @@ function markdownDoc(doc) {
   }
   if (doc?.returns && (doc.returns.type || doc.returns.description)) {
     parts.push(`Returns${doc.returns.type ? ` \`${doc.returns.type}\`` : ""}${doc.returns.description ? ` — ${oneParagraph(doc.returns.description)}` : ""}`);
+  }
+  for (const tag of doc?.tags ?? []) {
+    if (tag.tag === "throws" || tag.tag === "effects") parts.push(`${tag.tag === "throws" ? "Throws" : "Effects"} — ${oneParagraph(tag.text)}`);
   }
   return parts.filter(Boolean).join("\n\n") + "\n";
 }

@@ -10,7 +10,7 @@ import { agentPolicy, retryDelay } from "../lib/agent/policy.js";
 describe("agentPolicy(settings)", () => {
   test("defaults", () => {
     expect(agentPolicy({})).toEqual({
-      context: { cap: 0.9, turn: 0.4, autocompact: false }, // the schema default 0 resolves to false
+      context: { cap: 0.9, turn: 0.4, autocompact: 0.4, autocompactMax: 200_000 }, // enabled by default
       retry: { attempts: 3, base: 2_000, max: 30_000 },
       tools: { timeout: 120_000, timeoutLimit: 1_200_000, concurrency: 3 },
     });
@@ -18,17 +18,17 @@ describe("agentPolicy(settings)", () => {
 
   test("fractions accept percentages; durations accept unit strings; invalid numbers fall back", () => {
     const policy = agentPolicy({ context: { cap: 80, turn: 0.25 }, retry: { attempts: 0, base: "1s", max: "5s" }, tools: { timeout: "30s" } });
-    expect(policy.context).toEqual({ cap: 0.8, turn: 0.25, autocompact: false });
+    expect(policy.context).toEqual({ cap: 0.8, turn: 0.25, autocompact: 0.4, autocompactMax: 200_000 });
     expect(policy.retry).toEqual({ attempts: 3, base: 1_000, max: 5_000 });
     expect(policy.tools.timeout).toBe(30_000);
     expect(Object.isFrozen(policy) && Object.isFrozen(policy.context)).toBe(true);
   });
 
-  test("context.autocompact: missing/false never, true = 0.65, a fraction, or a percentage", () => {
+  test("context.autocompact: missing/true = 0.4, false never, a fraction, or a percentage", () => {
     const autocompact = (value) => agentPolicy({ context: { autocompact: value } }).context.autocompact;
-    expect(agentPolicy({ context: {} }).context.autocompact).toBe(false);
+    expect(agentPolicy({ context: {} }).context.autocompact).toBe(0.4);
     expect(autocompact(false)).toBe(false);
-    expect(autocompact(true)).toBe(0.65);
+    expect(autocompact(true)).toBe(0.4);
     expect(autocompact(0.5)).toBe(0.5);
     expect(autocompact(80)).toBe(0.8);
     expect(autocompact(0)).toBe(false);
@@ -39,6 +39,14 @@ describe("agentPolicy(settings)", () => {
     expect(autocompact("soon")).toBe(false);
   });
 
+  test("autocompactMax is an absolute nonnegative integer and overrides per key", () => {
+    expect(agentPolicy({ context: { autocompactMax: 0 } }).context.autocompactMax).toBe(0);
+    expect(agentPolicy({ context: { autocompactMax: 50 } }, { context: { autocompactMax: 100 } }, { context: { autocompactMax: 0 } }).context.autocompactMax).toBe(0);
+    for (const invalid of [-1, 1.5, "100", true, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => agentPolicy({ context: { autocompactMax: invalid } })).toThrow("context.autocompactMax");
+    }
+  });
+
   test("retryDelay doubles from base, capped at max", () => {
     const retry = { base: 100, max: 300 };
     expect(retryDelay(retry, 0)).toBeGreaterThanOrEqual(100);
@@ -47,23 +55,23 @@ describe("agentPolicy(settings)", () => {
   });
 });
 
-describe("agent.policy", () => {
-  test("is read from env.settings when the Agent is created and kept for its lifetime", () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: { context: { cap: 0.7 }, retry: { attempts: 1 } } });
-    const agent = new Agent({ env });
-    expect(agent.policy.context.cap).toBe(0.7);
-    expect(agent.policy.retry.attempts).toBe(1);
+describe("Agent internal policy", () => {
+  test("is read from env.settings when the Agent is created and kept for its lifetime", async () => {
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: { context: { cap: 0.7 }, retry: { attempts: 1 } } });
+    const agent = await Agent.create({ env });
+    expect(agent._policyCurrent.context.cap).toBe(0.7);
+    expect(agent._policyCurrent.retry.attempts).toBe(1);
     env.settings.context.cap = 0.5;
-    expect(agent.policy.context.cap).toBe(0.7); // unchanged mid-life
-    const next = new Agent({ env });
-    expect(next.policy.context.cap).toBe(0.5);
+    expect(agent._policyCurrent.context.cap).toBe(0.7); // unchanged mid-life
+    const next = await Agent.create({ env });
+    expect(next._policyCurrent.context.cap).toBe(0.5);
     agent.close();
     next.close();
   });
 
-  test("the policy keys are Agent's settings schema entries; Env publishes no policy getters", () => {
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), settingsDir: null, settings: {} });
-    expect(env.settingsSchema().context.default).toEqual({ cap: 0.9, turn: 0.4, autocompact: 0 }); // a number: 0 = never
+  test("the policy keys are Agent's settings schema entries; Env publishes no policy getters", async () => {
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settingsDir: null, settings: {} });
+    expect(env.settingsSchema().context.default).toEqual({ cap: 0.9, turn: 0.4, autocompact: 0.4, autocompactMax: 200_000 });
     expect(env.settingsSchema().retry.default).toEqual({ attempts: 3, base: 2_000, max: 30_000 });
     for (const gone of ["contextGuardCap", "contextGuardTurnCap", "maxAttempts", "retryDelay", "toolTimeout", "toolTimeoutLimit"]) {
       expect(gone in env, gone).toBe(false);
@@ -75,22 +83,21 @@ describe("context settings resolve down a tree: global, then endpoint, then mode
   test("per key, the endpoint overrides the global and the model overrides both", () => {
     const settings = { context: { cap: 0.9, turn: 0.4, autocompact: 0.6 } };
     const endpoint = { context: { autocompact: 0.5, turn: 0.3 }, models: { big: { context: { autocompact: 0.8 } } } };
-    expect(agentPolicy(settings, endpoint, endpoint.models.small).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.5 });
-    expect(agentPolicy(settings, endpoint, endpoint.models.big).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.8 });
+    expect(agentPolicy(settings, endpoint, endpoint.models.small).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.5, autocompactMax: 200_000 });
+    expect(agentPolicy(settings, endpoint, endpoint.models.big).context).toEqual({ cap: 0.9, turn: 0.3, autocompact: 0.8, autocompactMax: 200_000 });
     expect(agentPolicy(settings, {}, { context: { autocompact: false } }).context.autocompact).toBe(false);
   });
 
   test("an Agent applies its pair's overrides and re-resolves when it selects another model", async () => {
     const dir = mkdtempSync("./ai-tmp/policy-"); // the last-used memory lands here, never the package
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {
       context: { autocompact: true },
-      providers: { p: { provider: "test", url: "test://script" } },
-      p: { context: { cap: 0.8 }, models: { m: {}, big: { context: { autocompact: 0.9 } } } },
+      providers: { p: { provider: "test", url: "test://script", context: { cap: 0.8 }, models: { m: {}, big: { context: { autocompact: 0.9 } } } } },
     } });
-    const agent = new Agent({ env, model: "p/m" });
-    expect(agent.policy.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.65 });
+    const agent = await Agent.create({ env, model: "p/m" });
+    expect(agent._policyCurrent.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.4, autocompactMax: 200_000 });
     (agent.model = "p/big");
-    expect(agent.policy.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.9 });
+    expect(agent._policyCurrent.context).toEqual({ cap: 0.8, turn: 0.4, autocompact: 0.9, autocompactMax: 200_000 });
     agent.close();
   });
 });

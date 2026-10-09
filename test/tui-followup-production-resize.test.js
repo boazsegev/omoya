@@ -9,7 +9,7 @@ for (const engine of ["inline", "alt"]) {
     const env = await testEnv();
     const input = new TerminalInput();
     const bytes = [];
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => scriptedIO([[{ type: "done" }]]) });
     const before = process.stdout.listenerCount("resize");
     const repl = createRepl({ agent, env, engine, input, write: (chunk) => bytes.push(chunk) });
     const run = repl.start();

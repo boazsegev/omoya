@@ -14,7 +14,8 @@ import { NAMES } from "../lib/namespace.js";
 import { wrapperNames } from "../bin/scripts/index.js";
 
 const ROOT = resolve(".");
-const SKIP_TREE = new Set([".git", "ai-tmp", "ai-tasks"]); // generated/ignored task state is not source
+// Generated/ignored AI folders and local package installs are not distributable source.
+const SKIP_TREE = new Set([".git", "node_modules", "tmp", ...["cache", "output", "research", "tasks", "tmp", "tools", "skills", "strategy"].map((name) => `ai-${name}`)]);
 
 /** Every tree entry, recursively, excluding generated/ignored state. */
 function entries(dir = ".") {

@@ -5,19 +5,20 @@ export async function worker_close(args = {}, context = {}) {
   if (!agent) throw new Error("Run worker-close from an agent with workers.");
   const workers = workersMatching(agent, args.workers);
   await requireControl(agent, context, workers.map((worker) => worker.name).join(", "));
-  return workers.map((worker) => {
-    try {
-      if (worker.busy) send(worker, "/handoff");
-      worker.close();
-      return `${worker.name}: closing`;
-    } catch (error) { return `${worker.name}: ${error.message}`; }
-  }).join("\n") || "No workers.";
+  const settled = await Promise.allSettled(workers.map(async (worker) => {
+    if (worker.busy) send(worker, "/handoff");
+    await worker.close();
+    return `${worker.name}: closed`;
+  }));
+  const failures = settled.filter((result) => result.status === "rejected").map((result) => result.reason);
+  if (failures.length) throw new AggregateError(failures, "Worker close failed");
+  return settled.map((result) => result.value).join("\n") || "No workers.";
 }
 
 export function toolDescription() {
   return { "worker-close": {
     fn: worker_close, trusted: true,
-    description: "Closes named workers, /regex/ matches, or all with [\"*\"]. Busy workers receive /handoff first and finish queued work before closing.",
+    description: "Close named workers, /regex/ matches, or all with [\"*\"]. Busy workers are asked to hand off their work first.",
     inputSchema: { type: "object", additionalProperties: false, required: ["workers"], properties: { workers: targetsSchema } },
   } };
 }

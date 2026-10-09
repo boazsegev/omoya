@@ -7,18 +7,18 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { Env } from "../lib/env.js";
 import { contextWindow, toolStatus, toolStatusSet } from "./env-internals.js";
+import { updateToolMessage } from "../lib/agent/tool-messages.js";
 
-const tempEnv = (settings) =>
-  new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir: mkdtempSync("./ai-tmp/env-usage-"), settings });
+const tempEnv = async (settings) =>
+  await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir: mkdtempSync("./ai-tmp/env-usage-"), settings });
 
 describe("Env: contextWindow", () => {
-  test("the cached model descriptor's contextWindow; null when unknown", () => {
-    const env = tempEnv({
-      providers: { ollama: { provider: "ollama", url: "http://localhost:11434" } },
-      ollama: { models: {
+  test("the cached model descriptor's contextWindow; null when unknown", async () => {
+    const env = await tempEnv({
+      providers: { ollama: { provider: "ollama", url: "http://localhost:11434", models: {
         big: { contextWindow: 262144 },
         mystery: null,
-      } },
+      } } },
     });
     expect(contextWindow(env, "ollama", "big")).toBe(262144);
     expect(contextWindow(env, "ollama", "mystery")).toBeNull();
@@ -26,18 +26,17 @@ describe("Env: contextWindow", () => {
     expect(contextWindow(env, "unregistered", "big")).toBeNull();
   });
 
-  test("an explicit provider-settings override wins over the descriptor", () => {
-    const env = tempEnv({
-      providers: { ollama: { provider: "ollama", url: "http://localhost:11434" } },
-      ollama: { contextWindow: 32768, models: { big: { contextWindow: 262144 } } },
+  test("an explicit provider-settings override wins over the descriptor", async () => {
+    const env = await tempEnv({
+      providers: { ollama: { provider: "ollama", url: "http://localhost:11434", contextWindow: 32768, models: { big: { contextWindow: 262144 } } } },
     });
     expect(contextWindow(env, "ollama", "big")).toBe(32768);
   });
 });
 
 describe("Env: sticky tool status data (TUI collects); the agent owns the messages", () => {
-  test("updateToolStatus merges; toolStatus collects live entries", () => {
-    const env = tempEnv({});
+  test("updateToolStatus merges; toolStatus collects live entries", async () => {
+    const env = await tempEnv({});
     env.toolAdd("file-read", () => {}, { description: "f", inputSchema: {} });
     expect(toolStatus(env)).toEqual([]);
     toolStatusSet(env, "file-read", { root: "./" });
@@ -45,15 +44,15 @@ describe("Env: sticky tool status data (TUI collects); the agent owns the messag
     expect(() => toolStatusSet(env, "nope", {})).toThrow(/unknown tool/);
   });
 
-  test("Agent.toolMessageSet sets/clears on the AGENT; toolMessages collects", async () => {
+  test("tool dispatch updates/clears agent-local messages; Agent.toolMessages collects", async () => {
     const { Agent } = await import("../lib/agent.js");
-    const env = tempEnv({});
-    const agent = new Agent({ env });
+    const env = await tempEnv({});
+    const agent = await Agent.create({ env });
     expect(agent.toolMessages()).toEqual([]);
-    agent.toolMessageSet("note", "🔵 **write tests**\n✅ **run gates**");
+    updateToolMessage(agent, "note", "🔵 **write tests**\n✅ **run gates**");
     expect(agent.toolMessages()).toEqual([{ name: "note", text: "🔵 **write tests**\n✅ **run gates**" }]);
-    agent.toolMessageSet("note", null); // cleared
+    updateToolMessage(agent, "note", null); // cleared
     expect(agent.toolMessages()).toEqual([]);
-    expect(() => agent.toolMessageSet("", "x")).toThrow(/non-empty string/);
+    expect(() => updateToolMessage(agent, "", "x")).toThrow(/non-empty string/);
   });
 });

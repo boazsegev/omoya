@@ -7,7 +7,7 @@ import { testEnv } from "./fakes.js";
 
 describe("Env.extend", () => {
   test("Agent installs its members and membership events onto Env; IO installs none", () => {
-    for (const name of ["agents", "agentAdd", "agentRemove", "agentCreate"]) {
+    for (const name of ["agents", "_agentAdd", "_agentRemove", "agentCreate"]) {
       expect(typeof Env.prototype[name]).toBe("function");
     }
     expect(Object.keys(Env.EVENT)).toEqual(expect.arrayContaining(["AGENT_ADDED", "AGENT_REMOVED"]));
@@ -37,10 +37,10 @@ describe("Env.extend", () => {
     const plugin = Env.extend({ methods: { testExtendReceiver() { return this; } } });
     expect(plugin.EVENT).toEqual({});
     expect(env.testExtendReceiver()).toBe(env);
-    const agent = env.agentCreate({ model: undefined });
+    const agent = await env.agentCreate({ model: undefined });
     expect(agent.env).toBe(env);
     expect(env.agents()).toContain(agent);
-    agent.close();
+    await agent.close();
     expect(env.agents()).not.toContain(agent);
     delete Env.prototype.testExtendReceiver; // test-only member; the process-wide Env stays clean
   });
@@ -54,12 +54,12 @@ describe("Env.extend", () => {
       seen.push({ name: agent.name, messages: agent.context.length });
       agent.onEvent(Agent.EVENT.REQUEST_DONE, () => seen.push("request done"));
     });
-    const agent = new Agent({ env, model: "p/m", createIO: () => scriptedIO([[...TEXT(0, "hi"), { type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", createIO: () => scriptedIO([[...TEXT(0, "hi"), { type: "done" }]]) });
     expect(seen[0]).toEqual({ name: agent.name, messages: agent.context.length });
     agent.context.append({ type: 2, content: [{ type: "text", text: "go" }] });
     await agent.run();
     expect(seen).toContain("request done");
     env.offEvent(handle);
-    agent.close();
+    await agent.close();
   });
 });

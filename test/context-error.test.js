@@ -24,11 +24,12 @@ const ASSISTANT = (text) => ({ type: 3, content: [{ type: "text", text }] });
 const FAILED = (error, content = []) => ({ type: 3, content, error });
 
 describe("Context: a failed response is a message carrying `error`", () => {
-  test("a contentless failed response is kept; a contentless plain message is still refused", () => {
+  test("a contentless failed response is kept; a contentless plain message is skipped", () => {
     const context = new Context({ messages: [USER("go")] });
     context.append(FAILED("socket hang up"));
     expect(context.messages()).toEqual([USER("go"), FAILED("socket hang up")]);
-    expect(() => context.append({ type: 3, content: [] })).toThrow(/empty message/);
+    expect(context.append({ type: 3, content: [] })).toBeUndefined();
+    expect(context.messages()).toEqual([USER("go"), FAILED("socket hang up")]);
   });
 
   test("a failed response never merges into the plain reply before it", () => {
@@ -57,9 +58,9 @@ describe("Context: a failed response is a message carrying `error`", () => {
 
 describe("IO: every failed response carries its message with `error`", () => {
   let dir, env;
-  beforeEach(() => {
+  beforeEach(async () => {
     dir = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "io-error-")));
-    env = new Env({ dir, cwd: dir });
+    env = await Env.open(dir, { dir });
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -72,10 +73,10 @@ describe("IO: every failed response carries its message with `error`", () => {
       async read() { return this.queue.shift() ?? null; }
       async close() {}
     });
-    env._endpoints.fake = { provider: "fake", url: "http://fake" };
+    env.settings.providers.fake = { provider: "fake", url: "http://fake" };
     return new IO({ env, model: "fake/m" });
   }
-  const write = (io, context = [USER("go")]) => io.write(context);
+  const write = (io, context = [USER("go")]) => io.write(new Context({ messages: context }));
 
   test("a done that answers nothing is a failed response naming the stop reason", async () => {
     const terminal = await write(scripted([[{ type: "done", doneReason: "completed" }]]));
@@ -134,7 +135,7 @@ describe("Agent: failed responses persist until retracted or answered", () => {
   async function agentWith(script, context = [USER("go")]) {
     const env = await testEnv({ retry: { attempts: 1 } });
     const io = scriptedIO(script);
-    return { io, agent: new Agent({ env, model: "p/m", context, createIO: () => io }) };
+    return { io, agent: await Agent.create({ env, model: "p/m", context, createIO: () => io }) };
   }
 
   test("a failed response is stored — content and error — and ends the turn", async () => {

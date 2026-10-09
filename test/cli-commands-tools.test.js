@@ -1,7 +1,7 @@
 // test/cli-commands-tools.test.js — proof for lib/app/tui/commands.js
 // + command-handlers.js's runTool: /tool-<name> (the RESERVED tool
 // namespace) runs a registered tool directly (close to the "manual
-// door" bin/ai-tool is — lib/cli/tool-run.js — but WITH the viewed
+// door" bin/ai-tool is — lib/app/cli/tool-run.js — but WITH the viewed
 // agent as the caller), and never falls back to a prompt on a miss.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -20,7 +20,7 @@ async function setup(files) {
   const env = await testEnv();
   await toolsLoad(env, { dirs: [dir] });
   const lines = [];
-  const agent = new Agent({ env, model: "fake/m", context: [] });
+  const agent = await Agent.create({ env, model: "fake/m", context: [] });
   const commands = createCommands({ agent, log: (l) => lines.push(l) });
   return { agent, commands, lines };
 }
@@ -28,35 +28,35 @@ async function setup(files) {
 const ECHO_TOOL = `
 export function echoIt({ text } = {}) { return text; }
 export function toolDescription() {
-  return { echoIt: { description: "echo text back", inputSchema: { type: "object", properties: { text: { type: "string" } } } } };
+  return { echoIt: { safe: true, description: "echo text back", inputSchema: { type: "object", properties: { text: { type: "string" } } } } };
 }
 `;
 
 const ENVELOPE_TOOL = `
 export function withSides() { return { result: "main", system: "sys note", display: ["d1", "d2"] }; }
 export function toolDescription() {
-  return { withSides: { description: "returns an envelope", inputSchema: { type: "object", properties: {} } } };
+  return { withSides: { safe: true, description: "returns an envelope", inputSchema: { type: "object", properties: {} } } };
 }
 `;
 
 const THROWING_TOOL = `
 export function boom() { throw new Error("kaboom"); }
 export function toolDescription() {
-  return { boom: { description: "always throws", inputSchema: { type: "object", properties: {} } } };
+  return { boom: { safe: true, description: "always throws", inputSchema: { type: "object", properties: {} } } };
 }
 `;
 
 const SECRET_TOOL = `
 export function hidden() { return "still runs"; }
 export function toolDescription() {
-  return { hidden: { secret: true, description: "hidden from the model", inputSchema: { type: "object", properties: {} } } };
+  return { hidden: { secret: true, safe: true, description: "hidden from the model", inputSchema: { type: "object", properties: {} } } };
 }
 `;
 
 const CALLER_TOOL = `
 export function whoCalls(args, ctx) { return ctx?.agent ? "has an agent" : "no agent"; }
 export function toolDescription() {
-  return { whoCalls: { interactive: true, description: "reports its calling agent", inputSchema: { type: "object", properties: {} } } };
+  return { whoCalls: { interactive: true, safe: true, description: "reports its calling agent", inputSchema: { type: "object", properties: {} } } };
 }
 `;
 
@@ -101,6 +101,24 @@ describe("commands.js: /tool-<name> runs a registered tool directly", () => {
     const { commands, lines } = await setup({ "hidden.js": SECRET_TOOL });
     expect(await commands.handle("/tool-hidden")).toBe(true);
     expect(lines).toEqual(["still runs"]);
+  });
+
+  test("an unsafe tool is refused in forced safe mode rather than bypassing Agent policy", async () => {
+    const { NAMES } = await import("../lib/namespace.js");
+    const saved = process.env[NAMES.osSandboxEnv];
+    process.env[NAMES.osSandboxEnv] = "none";
+    try {
+      const { agent, commands, lines } = await setup({ "unsafe.js": `
+        export function mutate() { return "should not run"; }
+        export function toolDescription() { return { mutate: { description: "mutation", inputSchema: { type: "object", properties: {} } } }; }
+      ` });
+      expect(agent.can.write).toBe(false);
+      expect(await commands.handle("/tool-mutate")).toBe(true);
+      expect(lines).toEqual([`tool mutate failed: Env.safe: "mutate" is not available in safe mode (read-only tools only)`]);
+    } finally {
+      if (saved === undefined) delete process.env[NAMES.osSandboxEnv];
+      else process.env[NAMES.osSandboxEnv] = saved;
+    }
   });
 
   test("the TUI supplies the viewed agent as the caller — an interactive tool that anchors on it works", async () => {

@@ -14,7 +14,7 @@ describe("Agent user-message trimming", () => {
   test("a user submission is trimmed of surrounding whitespace before it runs", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     agent.send(USER("  hello agent \t\r\n"));
     await agent.run();
     expect(io.writes[0].context).toEqual([USER("hello agent")]);
@@ -27,7 +27,7 @@ describe("Agent user-message trimming", () => {
   test("a whitespace-only submission is a /continue: no user message, the context runs", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "continued"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
     const result = agent.send(USER(" \t\n\r\n "));
     expect(result).toBeInstanceOf(Promise); // nothing was queued, but the turn runs
     await agent.run();
@@ -43,7 +43,7 @@ describe("Agent user-message trimming", () => {
   test("a whitespace-only message appended directly (append/resume path) is swept before the request", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("prior")], createIO: () => io });
     agent.context.append(USER("\n\t  \n")); // bypasses send()'s trim
     await agent.run();
     expect(io.writes[0].context).toEqual([USER("prior")]);
@@ -53,7 +53,7 @@ describe("Agent user-message trimming", () => {
   test("the sweep removes every empty MESSAGE but never a metadata record", async () => {
     const env = await testEnv();
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m",
       context: [
         { type: 3, content: [] }, // an edit hollowed it out: dead weight, sweeps
@@ -78,7 +78,7 @@ describe("Agent user-message trimming", () => {
         { type: "binary", mimetype: "application/octet-stream", data: "AAAA" },
       ],
     };
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     agent.send(attached);
     await agent.run();
     // the whitespace text block dropped out; the attachment survives
@@ -94,7 +94,7 @@ describe("Agent user-message trimming", () => {
       [...TEXT(0, "first"), { type: "done" }],
       [...TEXT(0, "second"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("go")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("go")], createIO: () => io });
     const run = agent.run();
     agent.send(USER("  queued \n"));
     await run;

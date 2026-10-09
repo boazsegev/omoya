@@ -3,7 +3,7 @@ import { toolDescription as skillDescription } from "../tools/skill.js";
 import { readQuerySchema } from "../tools/read/query.js";
 import { readDescription } from "../tools/read/read.js";
 import { toolDescription as writeDescription } from "../tools/write.js";
-import { toolDescription as resourceDescription } from "../tools/skill-resource.js";
+import { toolDescription as resourceDescription } from "../tools/resource.js";
 import { toolDescription as webDescription } from "../tools/web.js";
 import { toolDescription as workerDescription } from "../tools/worker-create.js";
 import { toolDescription as jobDescription } from "../tools/job-schedule.js";
@@ -91,13 +91,27 @@ describe("intended model-facing tool inputs", () => {
     expect(inputSchema.properties.ask.type).toBe("boolean");
   });
 
+  test("resource options compose without conditional exclusions", () => {
+    const { inputSchema } = resourceDescription().resource;
+    expectOperativeSchema(inputSchema);
+    expect(inputSchema.required).toEqual(["name"]);
+    expect(Object.keys(inputSchema.properties)).toEqual(["name", "path", "list", "target"]);
+    const { path, list, target } = inputSchema.properties;
+    expect(path.description).toMatch(/glob/);
+    expect(path.description).toMatch(/omit.*root/i);
+    expect(list.default).toBe(false);
+    expect(list.description).toMatch(/with target.*copy/i);
+    expect(target.description).toMatch(/with or without list/i);
+    for (const field of Object.values(inputSchema.properties)) expect(field.description).not.toMatch(/not with|cannot.*together|require.*list/i);
+  });
+
   test("remaining tools describe caller choices without exposing recovery or registry internals", () => {
     const limit = webDescription({ settings: { web: { readability: false } } })["web-search"].inputSchema.properties.limit;
     expect(limit.minimum).toBe(1);
     expect(limit.maximum).toBe(40);
     expect(limit.default).toBe(40);
     expect(limit.description).not.toMatch(/zero|negative|absolute/i);
-    expect(resourceDescription()["skill-resource"].description).not.toMatch(/layer/i);
+    expect(resourceDescription().resource.description).not.toMatch(/layer/i);
     expectOperativeSchema(workerDescription()["worker-create"].inputSchema);
     const jobs = jobDescription()["job-schedule"];
     expect(jobs.description).not.toMatch(/admission|daemon|operational/i);
@@ -113,7 +127,7 @@ describe("intended model-facing tool inputs", () => {
   });
 
   test("all package tool schemas avoid combinators and document every input field", async () => {
-    const env = await Env.create({ settingsDir: null, settings: { mcp: { fixture: { command: "bun" } } } }, { providers: false, models: false });
+    const env = await Env.open(process.cwd(), { settingsDir: null, settings: { mcp: { fixture: { command: "bun" } } }, init: { providers: false, models: false } });
     try {
       const tools = await env.tools();
       expect(tools.has("mcp")).toBe(true);
@@ -135,7 +149,7 @@ describe("intended model-facing tool inputs", () => {
       const descriptors = [...tools].map(([name, tool]) => ({ name, ...tool.schema }));
       for (const [name, Plugin] of [["anthropic", Anthropic], ["kimi", Kimi], ["ollama", Ollama], ["openai", OpenAI]]) {
         const Protocol = await providerClass(Plugin, name);
-        const io = { modelCurrent: "test/m", settings: {}, tools: () => descriptors };
+        const io = { model: "test/m", settings: {}, tools: () => descriptors };
         const connection = new Protocol("https://example.test/v1", io);
         const [, body] = connection.context2msg([]);
         const schemas = body.tools.map((tool) => tool.input_schema ?? tool.function?.parameters ?? tool.parameters);

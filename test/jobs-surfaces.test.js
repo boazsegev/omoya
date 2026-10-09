@@ -9,7 +9,7 @@ import { dispatchJobs } from "../lib/jobs/dispatcher.js";
 import { jobSchedule, toolDescription } from "../tools/job-schedule.js";
 const roots = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))); });
-async function fixture() { const root = await fs.realpath(await fs.mkdtemp("./ai-tmp/jobs-surfaces-")); roots.push(root); await initializeJobs(root); return { root, paths: jobsPaths(root), env: { cwd: root, settings: {} } }; }
+async function fixture() { const root = await fs.realpath(await fs.mkdtemp("./ai-tmp/jobs-surfaces-")); roots.push(root); await initializeJobs(root); return { root, paths: jobsPaths(root), env: { folder: root, settings: {} } }; }
 async function cli(root, ...args) {
   const child = Bun.spawn([process.execPath, resolve("bin/scripts/jobs"), ...args], { cwd: root, env: process.env, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); return { stdout, stderr, code };
@@ -55,8 +55,8 @@ describe("manual Jobs surfaces", () => {
   });
   test("tool eligibility refresh, safe/folder permission and stale invocation retain their boundaries", async () => {
     const { root, env } = await fixture(), available = toolDescription()["job-schedule"].available;
-    expect(await available(env, {})).toBe(true); expect(await available(env, { agent: { safe: true } })).toBe(false);
-    await expect(jobSchedule({ action: "list" }, { env, agent: { safe: true } })).rejects.toThrow("read-only");
+    expect(await available(env, {})).toBe(true); expect(await available(env, { agent: { can: { write: false } } })).toBe(false);
+    await expect(jobSchedule({ action: "list" }, { env, agent: { can: { write: false } } })).rejects.toThrow("read-only");
     await expect(jobSchedule({ action: "list" }, { env, agent: { folder: resolve(".") } })).rejects.toMatchObject({ code: "JOBS_PROJECT_FOLDER" });
     await expect(jobSchedule({ action: "init" }, { env })).rejects.toMatchObject({ code: "JOBS_COMMAND" });
     await disableJobs(root); expect(await available(env, {})).toBe(false);
@@ -72,6 +72,10 @@ describe("manual Jobs surfaces", () => {
     const ran = await cli(root, "run"); expect(ran.code).toBe(0); expect(ran.stdout).toMatch(/: no jobs due\n$/); expect(ran.stderr).toBe("");
     expect((await cli(root, "--disable")).code).toBe(0); expect((await cli(root, "run")).stderr).toContain("JOBS_DISABLED");
     expect((await cli(root, "init")).code).toBe(0);
-    expect((await cli(root, "--help")).stdout).toContain("No locks"); expect((await cli(root, "init", "--scheduler", "daemon")).code).toBe(1);
+    const help = await cli(root, "--help");
+    expect(help.stdout).toContain("No locks");
+    expect(help.stdout).not.toContain("daemon foreground");
+    expect((await cli(root, "daemon", "foreground")).code).toBe(1);
+    expect((await cli(root, "init", "--scheduler", "daemon")).code).toBe(1);
   });
 });

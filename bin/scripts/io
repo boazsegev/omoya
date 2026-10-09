@@ -21,10 +21,12 @@
 
 import { basename } from "node:path";
 import Agent from "../../lib/agent.js";
-import CLI from "../../lib/cli.js";
+import { App } from "../../lib/app.js";
+const { CLI } = App;
+import Context from "../../lib/context.js";
 const { Env, IO, NAMES } = Agent;
 const { ProviderError } = IO;
-const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, usageSummary, runLoginWizard, runMcpLogin, logoutEndpoint, selectEndpointModel } = CLI;
+const { parseFlags, EXIT, exitCodeFor, close, readContextFromStdin, armCancelSignals, runLoginWizard, runMcpLogin, selectEndpointModel, usageSummary } = CLI;
 
 // The invoked name, like the TUI's: argv[1] holds the wrapper's file
 // name; a bare `bun bin/scripts/io` has none, so the namespace-derived
@@ -35,7 +37,8 @@ const PROGRAM = "{{program}}";
 const HELP_TEMPLATE = `${PROGRAM} — one-request provider CLI
 
 usage: ${PROGRAM} [--model <endpoint>/<model>] [--url <url>]
-             [--token <key>] [--timeout <ms>] [--login] [--logout <endpoint>] [--help]
+             [--token <key>] [--timeout <dur>] [--login]
+             [--mcp-login <name>] [--logout <endpoint>] [--help]
 
 stdin:   one context, buffered to EOF (whole JSON context, else
          JSON-per-line; non-JSON lines become user messages)
@@ -55,7 +58,7 @@ options:
   --login            configure an endpoint with the interactive wizard, then exit
   --mcp-login <name> sign in to a configured HTTP MCP server, then exit
   --logout <endpoint> remove an endpoint from settings.json and auth, then exit
-  --help             show this text and exit
+  --help, -h         show this text and exit
 
 exit codes: 0 success · 1 usage/other · 2 auth · 3 network ·
             4 provider error · 5 malformed input · 130 cancelled`;
@@ -81,54 +84,62 @@ async function main() {
   const out = (event) => process.stdout.write(JSON.stringify(event) + "\n");
   const log = (line) => process.stderr.write(`${NAME}: ${line}\n`);
 
-  // Env.create() resolves only after the runtime registries are ready.
-  const env = await Env.create();
-  if (args["mcp-login"]) {
-    try {
-      const name = args["mcp-login"];
-      await runMcpLogin(env, name);
-      log(`MCP signed in: ${name}`);
-      return;
-    } catch (err) { log(`MCP login failed: ${err.message}`); process.exitCode = EXIT.usage; return; }
+  const overrides = args.url !== undefined || args.token !== undefined || args.timeout !== undefined;
+  if (overrides && (args.login || args.logout || args["mcp-login"])) {
+    throw new Error("--url, --token and --timeout cannot be combined with login/logout commands");
   }
-  if (args.login) {
+  let env = await Env.open(process.cwd());
+  if (args["mcp-login"] || args.login || args.logout) {
     try {
-      const result = await runLoginWizard(env);
-      log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
-      process.exitCode = EXIT.ok;
-      return;
+      if (args["mcp-login"]) {
+        const name = args["mcp-login"];
+        await runMcpLogin(env, name);
+        log(`MCP signed in: ${name}`);
+      } else if (args.login) {
+        const result = await runLoginWizard(env);
+        log(`endpoint saved: ${result.name} (${result.endpoint.provider} at ${result.endpoint.url}, ${result.scope})`);
+      } else {
+        const result = env.logout(args.logout);
+        log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
+      }
     } catch (err) {
-      log(`login failed: ${err.message}`);
+      log(err.message);
       process.exitCode = EXIT.usage;
-      return;
+    } finally {
+      await env.close();
     }
+    return;
   }
-  if (args.logout) {
-    try {
-      const result = logoutEndpoint(env, args.logout);
-      log(`endpoint removed: ${result.name}${result.dynamic ? " (environment-defined — nothing was persisted)" : ""}`);
-      process.exitCode = EXIT.ok;
-      return;
-    } catch (err) {
-      log(`logout failed: ${err.message}`);
-      process.exitCode = EXIT.usage;
-      return;
-    }
-  }
-  // Resolve the --model combo AFTER providers load (needs the registry
-  // and known model lists): explicit combo, cached model match,
-  // provider-only (first available model), or bare model name.
-  let selection;
   try {
-    selection = await selectEndpointModel(env, args);
+    let selection = await selectEndpointModel(env, { model: args.model });
+    const explicitEndpoint = args.url && typeof args.model === "string" && args.model.includes("/")
+      ? args.model.slice(0, args.model.indexOf("/")) : undefined;
+    const endpoint = selection?.slice(0, selection.indexOf("/")) ?? explicitEndpoint;
+    if (overrides) {
+      if (!endpoint || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(endpoint) || ["__proto__", "constructor", "prototype"].includes(endpoint)) {
+        throw new Error(selection ? "--url, --token and --timeout require a resolvable endpoint" : "Please load a model with --model <endpoint>/<model> before using --url, --token or --timeout");
+      }
+      const known = env.settings.providers?.[endpoint];
+      const preset = env.loginPresets().find((item) => item.name === endpoint);
+      if (!known?.provider && !known?.url && !preset) throw new Error(`unknown endpoint ${JSON.stringify(endpoint)}; configure its provider first`);
+      await env.close();
+      env = await Env.open(process.cwd(), { settings: {
+        providers: { [endpoint]: {
+          ...(!known?.provider && !known?.url ? { provider: preset.provider } : {}),
+          ...(args.url !== undefined ? { url: args.url } : {}),
+          ...(args.token !== undefined ? { auth: { token: args.token } } : {}),
+          ...(args.timeout !== undefined ? { timeout: args.timeout } : {}),
+        } },
+      }, init: { models: false } });
+      selection = await selectEndpointModel(env, { model: selection ?? args.model });
+    }
+    args.model = selection;
+    if (!args.model) throw new Error("Please load a model with --model <endpoint>/<model>");
   } catch (err) {
     log(err.message);
-    process.exit(EXIT.usage);
-  }
-  args.model = selection;
-  if (!args.model) {
-    log("Please load a model with --model <endpoint>/<model>");
-    process.exit(EXIT.usage);
+    await env.close();
+    process.exitCode = EXIT.usage;
+    return;
   }
 
   let aiio;
@@ -136,35 +147,41 @@ async function main() {
     aiio = new IO({
       env,
       model: args.model,
-      url: args.url,
-      timeout: args.timeout,
-      settings: args.token ? { auth: { token: args.token } } : undefined,
       onData: out,
       onLog: log,
     });
   } catch (err) {
     log(err.message);
-    process.exit(err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage);
+    await env.close();
+    process.exitCode = err instanceof ProviderError ? exitCodeFor({ kind: err.kind }) : EXIT.usage;
+    return;
   }
   if (!aiio.model) {
     log("no model selected; use --model or provider settings");
-    process.exit(EXIT.usage);
+    try { await aiio.close(); }
+    finally { await env.close(); }
+    process.exitCode = EXIT.usage;
+    return;
   }
 
   const disarm = armCancelSignals({
     onCancel: (signal) => {
       log(`${signal} received; cancelling`);
-      aiio.close().finally(() => process.exit(EXIT.cancelled));
+      void aiio.close().catch((error) => log(error.message)).finally(() => { process.exitCode = EXIT.cancelled; });
     },
   });
 
-  const context = await readContextFromStdin();
-  const terminal = await aiio.write(context);
-  disarm();
-  close({ env });
-
+  let terminal;
+  try {
+    const context = await readContextFromStdin();
+    terminal = await aiio.write(new Context({ messages: context }));
+  } finally {
+    disarm();
+    try { await aiio.close(); }
+    finally { await close({ env }); }
+  }
   if (terminal?.usage) log(usageSummary(terminal.usage));
-  process.exit(exitCodeFor(terminal));
+  process.exitCode = exitCodeFor(terminal);
 }
 
 main().catch((err) => {

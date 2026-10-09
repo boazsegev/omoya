@@ -50,9 +50,10 @@ test("the production wiring preserves the short terminal title", () => {
 });
 
 async function harness(mode) {
-  const env = await testEnv();
+  const env = await testEnv({ providers: { p: { provider: "test", url: "test://script", models: { m: {} } } } });
+  await env.ready();
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi there"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const app = createApp(agent, { env });
   const input = new FakeInput();
   const output = new FakeOutput();
@@ -181,15 +182,16 @@ for (const mode of ["inline", "alt"]) {
       // (cursor jumps instead of literal spaces) — words stay intact,
       // inter-word spacing does not, so check words, never a joined phrase
       expect(output.bytes()).toContain("Menu");
-      expect(output.bytes()).toContain("Help");
-      expect(output.bytes()).toContain("keybindings");
+      expect(output.bytes()).toContain("Themes");
+      expect(output.bytes()).toContain("Agents");
+      expect(output.bytes()).toContain("Endpoints");
       expect(output.bytes()).toContain("navigate");
       const beforeClose = output.chunks.length;
       input.emit("data", Buffer.from([0x1b])); // bare Escape, decoded without readline's delay
       await tick();
       const closeBytes = output.chunks.slice(beforeClose).join("");
       expect(closeBytes.length).toBeGreaterThan(0); // a real repaint happened
-      expect(closeBytes).not.toContain("Help");
+      expect(closeBytes).not.toContain("Themes");
       ui.stop();
       await running;
     });
@@ -238,7 +240,7 @@ for (const mode of ["inline", "alt"]) {
       const io = fakeIO((ioSelf) => new Promise((resolve) => {
         ioSelf._onKill = () => resolve({ type: "error", error: "cancelled", kind: "cancelled", cancelled: true });
       }));
-      const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
       const app = createApp(agent, { env });
       const input = new FakeInput();
       const output = new FakeOutput();
@@ -263,7 +265,7 @@ for (const mode of ["inline", "alt"]) {
       const io = fakeIO((ioSelf) => new Promise((resolve) => {
         ioSelf._onKill = () => resolve({ type: "error", error: "cancelled", kind: "cancelled", cancelled: true });
       }));
-      const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+      const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
       const app = createApp(agent, { env });
       const input = new FakeInput();
       const output = new FakeOutput();

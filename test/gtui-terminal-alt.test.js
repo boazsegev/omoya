@@ -32,7 +32,7 @@ describe("GTUI terminal alt host", () => {
   test("Omoya selects terminal-reported light mode when COLORFGBG is unavailable", async () => {
     const input = new FakeInput();
     const output = new FakeOutput();
-    const tokens = resolveTheme({ tui: { theme: "omoya", themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")).tui.themes } });
+    const tokens = resolveTheme({ tui: { theme: "omoya" }, themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")) });
     const host = GTUI.host.terminal({ input, output, mode: "alt", colorfgbg: "" });
     const ui = new GTUI({ host, theme: tokens });
     let mode;
@@ -50,7 +50,7 @@ describe("GTUI terminal alt host", () => {
   });
   test("OSC 11 dark reply selects Omoya dark and invalid replies leave the fallback unchanged", async () => {
     const input = new FakeInput(), output = new FakeOutput();
-    const tokens = resolveTheme({ tui: { theme: "omoya", themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")).tui.themes } });
+    const tokens = resolveTheme({ tui: { theme: "omoya" }, themes: JSON.parse(readFileSync("themes/omoya.json", "utf8")) });
     const ui = new GTUI({ host: GTUI.host.terminal({ input, output, mode: "alt", colorfgbg: "" }), theme: tokens });
     let mode;
     const running = ui.run(application((_, theme) => { mode = theme.dark; return GTUI.view.text({ margin: 0, role: "accent" }, "Omoya"); }));

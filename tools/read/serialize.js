@@ -33,6 +33,7 @@ function recordsText(result) {
 
 function textPayload(result) {
   const { query } = result;
+  if (result.binarySkipped) return `binary file: ${query.path} (no data; use binary: true to read or search bytes)`;
   if (query.info) return infoText(result);
   if (query.search) {
     const body = recordsText(result);

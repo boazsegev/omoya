@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Env from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
@@ -12,64 +12,77 @@ const folder = (...names) => {
 };
 
 describe("Env.envs process registry", () => {
-  test("maps each open folder to its one Env; close() deregisters, idempotently", () => {
-    const a = new Env({ cwd: folder() });
-    const b = new Env({ cwd: folder() });
+  test("path-only Env.open returns the project Env under any path naming it", async () => {
+    const cwd = folder("project");
+    const link = join(folder(), "link");
+    symlinkSync(cwd, link);
+    const env = await Env.open(cwd);
+    try {
+      expect(await Env.open(cwd)).toBe(env);
+      expect(await Env.open(link)).toBe(env);
+      expect(await Env.open(cwd, { settingsDir: null, init: { providers: false, tools: false } })).not.toBe(env);
+    } finally { await env.close(); }
+  });
+
+
+  test("maps each open folder to its one Env; close() deregisters, idempotently", async () => {
+    const a = await Env.open(folder(), {  });
+    const b = await Env.open(folder(), {  });
     const envs = Env.envs;
     expect(Object.isFrozen(envs)).toBe(true);
-    expect(envs[a.cwd]).toBe(a);
-    expect(Object.keys(envs).indexOf(b.cwd)).toBeGreaterThan(Object.keys(envs).indexOf(a.cwd)); // creation order
-    expect(() => new Env({ cwd: a.cwd })).toThrow("already has an open Env");
-    a.close();
-    a.close();
+    expect(envs[a.folder]).toBe(a);
+    expect(Object.keys(envs).indexOf(b.folder)).toBeGreaterThan(Object.keys(envs).indexOf(a.folder)); // creation order
+    expect(await Env.open(a.folder)).toBe(a);
+    const firstClose = a.close();
+    const secondClose = a.close();
     expect(a.closed).toBe(true);
-    expect(Env.envs[a.cwd]).toBeUndefined();
-    expect(envs[a.cwd]).toBe(a); // snapshots never change
-    expect(new Env({ cwd: a.cwd }).closed).toBe(false); // the folder is free again
-    b.close();
+    expect(Env.envs[a.folder]).toBeUndefined();
+    expect(envs[a.folder]).toBe(a); // snapshots never change
+    const replacement = await Env.open(a.folder, {  });
+    expect(replacement.closed).toBe(false); // the folder is free again
+    await Promise.all([firstClose, secondClose]);
+    await Promise.all([replacement.close(), b.close()]);
   });
 
-  test("cwd is the absolute, fixed registry key", () => {
-    const env = new Env({ cwd: folder() });
-    expect(() => { env.cwd = "/"; }).toThrow();
-    env.close();
+  test("folder is the absolute, fixed registry key", async () => {
+    const env = await Env.open(folder(), {  });
+    expect(() => { env.folder = "/"; }).toThrow();
+    await env.close();
   });
 
-  test("names are the shortest unique path suffixes", () => {
+  test("names are the shortest unique path suffixes", async () => {
     const base = folder();
-    const one = new Env({ cwd: folder() });
-    const fiz = new Env({ cwd: join(base, "fiz", "bar", "foo") });
+    const one = await Env.open(folder(), {  });
+    const fiz = await Env.open(join(base, "fiz", "bar", "foo"), {  });
     expect(fiz.name).toBe("foo");
-    const faz = new Env({ cwd: join(base, "faz", "bar", "foo") });
+    const faz = await Env.open(join(base, "faz", "bar", "foo"), {  });
     expect([fiz.name, faz.name]).toEqual(["fiz/bar/foo", "faz/bar/foo"]);
-    faz.close();
+    await faz.close();
     expect(fiz.name).toBe("foo");
-    one.close();
-    fiz.close();
+    await Promise.all([one.close(), fiz.close()]);
   });
 
-  test("a rejected construction registers nothing", () => {
+  test("a rejected construction registers nothing", async () => {
     const cwd = folder();
-    expect(() => new Env({ cwd, sessionsDir: "" })).toThrow(TypeError);
+    await expect(Env.open(cwd, { sessionsDir: "" })).rejects.toThrow(TypeError);
     expect(Env.envs[cwd]).toBeUndefined();
   });
 
-  test("Env.create closes its Env when loading fails", async () => {
+  test("Env.open releases a failed project startup", async () => {
     const cwd = folder();
-    await expect(Env.create({ cwd, toolDirs: [42] })).rejects.toThrow();
+    await expect(Env.open(cwd, { toolDirs: [42] })).rejects.toThrow();
     expect(Env.envs[cwd]).toBeUndefined();
   });
 
-  test("Env.use borrows an open Env or creates one, closing it unless agents joined", async () => {
+  test("Env.open callers explicitly own close, even while Agents are registered", async () => {
     const cwd = folder();
-    expect(await Env.use(cwd, (env) => env.cwd)).toBe(cwd);
+    const env = await Env.open(cwd);
+    const agent = await env.agentCreate();
+    expect(Env.envs[cwd]).toBe(env);
+    await agent.close();
+    expect(env.closed).toBe(false);
+    await env.close();
     expect(Env.envs[cwd]).toBeUndefined();
-    let kept;
-    await Env.use(cwd, (env) => { kept = env.agentCreate(); });
-    expect(Env.envs[cwd]).toBe(kept.env);
-    expect(await Env.use(cwd, (env) => env)).toBe(kept.env);
-    kept.close();
-    kept.env.close();
   });
 
   test("tools without an Env use the root folder's Env, closed afterwards", async () => {
@@ -78,53 +91,54 @@ describe("Env.envs process registry", () => {
     expect(Env.envs["/"]).toBeUndefined();
   });
 
-  test("an Agent without an Env shares the process folder's Env; the last one closes it", () => {
-    const owned = new Agent();
-    const other = new Agent();
-    expect(other.env).toBe(owned.env);
-    expect(Env.envs[process.cwd()]).toBe(owned.env);
-    owned.close();
-    expect(owned.env.closed).toBe(false);
-    other.close();
-    expect(owned.env.closed).toBe(true);
-
-    const env = new Env();
-    expect(new Agent().env).toBe(env); // the open folder Env is reused, never closed by its agents
-    for (const agent of env.agents()) agent.close();
+  test("Agent.open shares a project Env but Agents never close it", async () => {
+    const owned = await Agent.create();
+    const other = await Agent.create();
+    const env = owned.env;
+    expect(other.env).toBe(env);
+    expect(Env.envs[process.cwd()]).toBe(env);
+    await owned.close();
+    await other.close();
     expect(env.closed).toBe(false);
-    env.close();
+    await env.close();
   });
 
-  test("an Agent rejected after creating its own Env closes that Env", () => {
-    expect(() => new Agent({ model: "missing/m" })).toThrow();
-    expect(Env.envs[process.cwd()]).toBeUndefined();
+  test("a rejected Agent.open leaves its acquired Env for the caller to close", async () => {
+    const cwd = folder();
+    await expect(Agent.create({ cwd, model: "missing/m" })).rejects.toThrow();
+    const env = Env.envs[cwd];
+    expect(env).toBeDefined();
+    await env.close();
+    expect(Env.envs[cwd]).toBeUndefined();
   });
 
-  test("a closed Env refuses agentCreate and childCreate", () => {
-    const env = new Env({ cwd: folder() });
-    const parent = env.agentCreate();
-    env.close();
+  test("a closed Env refuses agentCreate and childCreate", async () => {
+    const env = await Env.open(folder(), {  });
+    const parent = await env.agentCreate();
+    const closed = env.close();
     expect(env.closed).toBe(true);
     const before = env.agents().length;
-    expect(() => env.agentCreate()).toThrow("Env is closed");
-    expect(() => parent.childCreate({ name: "w" })).toThrow("Env is closed");
+    await expect(env.agentCreate()).rejects.toThrow("Env is closed");
+    await expect(parent.childCreate({ name: "w" })).rejects.toThrow("Env is closed");
     expect(env.agents()).toHaveLength(before);
     expect(parent.children).toHaveLength(0);
-    parent.close();
+    await closed;
+    await parent.close();
   });
 
-  test("names reading as addresses or privileged identities are reserved, any case or disguise", () => {
-    const env = new Env({ cwd: folder() });
+  test("names reading as addresses or privileged identities are reserved, any case or disguise", async () => {
+    const env = await Env.open(folder(), {  });
     const reserved = ["new", "NEW", " new ", "all", "Everyone", "assistant", "Tool", "omoya",
       "user", "User-2", "users", "superuser", "my_user", "admin", "SysAdmin", "ad-min", "ａｄｍｉｎ", "\u0430dmin", "adm\u200bin", "ädmin".normalize("NFD").replace("a\u0308", "a\u0301"),
       "group", "workgroup", "Group-Lead", "root", "sudo", "system", "developer", "owner", "operator", "supervisor", "moderator", "privileged", "authorized"];
-    for (const name of reserved) expect(() => env.agentCreate({ name })).toThrow("reserved");
-    for (const name of ["newbie", "builder", "reviewer", "agent-7", "author", "tools-check"]) env.agentCreate({ name }).close();
-    const agent = env.agentCreate({ name: "newbie" });
+    for (const name of reserved) await expect(env.agentCreate({ name })).rejects.toThrow("reserved");
+    await Promise.all(["newbie", "builder", "reviewer", "agent-7", "author", "tools-check"]
+      .map(async (name) => (await env.agentCreate({ name })).close()));
+    const agent = await env.agentCreate({ name: "newbie" });
     expect(() => { agent.name = "uSeR"; }).toThrow("reserved");
-    expect(() => agent.childCreate({ name: "new" })).toThrow("reserved");
+    await expect(agent.childCreate({ name: "new" })).rejects.toThrow("reserved");
     expect(agent.name).toBe("newbie");
-    agent.close();
-    env.close();
+    await agent.close();
+    await env.close();
   });
 });

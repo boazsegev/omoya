@@ -1,4 +1,4 @@
-// test/cli-init.test.js — proof for lib/cli/init.js (the `--init`
+// test/cli-init.test.js — proof for lib/app/cli/init.js (the `--init`
 // contract): a fresh namespaced project template with every known
 // settings key commented out, and the refuse-to-overwrite guard.
 import { NAMES } from "../lib/namespace.js";
@@ -7,7 +7,8 @@ import { cli } from "./bin-names.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
-import { renderSettingsTemplate, writeSettingsTemplate } from "../lib/cli.js";
+import { writeSettingsTemplate } from "../lib/app/cli.js";
+import { renderSettingsTemplate } from "../lib/app/cli/init.js";
 import { parseJsonc } from "../lib/env/jsonc.js";
 import { toolsLoad } from "./env-internals.js";
 
@@ -20,7 +21,7 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("renderSettingsTemplate", () => {
   test("every schema key appears, commented out, and the whole file parses as JSONC to {}", async () => {
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {} });
     await toolsLoad(env, { dirs: ["./tools"] }); // so mcp's own contribution is included
     const text = renderSettingsTemplate(env);
     const schema = env.settingsSchema();
@@ -51,8 +52,8 @@ describe("the tui wrapper --init", () => {
 });
 
 describe("writeSettingsTemplate", () => {
-  test("writes the namespaced project settings file into env.cwd", async () => {
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+  test("writes the namespaced project settings file into env.folder", async () => {
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {} });
     await toolsLoad(env, { dirs: ["./tools"] });
     const file = writeSettingsTemplate(env);
     expect(file).toBe(resolve(dir, NAMES.projectSettings));
@@ -61,7 +62,7 @@ describe("writeSettingsTemplate", () => {
   });
 
   test("refuses to overwrite an existing file unless force", async () => {
-    const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {} });
     await toolsLoad(env, { dirs: ["./tools"] });
     writeSettingsTemplate(env);
     expect(() => writeSettingsTemplate(env)).toThrow(/already exists/);

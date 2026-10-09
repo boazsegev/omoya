@@ -15,6 +15,15 @@ describe("binary attachment display mimetype", () => {
     expect(blocks[0].text).not.toContain("unknown");
   });
 
+  test("the piped stream renderer does not repeat streamed thinking at its end", () => {
+    let out = "";
+    const renderer = createStreamRenderer({ write: (chunk) => { out += chunk; }, ansi: false });
+    renderer.callbacks.onThinkingStart({ contentIndex: 0 });
+    renderer.callbacks.onThinkingDelta({ contentIndex: 0, text: "partial" });
+    renderer.callbacks.onThinkingEnd({ contentIndex: 0, text: "partial thought" });
+    expect(out).toBe("partial thought\n");
+  });
+
   test("the piped stream renderer labels a binary tool result with its mimetype", () => {
     let out = "";
     const renderer = createStreamRenderer({ write: (chunk) => { out += chunk; }, ansi: false });

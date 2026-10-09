@@ -24,21 +24,23 @@ function harness(extra = {}) {
       const listeners = [];
       const agent = { settings, context: { append: (message) => { agent.prompt = message; }, flush() {} },
         onEvent(_event, callback) { listeners.push(callback); return listeners.length; }, emit(call) { for (const listener of listeners) listener(call); },
-        async run() { return { type: "done" }; }, cancel() { agent.cancelled = true; }, close() {} };
+        async run(options) { agent.runOptions = options; return { type: "done" }; }, cancel() { agent.cancelled = true; }, close() {} };
       agents.push(agent); return agent;
     }, close() {}, ...extra,
   } };
 }
-test("fresh agents/sessions, omitted tools vs empty tools, Agent-owned timeout and snapshot", async () => {
+test("fresh agents/sessions, omitted tools vs empty tools, per-request Agent timeout and snapshot", async () => {
   const h = harness(); const ready = [];
   const first = await runJobAgent({ prompt: "snapshot" }, { ...h.options, onReady: (v) => ready.push(v) });
   const second = await runJobAgent({ prompt: "other", tools: [], model: "explicit", timeout: 4567 }, { ...h.options, onReady: (v) => ready.push(v) });
   expect(first.outcome).toBe("completed"); expect(second.session).not.toBe(first.session);
   expect(h.agents[0]).not.toBe(h.agents[1]); expect(Object.hasOwn(h.agents[0].settings, "tools")).toBeFalse();
   expect(h.agents[1].settings.tools).toEqual([]); expect(h.agents[1].settings.model).toBe("test/explicit");
-  // Jobs does not impose a deadline; an explicit task timeout remains Agent/IO policy.
+  // Jobs does not impose a deadline; an explicit task timeout remains Agent/IO request policy.
   expect(Object.hasOwn(h.agents[0].settings, "timeout")).toBeFalse();
-  expect(h.agents[1].settings.timeout).toBe(4567);
+  expect(Object.hasOwn(h.agents[1].settings, "timeout")).toBeFalse();
+  expect(h.agents[0].runOptions).toEqual({});
+  expect(h.agents[1].runOptions).toEqual({ timeout: 4567 });
   expect(ready.map((v) => v.timeout)).toEqual([1234, 4567]);
   expect(h.agents[0].prompt).toEqual(Context.messageUser("snapshot"));
   expect(h.agents[0].settings).toMatchObject({ toolCall: { detached: false } });
@@ -64,13 +66,13 @@ test("a deliberate cancel signal cancels the in-flight agent and reports cancell
   expect(result.outcome).toBe("cancelled"); expect(h.agents[0].cancelled).toBeTrue();
 });
 test("real Agent owns provider retries, transcript and inherited tool context", async () => {
-  const p = await root(); const env = new Env({ dir: p, cwd: p, settingsDir: null, settings: { retry: { attempts: 2, base: 1, max: 1 }, context: { cap: 0.5 }, sessions: resolve(p) } });
-  env._endpoints.test = { provider: "test" };
+  const p = await root(); const env = await Env.open(p, { dir: p, settingsDir: null, settings: { retry: { attempts: 2, base: 1, max: 1 }, context: { cap: 0.5 }, sessions: resolve(p) } });
+  env.settings.providers.test = { provider: "test" };
   let writes = 0, detached;
   env.toolAdd("probe", (_, context) => { detached = context.detached; return "ok"; }, { safe: true, inputSchema: { type: "object" } });
   const result = await runJobAgent({ prompt: "persisted prompt", tools: [] }, {
-    projectRoot: p, createEnv: async () => env, selectModel: async () => "test/fake", effectiveTimeout: () => 1000,
-    createAgent: (settings) => new Agent({ ...settings, env, createIO: () => ({
+    env, projectRoot: p, selectModel: async () => "test/fake", effectiveTimeout: () => 1000,
+    createAgent: async (settings) => await Agent.create({ ...settings, env, createIO: () => ({
       async write() { writes++; return writes === 1 ? { type: "error", kind: "network" } : { type: "done", message: Context.messageAssistant([Context.contentText("answer")]) }; }, close() {},
     }) }),
   });
@@ -79,11 +81,12 @@ test("real Agent owns provider retries, transcript and inherited tool context", 
   expect(transcript).toContain("persisted prompt"); expect(transcript).toContain("answer");
   for (const policy of [undefined, false]) {
     let turn = 0;
-    const agent = new Agent({ env, model: "test/fake", toolCall: policy === undefined ? {} : { detached: false }, createIO: () => ({ async write() {
+    const agent = await Agent.create({ env, model: "test/fake", toolCall: policy === undefined ? {} : { detached: false }, createIO: () => ({ async write() {
       return ++turn === 1 ? { type: "done", message: Context.messageAssistant([{ type: "toolCall", name: "probe", arguments: {} }]) } : { type: "done" };
     }, close() {} }) });
-    await agent.run(); expect(detached).toBe(policy !== false); agent.close();
+    await agent.run(); expect(detached).toBe(policy !== false); await agent.close();
   }
+  await env.close();
 });
 test("default dispatcher runs agents in-process serially against one shared env and persists outcomes/sessions", async () => {
   const p = await root(); const paths = await ensureJobsLayout(p);

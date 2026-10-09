@@ -24,7 +24,7 @@ async function harness(engine) {
     callbacks.onTextDelta?.({ contentIndex: 0, text: "partial" });
     return new Promise((resolve) => { io._onKill = () => { kills++; resolve({ type: "error", error: "cancelled", kind: "cancelled", cancelled: true }); }; });
   });
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const input = new PassThrough();
   input.isTTY = true;
   const chunks = [];

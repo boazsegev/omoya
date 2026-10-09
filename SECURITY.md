@@ -2,7 +2,7 @@
 
 ## Filesystem boundary
 
-File tools use the Agent folder as working directory. Reads may target either that folder's tree or Env.cwd's project tree, even if the two are disjoint; writes and edits target only the Agent folder. Absolute syntax alone is not an escape. Tools own their argument guards and localize their own successful path labels relative to the working folder. Agent does not reinterpret arbitrary strings or rewrite tool-owned call history, including refused arguments. This is not blanket sanitization of code, file contents, shell output, or session metadata.
+File tools use the Agent folder as working directory. Reads may target either that folder's tree or Env.folder's project tree, even if the two are disjoint; writes and edits target only the Agent folder. Absolute syntax alone is not an escape. Tools own their argument guards and localize their own successful path labels relative to the working folder. Agent does not reinterpret arbitrary strings or rewrite tool-owned call history, including refused arguments. This is not blanket sanitization of code, file contents, shell output, or session metadata.
 
 The shared write/edit content trip-wire remains intentionally weak and permission-overridable: it flags recognized references to existing outside paths and absolute references to existing project files/folders. Missing references remain allowed; shebangs, device exceptions, and relative `import.meta.url` references retain their exceptions. Text is checked, never silently rewritten. The scanner is not a code parser or filesystem enforcement layer. Content/command trip-wires permit conventional temporary roots and their children (the system temporary directories, their macOS private aliases, and the runtime temporary directory), standard development devices, and process file descriptors. These exceptions do not exempt existing absolute project references or change destination guards or the OS sandbox; temporary locations are real directories, not guaranteed data sinks.
 
@@ -16,7 +16,9 @@ Do not run the agent in a working tree containing untrusted symlinks, and do not
 
 ## Skill resources
 
-`skill-resource` reads only skill-relative regular files in registered skill directories, rejects observed symlinks and traversal, and bounds byte reads to 16 MiB. It exposes logical identifiers rather than installation paths. Optional `target` writes exact bytes to a new project-confined file with exclusive creation; it never executes code. Safe mode refuses saving, and exports serialize with mutating tools. Exported UTF-8 content passes the same weak content guard.
+`resource` reads skill-relative resources from registered skill directories, preferring the overlay per path, or reachable projects when the requested skill path is absent. Listing and reading reachable projects require no request permission, including for workers; project groups still limit reachability. Reads reject traversal and observed symlinks and bound each source file to 16 MiB. Listings and read results expose logical source names rather than installation paths. Optional `target` copies exact files, folders, or glob matches into the caller's confined folder without overwriting; existing destinations receive numbered names. It never executes code. Safe mode refuses copying, exports serialize with mutating tools, and exported UTF-8 content passes the same weak content guard.
+
+`request` reaches only the caller's own project or pinned projects sharing a settings group, and only for root agents with `can.request`; every request and reply needs it (unset prompts the user; no question interface refuses), so an agent without permission cannot start a chain of agents. Responders inherit the caller's permissions; `safe` narrows writes. Request text is labelled as an agent request, not the user, and contacts record folders and session ids only in session metadata, never in model-visible text.
 
 As with ordinary file tools, ancestor inspection is not protection against concurrent directory replacement. Registered skill roots and the project must not be writable by untrusted principals. Skill instructions are trusted guidance, not a grant of tool permissions.
 
@@ -36,4 +38,15 @@ reconciles it without replaying accepted work.
 
 ## Web server
 
-`om --serve` has no authentication: reaching the port means owning the agent. It binds to loopback by default, so only local processes and user accounts can reach it; `--host 0.0.0.0` is meant for trusted networks only. Project management (add, pin, group, remove) additionally requires a loopback peer using a loopback host name. A page in the user's own browser can reach the loopback port through DNS rebinding (its name re-pointed at 127.0.0.1), so the peer address alone proves nothing. The server therefore answers only requests addressed to this machine's names on its port — loopback names, the bound host, the OS hostname and its `.local` form, and current interface addresses — and WebSocket and upload requests must also carry the matching same-host Origin. Requests through a reverse proxy or another DNS name are refused unless that name is the bound host.
+`om --serve` is safe by default: it binds to loopback, so only local processes and user accounts can reach it.
+
+`--host 0.0.0.0` is an explicit opt-in for LAN access. DNS-rebinding protection stays on, so it is just as safe on trusted networks. Never use it on public Wi-Fi or other public networks: the server has no login, so any device that reaches the port controls the agent.
+
+DNS-rebinding protection works like this:
+
+- **The attack:** a page in the user's own browser re-points its domain name at 127.0.0.1 or a LAN address. Its requests then arrive from a trusted peer, so the peer address alone proves nothing.
+- **The Host check:** the server answers only requests addressed to this machine's names on its port. These are loopback names, the bound host, the OS hostname and its `.local` form, and current interface addresses.
+- **The Origin check:** WebSocket and upload requests must also carry the matching same-host Origin.
+- **Proxies:** requests through a reverse proxy or another DNS name are refused, unless that name is the bound host.
+
+Project management (add, pin, group, remove, edit descriptions) and app exit always require a loopback peer using a loopback host name.

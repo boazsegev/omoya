@@ -8,7 +8,7 @@ import { matchesGlob } from "../tools/read/glob.js";
 import { parseIgnore, isIgnored } from "../tools/read/ignore.js";
 const ROOT = `./ai-tmp/read-security-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
-function setup() { mkdirSync(`${ROOT}/project/sub`, { recursive: true }); return { env: { cwd: `${ROOT}/project`, settings: {} } }; }
+function setup() { mkdirSync(`${ROOT}/project/sub`, { recursive: true }); return { env: { folder: `${ROOT}/project`, settings: {} } }; }
 function text(value) { return typeof value === "string" ? value : value.filter((block) => block.type === "text").map((block) => block.text).join("\n"); }
 
 describe("read security regressions", () => {

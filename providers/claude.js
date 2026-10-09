@@ -5,9 +5,6 @@ import AnthropicProvider from "./anthropic.js";
 
 const URL = "https://api.anthropic.com/v1";
 const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
-// Explicit 5-minute retention for non-identity breakpoints (pi omits
-// ttl because the API's default is five minutes).
-const SHORT_CACHE = { type: "ephemeral", ttl: "5m" };
 const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 const CLI_VERSION = "2.1.280";
 const CLAUDE_TOOLS = [
@@ -36,23 +33,16 @@ function subscriptionHeaders(auth) {
 }
 
 function rewriteOutgoing(body) {
-  const system = [{ type: "text", text: IDENTITY, cache_control: { type: "ephemeral" } }];
-  if (body.system) system.push({ type: "text", text: body.system, cache_control: { ...SHORT_CACHE } });
+  // Keep Anthropic's top-level automatic caching; explicit breakpoints
+  // here would consume the same four-breakpoint budget.
+  const system = [{ type: "text", text: IDENTITY }];
+  if (body.system) system.push({ type: "text", text: body.system });
   body.system = system;
   for (const tool of body.tools ?? []) tool.name = wireName(tool.name);
-  if (body.tools?.length) body.tools.at(-1).cache_control = { ...SHORT_CACHE };
   for (const message of body.messages) {
     for (const block of message.content) {
       if (block.type === "tool_use") block.name = wireName(block.name);
     }
-  }
-  const last = body.messages.at(-1);
-  // Anthropic accepts at most four explicit breakpoints: identity, system,
-  // tool catalog and the last eligible conversation block. Earlier turns
-  // are covered by the prefix, not individually marked.
-  if (last?.role === "user") {
-    const block = last.content.at(-1);
-    if (["text", "image", "tool_result", "document"].includes(block?.type)) block.cache_control = { ...SHORT_CACHE };
   }
   return body;
 }

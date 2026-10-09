@@ -5,8 +5,8 @@
  * README ("Build on the library"):
  *
  *   import Agent from "omoya/agent";
- *   const env = await Agent.Env.create();   // providers, endpoint detection, tools
- *   const agent = new Agent({ env, model: "<endpoint>/<model>", safe: true });
+ *   const env = await Agent.Env.open(process.cwd());   // providers, endpoint detection, tools
+ *   const agent = await Agent.create({ env, model: "<endpoint>/<model>", can: { write: false } });
  *
  * IMPORTANT — endpoint and model setup:
  *   The `model` option is an `<endpoint>/<model>` selector. An endpoint is a
@@ -35,37 +35,38 @@ const MODEL_SELECTOR = "ollama/gpt-oss:20b";
 const PROMPT = "Reply with exactly one short sentence naming the current folder.";
 
 function fail(message) {
-  console.error(`headless-agent: ${message}`);
-  process.exit(1);
+  throw new Error(`headless-agent: ${message}`);
 }
 
 // --- Environment ------------------------------------------------------------
 
-// Agent.Env.create() loads settings layers, providers, endpoint detection,
+// Agent.Env.open(process.cwd()) loads settings layers, providers, endpoint detection,
 // and the tool registry — the returned environment is ready for an Agent.
-const env = await Agent.Env.create();
-
+const env = await Agent.Env.open(process.cwd());
+let agent;
 try {
   env.connection(MODEL_SELECTOR, { remember: false });
 } catch (error) {
-  fail(`${error.message}. Run "omoya --login" or choose a model from: ${[...env.models().keys()].join(", ") || "(none configured)"}.`);
+  console.error(`headless-agent: ${error.message}. Run "omoya --login" or choose a model from: ${[...env.models().keys()].join(", ") || "(none configured)"}.`);
+  await env.close();
+  process.exit(1);
 }
 
 // --- Agent ------------------------------------------------------------------
 
-const agent = new Agent({
+try {
+agent = await Agent.create({
   env,
   model: MODEL_SELECTOR,
-  // Safe mode: publish and execute ONLY read-only tools. This example needs
-  // no filesystem writes; safe mode is the right default for headless runs.
-  safe: true,
+  // Deny writes: this example needs no filesystem mutations.
+  can: { write: false },
   // No `session` option: an anonymous, in-memory session that writes nothing.
   name: "example-headless",
 });
 
 // --- Event handling ---------------------------------------------------------
 
-// Agent.EVENT is the canonical numeric event vocabulary; onEvent registers a
+// Agent.EVENT is the canonical Symbol event vocabulary; onEvent registers a
 // synchronous listener for one event constant and returns an opaque handle.
 const E = Agent.EVENT;
 
@@ -103,5 +104,7 @@ if (terminal?.usage) {
   const { inputTokens = 0, outputTokens = 0 } = terminal.usage;
   console.error(`[usage] input=${inputTokens} output=${outputTokens}`);
 }
-
-agent.close();
+} finally {
+  try { await agent?.close(); }
+  finally { await env.close(); }
+}

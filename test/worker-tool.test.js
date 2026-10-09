@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import Env from "../lib/env.js";
 import { Agent } from "../lib/agent.js";
 import { MessageType } from "../lib/context.js";
 import { worker_create } from "../tools/worker-create.js";
+import { testEnv } from "./fakes.js";
 
-function setup() {
-  const env = new Env({ settings: { maxActive: 4 } });
-  env._endpoints.ep = { provider: "test" };
-  env.agentsAvailable = () => 1;
-  const manager = new Agent({ env, model: "ep/m", spawnPermission: true, createIO: () => ({ state: "idle" }) });
+async function setup() {
+  const env = await testEnv({ maxActive: 4, providers: {
+    ep: { provider: "test", models: { m: { maxActive: 3 } } },
+  } });
+  await env.ready();
+  const manager = await Agent.create({ env, model: "ep/m", can: { delegate: true }, createIO: () => ({ state: "idle" }) });
   manager.send = function send(message) { this._pending.push(message); return Promise.resolve({ type: "done" }); };
   const create = env.agentCreate.bind(env);
   env.agentCreate = (options) => create({ ...options, createIO: () => ({ state: "idle", write: async () => ({ type: "done" }) }) });
@@ -16,11 +17,11 @@ function setup() {
 }
 
 describe("worker response routing", () => {
-  test("routes completed responses from every direct worker without invoking worker tools", () => {
-    const { manager } = setup();
-    const child = manager.childCreate({ name: "direct", model: "ep/m" });
+  test("routes completed responses from every direct worker without invoking worker tools", async () => {
+    const { manager } = await setup();
+    const child = await manager.childCreate({ name: "direct", model: "ep/m" });
     child.send = function send(message) { this._pending.push(message); return Promise.resolve({ type: "done" }); };
-    const grandchild = child.childCreate({ name: "nested", model: "ep/m" });
+    const grandchild = await child.childCreate({ name: "nested", model: "ep/m" });
     const text = { type: "text", text: "finished" };
     for (const message of [
       { type: MessageType.Assistant, content: [{ type: "thinking", text: "private" }] },
@@ -38,7 +39,7 @@ describe("worker response routing", () => {
   });
 
   test("routes immutable mixed assistant content with provenance", async () => {
-    const { manager } = setup();
+    const { manager } = await setup();
     await worker_create({ workers: [{ name: "r" }], prompt: "work" }, { agent: manager });
     const child = manager.children[0];
     const content = [{ type: "text", text: "done" }, { type: "image", mime: "image/png", content: "x" }];

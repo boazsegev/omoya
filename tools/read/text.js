@@ -18,6 +18,10 @@ export function textEncoding(sample) {
   return "utf-8";
 }
 
+export class BinaryFileError extends Error {
+  constructor() { super("File is binary; use binary: true to read or search bytes"); }
+}
+
 function binarySample(buffer, encoding) {
   if (encoding !== "utf-8") return false;
   // Samples may end within a valid multibyte sequence; decoder streaming ignores that suffix only.
@@ -38,12 +42,12 @@ export async function loadText(opened, query, state) {
   const encoding = query.binary ? "latin1" : textEncoding(sample);
   const tailCount = query.lines?.last ?? (query.lines?.from < 0 && (query.lines.to === undefined || query.lines.to < 0) ? -query.lines.from : undefined);
   if (!query.info && tailCount !== undefined && !query.search && !query.characters) return await tailText(opened, tailCount, state, encoding);
-  if (query.search && !query.binary && binarySample(sample, encoding)) throw new Error("Search applies only to text files; use binary: true to search bytes");
+  if (!query.binary && binarySample(sample, encoding)) throw new BinaryFileError();
   const decoder = query.binary ? null : new TextDecoder(encoding, { fatal: true });
   let position = sample.length;
   let text;
   try { text = query.binary ? sample.toString("latin1") : decoder.decode(sample, { stream: true }); }
-  catch { throw new Error("Invalid text encoding; use binary: true for bytes"); }
+  catch { throw new BinaryFileError(); }
   let newlines = query.lines ? countNewlines(text) : 0;
   let characters = query.characters ? [...text].length : 0;
   while (position < opened.metadata.size && !positiveStop(query, characters, newlines)) {
@@ -54,7 +58,7 @@ export async function loadText(opened, query, state) {
     if (!buffer.length) break;
     let chunk;
     try { chunk = query.binary ? buffer.toString("latin1") : decoder.decode(buffer, { stream: true }); }
-    catch { throw new Error("Invalid text encoding; use binary: true for bytes"); }
+    catch { throw new BinaryFileError(); }
     text += chunk;
     if (query.lines) newlines += countNewlines(chunk);
     if (query.characters) characters += [...chunk].length;
@@ -63,7 +67,7 @@ export async function loadText(opened, query, state) {
   const complete = position >= opened.metadata.size;
   if (decoder && complete) {
     try { text += decoder.decode(); }
-    catch { throw new Error("Invalid text encoding; use binary: true for bytes"); }
+    catch { throw new BinaryFileError(); }
   }
   checkReadState(state);
   return { text, complete, encoding };
@@ -104,7 +108,10 @@ async function tailText(opened, count, state, encoding) {
     while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start++;
     buffer = buffer.subarray(start);
   }
-  return { text: encoding === "latin1" ? buffer.toString("latin1") : new TextDecoder(encoding, { fatal: true }).decode(buffer), complete: position === 0, encoding, tail: true };
+  let text;
+  try { text = encoding === "latin1" ? buffer.toString("latin1") : new TextDecoder(encoding, { fatal: true }).decode(buffer); }
+  catch { throw new BinaryFileError(); }
+  return { text, complete: position === 0, encoding, tail: true };
 }
 
 export function countNewlines(text) {

@@ -14,8 +14,11 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import "../lib/env.js"; // sets the global Env the tool wrappers stamp with
 import { write, toolDescription as writeDescription } from "../tools/write.js";
-import { edit, toolDescription as editDescription } from "../tools/edit.js";
+import { edit, editUndo, toolDescription as editDescription } from "../tools/edit.js";
 import { findTraversal, findWriteTraversal, traversalSnippet } from "../tools/guard/paths.js";
+import Agent from "../lib/agent.js";
+import { testEnv } from "./fakes.js";
+import { toolsLoad } from "./env-internals.js";
 
 const ROOT = `./ai-tmp/write-edit-${process.pid}`;
 afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -43,7 +46,7 @@ describe("write tool (pi semantics)", () => {
     const project = `${ROOT}/project`;
     mkdirSync(project, { recursive: true });
     const source = "import '" + "../" + "lib/inside-project.js';";
-    await write({ path: "nested/out.js", content: source }, { env: { cwd: project } });
+    await write({ path: "nested/out.js", content: source }, { env: { folder: project } });
     expect(readFileSync(`${project}/nested/out.js`, "utf8")).toBe(source);
   });
 
@@ -52,7 +55,7 @@ describe("write tool (pi semantics)", () => {
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
     const source = "import '" + "../" + "shared/module.js';";
-    const context = { env: { cwd: project }, agent: { folder: agentFolder } };
+    const context = { env: { folder: project }, agent: { folder: agentFolder } };
     await write({ path: "out.js", content: source }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe(source);
     await expect(write({ path: "../shared/out.js", content: "sibling" }, context)).rejects.toThrow(/boundary/);
@@ -92,18 +95,18 @@ describe("edit tool (pi semantics)", () => {
     writeFileSync(`${agentFolder}/out.js`, "old\n");
     const sibling = ".." + "/shared/module.js";
     await edit({ path: "out.js", edits: [{ oldText: "old", newText: `import '${sibling}';` }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     });
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toContain(sibling);
     const siblingFile = `${project}/shared/module.js`;
     mkdirSync(`${project}/shared`, { recursive: true });
     writeFileSync(siblingFile, "old sibling\n");
     await expect(edit({ path: sibling, edits: [{ oldText: "old sibling", newText: "new sibling" }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     })).rejects.toThrow(/boundary/);
     expect(readFileSync(siblingFile, "utf8")).toContain("old sibling");
     await expect(edit({ path: "../../outside.txt", edits: [{ oldText: "x", newText: "y" }] }, {
-      env: { cwd: project }, agent: { folder: agentFolder },
+      env: { folder: project }, agent: { folder: agentFolder },
     })).rejects.toThrow(/boundary/);
   });
 
@@ -130,11 +133,11 @@ describe("edit tool (pi semantics)", () => {
 
   test("schema requires path alongside rollback — a rollback is intentional", () => {
     const schema = editDescription().edit.inputSchema;
-    expect(schema.required).toEqual(["path"]);
-    expect(schema.required).not.toContain("edits");
-    expect(schema.anyOf).toBeUndefined();
-    expect(schema.properties.edits.description).toContain("required unless using rollback");
-    expect(schema.properties.rollback.type).toBe("string");
+    expect(schema.required).toEqual(["path", "edits"]);
+    expect(schema.properties.rollback).toBeUndefined();
+    expect(schema.properties.matchAll).toBeUndefined();
+    expect(schema.properties.edits.items.properties.matchAll.type).toBe("boolean");
+    expect(editDescription()["edit-undo"].inputSchema.required).toEqual(["path", "editId"]);
   });
   test("rollback reverses a recorded edit by its tool call id (and records itself — a redo)", async () => {
     seed("r.txt", "alpha beta gamma\n");
@@ -144,49 +147,48 @@ describe("edit tool (pi semantics)", () => {
     expect(readFileSync(rel("r.txt"), "utf8")).toBe("alpha BETA gamma\n");
     // the rollback: the path names the file the id belongs to — the
     // record carries the edits
-    const back = await edit({ path: rel("r.txt"), rollback: "agent-7" }, { call: { callId: "agent-8", name: "edit" } });
-    expect(back.result).toContain("Rolled back: restored 1 block(s)");
+    const back = await editUndo({ path: rel("r.txt"), editId: "agent-7" }, { call: { callId: "agent-8", name: "edit" } });
+    expect(back.result).toContain("Undid edit: restored 1 block(s)");
     expect(back.display).toContain("-alpha BETA gamma");
     expect(back.display).toContain("+alpha beta gamma");
     expect(readFileSync(rel("r.txt"), "utf8")).toBe("alpha beta gamma\n");
     // the redo: the rollback recorded itself under its own call id
-    await edit({ path: rel("r.txt"), rollback: "agent-8" });
+    await editUndo({ path: rel("r.txt"), editId: "agent-8" });
     expect(readFileSync(rel("r.txt"), "utf8")).toBe("alpha BETA gamma\n");
     // consumed: a third rollback of the same id reports the unknown edit
-    await expect(edit({ path: rel("r.txt"), rollback: "agent-8" })).rejects.toThrow(/^Use an edit id returned/);
+    await expect(editUndo({ path: rel("r.txt"), editId: "agent-8" })).rejects.toThrow(/^Use an edit id returned/);
   });
 
   test("a rollback requires the path the edit id belongs to — and the record survives a mismatch", async () => {
     seed("rb-path.txt", "alpha beta\n");
     await edit({ path: rel("rb-path.txt"), edits: [{ oldText: "beta", newText: "BETA" }] }, { call: { callId: "agent-12", name: "edit" } });
     // no path at all: a TypeError, like the other bad-argument errors
-    await expect(edit({ rollback: "agent-12" })).rejects.toThrow(TypeError);
+    await expect(editUndo({ editId: "agent-12" })).rejects.toThrow(TypeError);
     // a path that does not match the record refuses BEFORE the rewrite
-    await expect(edit({ path: rel("other.txt"), rollback: "agent-12" })).rejects.toThrow(/^Use the `path` matching the `rollback` id/);
+    await expect(editUndo({ path: rel("other.txt"), editId: "agent-12" })).rejects.toThrow(/^Use the `path` matching the `editId`/);
     expect(readFileSync(rel("rb-path.txt"), "utf8")).toBe("alpha BETA\n"); // untouched
     // a mismatched rollback is not consumed: the right path still rolls back
-    await edit({ path: rel("rb-path.txt"), rollback: "agent-12" });
+    await editUndo({ path: rel("rb-path.txt"), editId: "agent-12" });
     expect(readFileSync(rel("rb-path.txt"), "utf8")).toBe("alpha beta\n");
   });
 
-  test("an EMPTY rollback string alongside edits means 'nothing to roll back' — never an error", async () => {
+  test("edit and undo reject misplaced arguments", async () => {
     seed("f.txt", "one two\n");
-    // a model that fills every schema field writes rollback: "" for
-    // "no value" — the non-empty edits array is the clear intent
-    const out = await edit({ path: rel("f.txt"), edits: [{ oldText: "two", newText: "2" }], rollback: "" });
-    expect(out.result).toContain("Replaced 1 block(s)");
-    expect(readFileSync(rel("f.txt"), "utf8")).toBe("one 2\n");
+    await expect(edit({ path: rel("f.txt"), rollback: "unknown" })).rejects.toThrow(TypeError);
+    await expect(editUndo({ path: rel("f.txt") })).rejects.toThrow(TypeError);
+    await expect(edit({ path: rel("f.txt"), edits: [{ oldText: "one", newText: "1", matchAll: "true" }] })).rejects.toThrow(TypeError);
+    expect(readFileSync(rel("f.txt"), "utf8")).toBe("one two\n");
   });
 
   test("a rollback refuses honestly when the file drifted since the edit — and stays retryable", async () => {
     seed("d.txt", "one two\n");
     await edit({ path: rel("d.txt"), edits: [{ oldText: "two", newText: "2" }] }, { call: { callId: "agent-9", name: "edit" } });
     writeFileSync(rel("d.txt"), "one changed-by-someone-else\n");
-    await expect(edit({ path: rel("d.txt"), rollback: "agent-9" })).rejects.toThrow(/^The file changed since this edit/);
+    await expect(editUndo({ path: rel("d.txt"), editId: "agent-9" })).rejects.toThrow(/^The file changed since this edit/);
     expect(readFileSync(rel("d.txt"), "utf8")).toBe("one changed-by-someone-else\n"); // untouched
     // the record survives the failed rollback: reconcile the file and retry
     writeFileSync(rel("d.txt"), "one 2\n");
-    await edit({ path: rel("d.txt"), rollback: "agent-9" });
+    await editUndo({ path: rel("d.txt"), editId: "agent-9" });
     expect(readFileSync(rel("d.txt"), "utf8")).toBe("one two\n");
   });
 
@@ -196,7 +198,7 @@ describe("edit tool (pi semantics)", () => {
     // unrelated drift APPENDS another "2" — the old swapped-text match
     // would have refused (duplicate); the recorded offset restores anyway
     writeFileSync(rel("dup.txt"), "one 2\n2\n");
-    await edit({ path: rel("dup.txt"), rollback: "agent-10" });
+    await editUndo({ path: rel("dup.txt"), editId: "agent-10" });
     expect(readFileSync(rel("dup.txt"), "utf8")).toBe("one two\n2\n");
   });
 
@@ -204,24 +206,73 @@ describe("edit tool (pi semantics)", () => {
     seed("m.txt", "ab ab ab\n");
     await expect(edit({ path: rel("m.txt"), edits: [{ oldText: "ab", newText: "x" }] }))
       .rejects.toThrow(/matchAll: true/); // unique mode still refuses duplicates
-    const out = await edit({ path: rel("m.txt"), matchAll: true, edits: [{ oldText: "ab", newText: "x" }] }, { call: { callId: "agent-11", name: "edit" } });
+    const out = await edit({ path: rel("m.txt"), edits: [{ oldText: "ab", newText: "x", matchAll: true }] }, { call: { callId: "agent-11", name: "edit" } });
     expect(readFileSync(rel("m.txt"), "utf8")).toBe("x x x\n");
-    await edit({ path: rel("m.txt"), rollback: "agent-11" });
+    await editUndo({ path: rel("m.txt"), editId: "agent-11" });
     expect(readFileSync(rel("m.txt"), "utf8")).toBe("ab ab ab\n");
+  });
+
+  test("each edit chooses its own match mode and undo restores mixed matches", async () => {
+    seed("mixed.txt", "ab cd ab ef\n");
+    const context = { call: { callId: "mixed-edit", name: "edit" } };
+    await edit({ path: rel("mixed.txt"), edits: [
+      { oldText: "ab", newText: "x", matchAll: true },
+      { oldText: "cd", newText: "longer", matchAll: false },
+      { oldText: "ef", newText: "z" },
+    ] }, context);
+    expect(readFileSync(rel("mixed.txt"), "utf8")).toBe("x longer x z\n");
+    await editUndo({ path: rel("mixed.txt"), editId: "mixed-edit" });
+    expect(readFileSync(rel("mixed.txt"), "utf8")).toBe("ab cd ab ef\n");
+    await expect(edit({ path: rel("mixed.txt"), edits: [
+      { oldText: "ab", newText: "x", matchAll: true },
+      { oldText: "ab", newText: "y" },
+    ] })).rejects.toThrow(/matches more than once/);
+    expect(readFileSync(rel("mixed.txt"), "utf8")).toBe("ab cd ab ef\n");
+  });
+
+  test("manual Env.toolCall retains edit rollback storage when writable and honors Agent safe mode", async () => {
+    seed("manual.txt", "alpha\n");
+    const env = await testEnv({}, { cwd: process.cwd() });
+    await toolsLoad(env, { dirs: ["./tools"] });
+    const agent = await Agent.create({ env });
+    const path = rel("manual.txt");
+    try {
+      if (!agent.can.write) {
+        // Linux CI without bubblewrap forces read-only mode at construction;
+        // editing must be refused, never bypass the security gate for this test.
+        await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent }))
+          .rejects.toThrow(/safe mode/);
+        expect(readFileSync(path, "utf8")).toBe("alpha\n");
+        return;
+      }
+      await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, call: { callId: "manual-edit" } }))
+        .resolves.toHaveProperty("result");
+      expect(readFileSync(path, "utf8")).toBe("ALPHA\n");
+      await env.toolCall("edit-undo", { path, editId: "manual-edit" }, { agent });
+      expect(readFileSync(path, "utf8")).toBe("alpha\n");
+      agent.can.write = false;
+      await expect(env.toolCall("edit", { path, edits: [{ oldText: "alpha", newText: "unsafe" }] }, { agent }))
+        .rejects.toThrow(/safe mode/);
+      expect(readFileSync(path, "utf8")).toBe("alpha\n");
+    } finally {
+      agent.close();
+      env.close();
+    }
   });
 
   test("edit records live in the CALLING AGENT's session store — another agent cannot roll them back", async () => {
     seed("iso.txt", "alpha\n");
     const storage = {};
-    const agent = { folder: process.cwd(), toolStorage: () => storage };
-    await edit({ path: rel("iso.txt"), edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, call: { callId: "a-1", name: "edit" } });
+    const agent = { folder: process.cwd() };
+    await edit({ path: rel("iso.txt"), edits: [{ oldText: "alpha", newText: "ALPHA" }] }, { agent, storage, call: { callId: "a-1", name: "edit" } });
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("ALPHA\n");
     // a different agent (its own empty store) does not see the id
-    const other = { folder: process.cwd(), toolStorage: () => ({}) };
-    await expect(edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent: other })).rejects.toThrow(/^Use an edit id returned by a recent successful edit/);
+    const other = { folder: process.cwd() };
+    const otherStorage = {};
+    await expect(editUndo({ path: rel("iso.txt"), editId: "a-1" }, { agent: other, storage: otherStorage })).rejects.toThrow(/^Use an edit id returned by a recent successful edit/);
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("ALPHA\n"); // untouched
     // the owning agent rolls back fine
-    await edit({ path: rel("iso.txt"), rollback: "a-1" }, { agent });
+    await editUndo({ path: rel("iso.txt"), editId: "a-1" }, { agent, storage });
     expect(readFileSync(rel("iso.txt"), "utf8")).toBe("alpha\n");
   });
 
@@ -230,13 +281,13 @@ describe("edit tool (pi semantics)", () => {
     const agentFolder = `${project}/agent`;
     mkdirSync(agentFolder, { recursive: true });
     writeFileSync(`${agentFolder}/out.js`, "old\n");
-    const storage = {}; // a real agent returns the SAME store every call
-    const agent = { folder: agentFolder, toolStorage: () => storage };
-    const context = { env: { cwd: project }, agent, call: { callId: "a-2", name: "edit" } };
+    const storage = {}; // dispatch supplies the SAME store every call
+    const agent = { folder: agentFolder };
+    const context = { env: { folder: project }, agent, storage, call: { callId: "a-2", name: "edit" } };
     await edit({ path: "out.js", edits: [{ oldText: "old", newText: "new" }] }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe("new\n");
     // the rollback resolves against the agent folder (not the process cwd)
-    await edit({ path: "out.js", rollback: "a-2" }, context);
+    await editUndo({ path: "out.js", editId: "a-2" }, context);
     expect(readFileSync(`${agentFolder}/out.js`, "utf8")).toBe("old\n");
     // a symlink planted at the path is refused by edit AND by rollback
     const realTarget = `${project}/real.txt`;
@@ -256,7 +307,7 @@ describe("edit tool (pi semantics)", () => {
     // the rollback restores the region under the RECORDED ending — it
     // never re-detects (a drifted dominant style would otherwise make
     // the rollback rewrite the whole file's line endings)
-    await edit({ path: rel("crlf-rb.txt"), rollback: "a-3" }, context);
+    await editUndo({ path: rel("crlf-rb.txt"), editId: "a-3" }, context);
     expect(readFileSync(rel("crlf-rb.txt"), "utf8")).toBe("one\r\ntwo\r\n");
   });
 

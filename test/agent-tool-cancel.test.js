@@ -24,9 +24,9 @@ function register(env, fn, extra = {}) {
     inputSchema: { type: "object", properties: {} }, ...extra });
 }
 
-function createAgent(env, calls, options = {}) {
+async function createAgent(env, calls, options = {}) {
   const io = scriptedIO([[...calls, { type: "done" }], [...TEXT(0, "resumed"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", contextId: false, context: [], createIO: () => io, ...options });
+  const agent = await Agent.create({ env, model: "p/m", contextId: false, context: [], createIO: () => io, ...options });
   return { agent, io };
 }
 
@@ -45,7 +45,7 @@ describe("dispatch-owned cancellation", () => {
     let invoked = 0;
     register(env, () => { invoked++; return "wrong"; });
     const calls = [0, 1, 2].flatMap((id) => TOOLCALL(id, `c${id}`, "pending", {}));
-    const { agent, io } = createAgent(env, calls);
+    const { agent, io } = await createAgent(env, calls);
     agent.onEvent(Agent.EVENT.TOOL_EXECUTE, () => { void agent.cancel(); });
     try {
       expect(await bounded(agent.run())).toMatchObject({ kind: "cancelled" });
@@ -66,7 +66,7 @@ describe("dispatch-owned cancellation", () => {
       if (started.length === 2) ready.resolve();
     }));
     const calls = [0, 1, 2, 3].flatMap((id) => TOOLCALL(id, `c${id}`, "pending", { id }));
-    const { agent, io } = createAgent(env, calls);
+    const { agent, io } = await createAgent(env, calls);
     const run = agent.run();
     try {
       await bounded(ready.promise);
@@ -87,7 +87,7 @@ describe("dispatch-owned cancellation", () => {
     register(env, () => new Promise(() => {}), {
       onTimeout: () => { ready.resolve(); return cleanup.promise; },
     });
-    const { agent } = createAgent(env, TOOLCALL(0, "c1", "pending", {}));
+    const { agent } = await createAgent(env, TOOLCALL(0, "c1", "pending", {}));
     const run = agent.run();
     try {
       await bounded(ready.promise);
@@ -106,7 +106,7 @@ describe("dispatch-owned cancellation", () => {
         { stdio: "ignore" });
       child.once("spawn", () => ready.resolve());
     }));
-    const { agent } = createAgent(env, TOOLCALL(0, "c1", "pending", {}));
+    const { agent } = await createAgent(env, TOOLCALL(0, "c1", "pending", {}));
     const run = agent.run();
     try {
       await bounded(ready.promise);
@@ -126,7 +126,7 @@ describe("dispatch-owned cancellation", () => {
     register(env, async (_args, context) => new Promise((resolve) => {
       context.signal.addEventListener("abort", resolve, { once: true });
     }));
-    const { agent } = createAgent(env, TOOLCALL(0, "c1", "pending", {}));
+    const { agent } = await createAgent(env, TOOLCALL(0, "c1", "pending", {}));
     const run = agent.run();
     try {
       await Bun.sleep(20);
@@ -144,7 +144,7 @@ describe("dispatch-owned cancellation", () => {
       child = context.sandbox.spawn(process.execPath, ["--eval", "setTimeout(() => {}, 30000)"],
         { stdio: "ignore" });
     }), { onTimeout: () => "finished" });
-    const { agent } = createAgent(env, TOOLCALL(0, "c1", "pending", {}));
+    const { agent } = await createAgent(env, TOOLCALL(0, "c1", "pending", {}));
     try {
       expect((await bounded(agent.run())).type).toBe("done");
       expect(agent.context.messages().find((entry) => entry.type === 4)?.content[0]?.text).toBe("finished");
@@ -158,7 +158,7 @@ describe("dispatch-owned cancellation", () => {
     const ready = deferred();
     const pids = [];
     const command = "sleep 30 & printf 'ready:%s:%s\\n' \"$$\" \"$!\"; wait";
-    const { agent } = createAgent(env, TOOLCALL(0, "c1", "bash", { command }));
+    const { agent } = await createAgent(env, TOOLCALL(0, "c1", "bash", { command }));
     agent.onEvent(Agent.EVENT.TOOL_DATA, ({ chunk }) => {
       if (chunk.startsWith("ready:")) { pids.push(...chunk.slice(6).split(":").map(Number)); ready.resolve(); }
     });
@@ -182,7 +182,7 @@ describe("dispatch-owned cancellation", () => {
       const cancelled = deferred();
       let conn;
       const args = phase === "tools/call" ? { action: "call", server, tool: "hang" } : { action: "tools", server };
-      const { agent } = createAgent(env, TOOLCALL(0, "c1", "mcp", args));
+      const { agent } = await createAgent(env, TOOLCALL(0, "c1", "mcp", args));
       const run = agent.run();
       try {
         for (let attempt = 0; attempt < 100 && !conn; attempt++) {

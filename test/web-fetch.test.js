@@ -244,11 +244,11 @@ console.log(x);</code></pre>
     )).rejects.toThrow(/web\.readability must be a boolean/);
   });
 
-  test("detects and uses the actual globally installed Mozilla Readability and DOM provider", async () => {
+  test("probes optional global Mozilla Readability and uses built-in extraction when absent", async () => {
     const imports = [];
     const importModule = async (specifier) => {
       imports.push(specifier);
-      return import(specifier);
+      throw new Error(`optional dependency unavailable: ${specifier}`);
     };
     const fetchImpl = makeFetch({
       "https://real-readability.example/page": {
@@ -265,9 +265,33 @@ console.log(x);</code></pre>
       { fetch: fetchImpl, now: fixedNow, importModule },
     );
     expect(imports.some((specifier) => specifier.startsWith("file:") && specifier.includes("/install/global/node_modules/@mozilla/readability"))).toBe(true);
-    expect(imports.some((specifier) => specifier.startsWith("file:") && /\/install\/global\/node_modules\/(?:linkedom|happy-dom|jsdom)/.test(specifier))).toBe(true);
     expect(result).toContain("# Actual Mozilla extraction");
     expect(result).toContain("Substantive article sentence.");
+  });
+
+  test("loads Mozilla Readability and a DOM provider from the optional global root", async () => {
+    const imports = [];
+    const importModule = async (specifier) => {
+      imports.push(specifier);
+      if (specifier.includes("/@mozilla/readability")) return { Readability: class {
+        constructor(document) { this.document = document; }
+        parse() { return { content: this.document.article }; }
+      } };
+      if (specifier.endsWith("/linkedom")) return { parseHTML: (html) => ({ document: {
+        article: /<article>[\s\S]*?<\/article>/i.exec(html)?.[0],
+      } }) };
+      throw new Error(`optional dependency unavailable: ${specifier}`);
+    };
+    const fetchImpl = makeFetch({
+      "https://installed-readability.example/page": { headers: { "content-type": "text/html" },
+        body: "<html><body><nav>Navigation chrome</nav><article><h1>Actual Mozilla extraction</h1><p>Substantive article sentence.</p></article><footer>Footer chrome</footer></body></html>" },
+    });
+    const result = await packageFetch({ url: "https://installed-readability.example/page" },
+      { env: { settings: { web: { limit: { calls: 100 }, fetch: { cacheSeconds: 0 } } } } },
+      { fetch: fetchImpl, now: fixedNow, importModule });
+    expect(imports.some((specifier) => specifier.startsWith("file:") && specifier.includes("/install/global/node_modules/@mozilla/readability"))).toBe(true);
+    expect(imports.some((specifier) => specifier.startsWith("file:") && specifier.includes("/install/global/node_modules/linkedom"))).toBe(true);
+    expect(result).toContain("# Actual Mozilla extraction");
     expect(result).not.toContain("Navigation chrome");
     expect(result).not.toContain("Footer chrome");
   });

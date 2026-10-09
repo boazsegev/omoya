@@ -104,7 +104,7 @@ const app = {
 | `panel` | border + title + `active` (border animation) |
 | `feed` | keyed transcript items `{ key, done, node }` (§5) |
 | `scroll` | viewport over content; host owns offset and streaming-anchor stability; optional title/footer reuse the menu viewport frame; arrows/wheel/page keys scroll. Fixed-viewport hosts may show a `scroll.track`/`scroll.thumb` column only while content overflows. |
-| `overlay` | modal layer; captures focus and keys except app `bindings`; `fill: true` gives its child the centered 80% × 90% safe area |
+| `overlay` | modal layer; captures focus and keys except app `bindings`; `fill: true` gives its child the centered 80% × 90% safe area. `passive: true`, `anchorAction`, `position: "above-right"` paint a nonmodal popover above an action row without reserving layout space. |
 | `input` | **controlled** text control (below); `cursor: { shape: "line"|"underline"|"block"|number, blinkMs }` defaults to a line cursor with a 450 ms half-period |
 | `menu` | **controlled** list: items `{ id, label, hint, children }`, filter query, highlight window; emits `menu.select`/`menu.cancel` |
 | `toolbar(props, buttons)` | **controlled** one-line row of `button(props, label)`s (`{ action, id?, icon?, pressed?, tone?, priority? }`). Tight space drops whole buttons, lowest `priority` first; `align: "end"` keeps the rest right-aligned. The app owns `focus`; GTUI owns the roving button: while focused, ←/→ Tab/Shift+Tab (wrapping) and Home/End move it (`toolbar.change { id, key, action }`), Enter/Space and clicks emit `action.select { id, action }`, and every other key bubbles to `update` — leaving the toolbar is app policy. Roles: `button`, `button.on` (`pressed`), `button.<tone>`, `button.focus`, `button.hover`. |
@@ -135,7 +135,7 @@ Both: never write a pending-wrap final column, reset SGR at every style boundary
 
 - **GTUI owns the mechanism**: token lookup with fallback to `text`, generic control tokens (`text`, `muted`, `accent`, `error`, `border`, `border.active`, `selection`, `input.*`, `completion.*`, `menu.*`, `overlay.*`), `button.*`, style values `{ fg, bg, bold, dim, italic, underline, reverse, strike }` with colors `ansi:<0-255>` | `#rrggbb` | `default`, and `{ dark, light }` variants picked from host capability (unknown → no subtle background, as `theme.js` does today).
 - **Animations are declarative**: tokens may name a generic animation (`comet` head/tail/nose stops + length ratio + crossing time + mirror; `wave` text crest; `flash` period). A node with `active: true` animates on the host clock; a GUI host may use native animation.
-- **`lib/app/tui` owns ai roles** (`message.user`, `status.identity`, …), the default theme and settings parsing (`tui.theme`, `tui.themes`). The default theme uses the exact legacy palette indices so terminal bytes match.
+- **`lib/app/tui` owns ai roles** (`message.user`, `status.identity`, …), the default theme and settings parsing (`tui.theme`, `themes`). The default theme uses the exact legacy palette indices so terminal bytes match.
 
 ## 7. Private (never exported, never imported outside gtui)
 

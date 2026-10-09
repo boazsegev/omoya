@@ -458,16 +458,23 @@ describe("append with merging (messageAppend / foldContent)", () => {
     expect(() => messageAppend([], { content: [] })).toThrow(TypeError);
   });
 
-  test("EMPTY-MESSAGE refusal: an unmergeable empty message never enters the context", () => {
+  test("EMPTY-MESSAGE warning: an unmergeable empty message is skipped", () => {
     const c = [user("q")];
-    // a bare empty assistant message (a cancel-partial that produced
-    // nothing) throws — explicit emptiness is a bug, never a silent drop
-    expect(() => messageAppend(c, { type: 3, content: [] })).toThrow(/empty message/);
-    expect(() => messageAppend(c, { type: 3, content: [{ type: "text", text: "" }] })).toThrow(/empty message/);
-    expect(c).toHaveLength(1); // nothing entered
+    const warnings = [];
+    const emitWarning = process.emitWarning;
+    process.emitWarning = (warning, options) => warnings.push({ warning, ...options });
+    try {
+      expect(messageAppend(c, { type: 3, content: [] })).toBeUndefined();
+      expect(messageAppend(c, { type: 3, content: [{ type: "text", text: "" }] })).toBeUndefined();
+    } finally {
+      process.emitWarning = emitWarning;
+    }
+    expect(c).toHaveLength(1);
+    expect(warnings).toHaveLength(2);
+    expect(warnings.every((warning) => warning.code === "OMOYA_EMPTY_MESSAGE")).toBe(true);
   });
 
-  test("EMPTY-MESSAGE refusal: a MERGEABLE empty message merges away silently (a pure continuation)", () => {
+  test("EMPTY-MESSAGE handling: a mergeable empty message merges away silently", () => {
     const c = [{ type: 3, content: [{ type: "text", text: "partial ans" }] }];
     // the next turn's first deltas produced nothing before the
     // terminal — a pure continuation of the previous assistant

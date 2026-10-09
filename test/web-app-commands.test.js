@@ -10,7 +10,7 @@ import { testEnv } from "./fakes.js";
 describe("web-app commands: /agent-name", () => {
   test("shows and sets the human-friendly Agent name", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect((await runCommand(agent, "/agent-name")).text).toBe(`agent name: ${agent.name}`);
     expect((await runCommand(agent, "/agent-name scribe")).text).toBe("agent name: scribe");
     expect(agent.name).toBe("scribe");
@@ -20,7 +20,7 @@ describe("web-app commands: /agent-name", () => {
 
   test("is offered by the autocomplete catalog", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect(catalog(agent).commands).toContain("/agent-name");
   });
 });
@@ -28,7 +28,7 @@ describe("web-app commands: /agent-name", () => {
 describe("web-app commands: qualified model selection", () => {
   test("shows native model IDs in command feedback and accepts a bare model on the current endpoint", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect((await runCommand(agent, "/endpoint-model other")).text).toBe("endpoint: p, model: other");
     expect(agent.model).toBe("p/other");
     expect((await runCommand(agent, "/endpoint-model")).text).toContain("model: p/other");
@@ -36,7 +36,7 @@ describe("web-app commands: qualified model selection", () => {
 
   test("rejects an unknown bare model without a selected endpoint", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, context: [] });
+    const agent = await Agent.create({ env, context: [] });
     expect((await runCommand(agent, "/endpoint-model unknown")).text).toBe('unknown model "unknown"');
     expect(agent.model).toBeUndefined();
   });
@@ -51,7 +51,7 @@ describe("web-app commands: TUI parity", () => {
 
   test("/context-copy hands the last response to the client clipboard", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [
+    const agent = await Agent.create({ env, model: "p/m", context: [
       { type: 2, content: [{ type: "text", text: "q" }] },
       { type: 3, content: [{ type: "text", text: "the answer" }] },
     ] });
@@ -61,7 +61,7 @@ describe("web-app commands: TUI parity", () => {
   test("/<prompt> fills the composer for editing instead of submitting", async () => {
     const env = await testEnv();
     env.prompts = () => new Map([["greet", { name: "greet", body: "Say hello." }]]);
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect(await runCommand(agent, "/greet")).toEqual({ fill: "Say hello." });
     expect(await runCommand(agent, "//greet to Bo\nthanks")).toEqual({ fill: "Say hello.\nto Bo\nthanks" });
     expect(agent.context.messages()).toEqual([]);
@@ -69,7 +69,7 @@ describe("web-app commands: TUI parity", () => {
 
   test("/compact forwards multiline focus to Agent and remains discoverable", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [{ type: 2, content: [{ type: "text", text: "q" }] }] });
+    const agent = await Agent.create({ env, model: "p/m", context: [{ type: 2, content: [{ type: "text", text: "q" }] }] });
     agent.compact = async (focus) => ({ ok: focus === "prioritize code\nthen tests", before: 1 });
     expect(await runCommand(agent, "/compact prioritize code\nthen tests")).toEqual({ text: "compacted 1 messages", renew: true });
     expect(catalog(agent).commands).toContain("/compact");
@@ -77,7 +77,7 @@ describe("web-app commands: TUI parity", () => {
 
   test("dialog-backed commands open client views", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect(await runCommand(agent, "/endpoint-login")).toEqual({ open: "login" });
     expect(await runCommand(agent, "/menu")).toEqual({ open: "palette" });
     expect(await runCommand(agent, "/context-edit 3")).toEqual({ open: "context", index: 3 });
@@ -85,7 +85,7 @@ describe("web-app commands: TUI parity", () => {
 
   test("the catalog carries argument hints for the composer ghost text", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     expect(catalog(agent).hints["/session-name"]).toBe("<name>");
     expect(catalog(agent).commands).toContain("/session-delete-all!");
   });

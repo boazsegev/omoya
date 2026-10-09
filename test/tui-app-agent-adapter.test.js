@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { GTUI } from "../lib/app/gtui/gtui.js";
 import { Agent } from "../lib/agent.js";
+import { Sandbox } from "../lib/sandbox.js";
 import { createAgentAdapter } from "../lib/app/tui/agent-adapter.js";
 import { createApp, msg } from "../lib/app/tui/app.js";
 import { QUESTION_MENU_ID } from "../lib/app/tui/questionnaire-view.js";
@@ -57,7 +58,7 @@ describe("agent adapter: turns as task streams", () => {
   test("submit runs a turn: the view goes running -> idle, and the exchange lands in the agent's context", async () => {
     const env = await testEnv();
     const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi there"), { type: "done" }]]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -78,7 +79,7 @@ describe("agent adapter: turns as task streams", () => {
   test("a message submitted mid-turn is queued, not a second task — the running loop drains it on its own", async () => {
     const env = await testEnv();
     const { io, release } = pausableIO();
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     let cancelCalls = 0;
     const realCancel = agent.cancel.bind(agent);
     agent.cancel = (...args) => { cancelCalls++; return realCancel(...args); };
@@ -119,7 +120,7 @@ describe("agent adapter: turns as task streams", () => {
       if (calls === 1) throw new Error("provider exploded");
       return (await import("./fakes.js")).emitScript([{ type: "start" }, ...TEXT(0, "recovered"), { type: "done" }], callbacks);
     });
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const host = GTUI.host.memory();
     const ui = new GTUI({ host });
     const running = ui.run(createApp(agent));
@@ -135,7 +136,7 @@ describe("agent adapter: turns as task streams", () => {
   test("Escape from the focused draft cancels a running turn", async () => {
     const env = await testEnv();
     const io = hangingIO("partial");
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(agent));
@@ -152,8 +153,8 @@ describe("agent adapter: turns as task streams", () => {
     const env = await testEnv();
     const firstIO = hangingIO("first partial");
     const secondIO = hangingIO("second partial");
-    const first = new Agent({ env, model: "p/m", context: [], createIO: () => firstIO });
-    const second = new Agent({ env, model: "p/m", context: [], createIO: () => secondIO });
+    const first = await Agent.create({ env, model: "p/m", context: [], createIO: () => firstIO });
+    const second = await Agent.create({ env, model: "p/m", context: [], createIO: () => secondIO });
     const ui = new GTUI({ host: GTUI.host.memory() });
     const running = ui.run(createApp(first, { env }));
     try {
@@ -177,8 +178,8 @@ describe("agent adapter: turns as task streams", () => {
     const env = await testEnv();
     const firstIO = hangingIO("first partial");
     const secondIO = hangingIO("second partial");
-    const first = new Agent({ env, model: "p/m", context: [], createIO: () => firstIO });
-    const second = new Agent({ env, model: "p/m", context: [], createIO: () => secondIO });
+    const first = await Agent.create({ env, model: "p/m", context: [], createIO: () => firstIO });
+    const second = await Agent.create({ env, model: "p/m", context: [], createIO: () => secondIO });
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(first, { env }));
@@ -204,7 +205,7 @@ describe("agent adapter: turns as task streams", () => {
   test("Escape in a menu closes it first; the next Escape interrupts the displayed busy agent", async () => {
     const env = await testEnv();
     const io = hangingIO("partial");
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
     const running = ui.run(createApp(agent, { env }));
@@ -226,7 +227,7 @@ describe("agent adapter: turns as task streams", () => {
   test("interrupt is a fire-and-forget agent.cancel() — the SAME turn's event stream reports the cancellation", async () => {
     const env = await testEnv();
     const io = hangingIO("partial");
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -246,13 +247,14 @@ describe("agent adapter: turns as task streams", () => {
 describe("agent adapter: real-agent tool hook bridge", () => {
   test("captures the real agent, preserves other subscribers, and unregisters after the task", async () => {
     const seen = [];
-    const listeners = Array.from({ length: Object.keys(Agent.EVENT).length }, () => []);
+    const listeners = new Map();
+    const entriesFor = (event) => { if (!listeners.has(event)) listeners.set(event, []); return listeners.get(event); };
     let nextHandle = 0;
     const real = {
-      pending: [], questionInstall() { return () => {}; }, cancel() {},
-      onEvent(event, callback) { const handle = ++nextHandle; listeners[event].push([callback, handle]); return handle; },
-      offEvent(handle) { for (const entries of listeners) { const index = entries.findIndex((entry) => entry[1] === handle); if (index >= 0) { entries.splice(index, 1); return true; } } return false; },
-      emit(event, value) { for (const [callback] of listeners[event]) callback(value); },
+      pending: [], cancel() {},
+      onEvent(event, callback) { const handle = ++nextHandle; entriesFor(event).push([callback, handle]); return handle; },
+      offEvent(handle) { for (const entries of listeners.values()) { const index = entries.findIndex((entry) => entry[1] === handle); if (index >= 0) { entries.splice(index, 1); return true; } } return false; },
+      emit(event, value) { for (const [callback] of entriesFor(event)) callback(value); },
       async run() {
         this.emit(Agent.EVENT.TOOL_EXECUTE, { callId: "c" });
         const result = { callId: "c", content: [] };
@@ -263,13 +265,13 @@ describe("agent adapter: real-agent tool hook bridge", () => {
     };
     real.onEvent(Agent.EVENT.TOOL_EXECUTE, (call) => seen.push(["prior-execute", call.callId]));
     real.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => seen.push(["prior-result", result.callId]));
-    const proxy = { pending: [], questionInstall() { return () => {}; }, cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
+    const proxy = { pending: [], cancel() {}, [Symbol.for(NAMES.realAgentSymbol)]: real };
     const adapter = createAgentAdapter(proxy);
     const sent = [];
     await adapter.turnEffect().run({ send: (message) => sent.push(message), signal: new AbortController().signal });
     expect(seen).toEqual([["prior-execute", "c"], ["prior-result", "c"]]);
-    expect(listeners[Agent.EVENT.TOOL_EXECUTE]).toHaveLength(1);
-    expect(listeners[Agent.EVENT.TOOL_RESULT]).toHaveLength(1);
+    expect(entriesFor(Agent.EVENT.TOOL_EXECUTE)).toHaveLength(1);
+    expect(entriesFor(Agent.EVENT.TOOL_RESULT)).toHaveLength(1);
     expect(sent.filter((message) => message.type === "agent.tool.event").map((message) => message.origin)).toEqual([real, real]);
   });
 });
@@ -282,7 +284,7 @@ describe("agent adapter: the question bridge", () => {
       [{ type: "start" }, ...TOOLCALL(0, "c1", "question", { questions: [Q1] }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "answered"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -304,15 +306,15 @@ describe("agent adapter: the question bridge", () => {
     await running;
   });
 
-  test("a test/ui-shaped worker permission question resumes with its canonical model selector", async () => {
+  test("a test/ui-shaped worker permission question resumes with its canonical model selector when writable", async () => {
     // a worker's model is a published catalog pair
-    const env = await testEnv({ p: { models: { m: {}, "ui-response": {} } } });
+    const env = await testEnv({ providers: { p: { provider: "test", url: "test://script", models: { m: {}, "ui-response": {} } } } });
     await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
       [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "ui-response-demo", description: "UI response demonstrator", model: "p/ui-response" }], prompt: "Reply with the child-worker UI demonstration." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "worker started"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -324,21 +326,27 @@ describe("agent adapter: the question bridge", () => {
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     await until(() => !agent.busy);
 
-    expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
-    expect(agent.children).toHaveLength(1);
-    expect(agent.children[0]).toMatchObject({ name: "ui-response-demo", model: "p/ui-response" });
+    const result = agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text;
+    if (Sandbox.osAvailable()) {
+      expect(result).toContain(": started");
+      expect(agent.children).toHaveLength(1);
+      expect(agent.children[0]).toMatchObject({ name: "ui-response-demo", model: "p/ui-response" });
+    } else {
+      expect(result).toContain("User set read only mode, this tool can't be called right now");
+      expect(agent.children).toHaveLength(0);
+    }
     ui.stop();
     await running;
   });
 
-  test("a worker permission question resumes the tool call with the selected answer", async () => {
-    const env = await testEnv();
+  test("a worker permission question resumes the tool call with the selected answer when writable", async () => {
+    const env = await testEnv({ providers: { p: { provider: "test", url: "test://script", models: { m: {} } } } });
     await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
       [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "reviewer" }], prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "worker started"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -350,21 +358,27 @@ describe("agent adapter: the question bridge", () => {
     ui.dispatch({ type: "menu.submit", id: QUESTION_MENU_ID, item: { value: "Allow" } });
     await until(() => !agent.busy);
 
-    expect(agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text).toContain(": started");
-    expect(agent.children).toHaveLength(1);
-    expect(agent.children[0]).toMatchObject({ name: "reviewer", model: "p/m" });
+    const result = agent.context.messages().find((message) => message.type === 4 && message.name === "worker-create").content[0].text;
+    if (Sandbox.osAvailable()) {
+      expect(result).toContain(": started");
+      expect(agent.children).toHaveLength(1);
+      expect(agent.children[0]).toMatchObject({ name: "reviewer", model: "p/m" });
+    } else {
+      expect(result).toContain("User set read only mode, this tool can't be called right now");
+      expect(agent.children).toHaveLength(0);
+    }
     ui.stop();
     await running;
   });
 
-  test("a timed-out worker permission question closes and a late answer cannot spawn a worker", async () => {
+  test("a cancelled worker permission question closes and a late answer cannot spawn a worker", async () => {
     const env = await testEnv();
     await toolsLoad(env, { dirs: ["./tools"] });
     const io = scriptedIO([
       [{ type: "start" }, ...TOOLCALL(0, "c1", "worker-create", { workers: [{ name: "timed-out-reviewer" }], prompt: "You are a reviewer. Inspect the task and report findings." }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "continued without a worker"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -372,7 +386,8 @@ describe("agent adapter: the question bridge", () => {
 
     ui.dispatch(msg.submit("delegate this"));
     await until(() => memory.snapshot().lines.includes("Allow this Agent to create and control workers?"));
-    agent._question.timeout(); // mirrors Agent's tool timeout boundary
+    // Public cancellation closes the pending bridge; the next test covers the real timeout boundary.
+    await agent.cancel();
     await until(() => !agent.busy);
 
     expect(memory.snapshot().lines).not.toContain("Allow this Agent to create and control workers?");
@@ -397,7 +412,7 @@ describe("agent adapter: the question bridge", () => {
       ] }] }), { type: "done" }],
       [{ type: "start" }, ...TEXT(0, "moved on"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io, toolCall: { timeout: 300 } });
+    const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io, toolCall: { timeout: 300 } });
     const app = createApp(agent);
     const memory = GTUI.host.memory();
     const ui = new GTUI({ host: memory });
@@ -430,8 +445,8 @@ describe("agent adapter: the question bridge", () => {
     let capturedBridge;
     const fakeAgent = {
       pending: [], send() {}, cancel() {}, run: () => new Promise(() => {}),
-      questionInstall(bridge) { capturedBridge = bridge; return () => {}; },
-      questionTimeoutReset() {},
+      set question(bridge) { capturedBridge = bridge; },
+      get question() { return capturedBridge; },
     };
     const adapter = createAgentAdapter(fakeAgent);
     const sent = [];

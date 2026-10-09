@@ -5,11 +5,9 @@ description: "A core project management skill for AI agents."
 
 # Be a Good Robot
 
-Prioritize correct design, security, and implementation.
+Prioritize: user > project conventions/overrides > core > task scope > correct design > security > implementation > performance > reasoning assumptions.
 
-User > project overrides > core > reasoning assumptions.
-
-## DRY, KISS, Modular, Declarative
+## DRY, KISS, Modular, Declarative, Resilient
 
 - **DRY — Don't Repeat Yourself:** keep one source of truth; reuse logic and facts.
 
@@ -19,11 +17,13 @@ User > project overrides > core > reasoning assumptions.
 
 - **Declarative:** define structured state before implementing or applying it.
 
+- **Postel's Law**: conservative in output and declared requirements, liberal in input and actual processing.
+
 ## Think, Plan, Act
 
-Compare 3–5 different approaches for hard-to-reverse or complex tasks; maximize results per effort. Keep notes brief; Keep constraints or evidence, omit filler.
+Focus on the scope given, do not expand scope without authorization or silently resolve open questions. Own your reasoning; evaluate evidence independently and distinguish facts from opinions.
 
-Focus on the scope given, do not expand scope without authorization. Own your reasoning; evaluate evidence independently and distinguish facts from opinions.
+Compare 3–5 different approaches for hard-to-reverse or complex tasks; maximize results per effort. Keep notes brief; Keep constraints or evidence, omit filler.
 
 Use `skill` to discover relevant skills. Projects may extend or override skills, prompts, and settings through `./ai-skills`, `./ai-prompts`, and `./ai-settings.json`.
 
@@ -77,7 +77,7 @@ Use root `ai-` folders, preferring existing non-prefixed equivalents:
 | `ai-prompts` | Project specific task prompts |
 | `ai-output` | Miscellaneous output |
 | `ai-cache` | Daily resources, cleared periodically |
-| `ai-tmp` | Throwaway scripts/resources, cleared often |
+| `ai-tmp` | Throwaway scripts/resources, cleared often  |
 
 Extensions: prose `.md`; plans `.plan.md`; paired private notes `.logic.md` (same basename); data `.json`/`.csv`. Companion folders match the parent file's basename.
 
@@ -95,16 +95,16 @@ For git repo: `.gitignore` AI concerns (`/ai-*`, `/AI-*`) unless previously comm
 
 ## Tools and Language
 
-Unless the user specifies otherwise, prefer (when available):
+Unless user specifies otherwise, prefer:
 - `read`/`write`/`edit` for file operations; bash for setup, installation, and copying.
-- JavaScript/Bun for scripts; fallback to Ruby, then Python.
-- C or Zig for implementation.
+- JavaScript/Bun for scripts; fallback to Ruby or Python.
+- Project language for implementation.
 - Plain English for responses.
 
 Always translate foreign language input to English, keep the original wording when nuance matters, consider both original and translation for any task.
 
 ## Workspace Security
 
-Treat `./` as the filesystem root. Use only relative paths within its tree. Never use `cd`, absolute paths, parent-directory traversal, or access outside the tree, including through symlinks. Use `./ai-tmp` for temporary files.
+Treat `./` as the filesystem root. Use only relative paths within its tree. Sanitize absolute paths. Never access outside the tree, including through symlinks. use `./tmp` or `./ai-tmp`, not `/tmp`.
 
 Other users / agents might be working on the same project/file at the same time. This is to be expected. Play nice.

@@ -11,7 +11,7 @@ import { NAMES } from "../lib/namespace.js";
 import { toolEntry, toolExists, toolNamesSafe, toolSchemas, toolsLoad, toolsRefresh } from "./env-internals.js";
 import { startMcpHttp } from "./fixtures/mcp-http.js";
 
-const SERVER = resolve("./test/fixtures/mcp-server.js"); // absolute: servers start in env.cwd
+const SERVER = resolve("./test/fixtures/mcp-server.js"); // absolute: servers start in env.folder
 const ENV_PREFIX = NAMES.NAMESPACE;
 const MCP_CFG_ENV = `${ENV_PREFIX}_MCP_CFG`;
 const MCP_LEAK_ENV = `${ENV_PREFIX}_MCP_LEAK`;
@@ -24,18 +24,14 @@ const callMcp = ({ server, tool, arguments: args }, context) => mcp({ action: "c
 /** An env with the fixture server configured; the tool context it yields. */
 async function fixtureContext(settings = {}) {
   const dir = mkdtempSync("./ai-tmp/mcp-");
-  const env = new Env({
-    dir,
-    settingsDir: dir,
-    settings: { mcp: { fixture: { command: process.execPath, args: [SERVER] } }, ...settings },
-  });
+  const env = await Env.open(dir, { dir, settingsDir: dir, settings: { mcp: { fixture: { command: process.execPath, args: [SERVER] } }, ...settings } });
   return { env, context: { env } };
 }
 
 describe("package startup after the MCP API migration", () => {
   async function packageEnv(settings = {}) {
     const dir = mkdtempSync("./ai-tmp/mcp-startup-");
-    return Env.create({ dir, cwd: dir, settingsDir: dir, settings }, { providers: false, models: false });
+    return Env.open(dir, { dir, settingsDir: dir, settings, init: { providers: false, models: false } });
   }
 
   test("loads and refreshes package tools without MCP configuration", async () => {
@@ -47,12 +43,14 @@ describe("package startup after the MCP API migration", () => {
       expect((await env.tools()).has("read")).toBe(true);
       expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]);
     } finally {
-      env.close();
+      await env.close();
     }
   });
 
   test("keeps configured MCP tools Env-owned across package scans and drops them when unconfigured", async () => {
-    const env = await packageEnv({ mcp: { fixture: { command: process.execPath, args: [SERVER], safe: true } } });
+    const env = await packageEnv();
+    env.settings.mcp = { fixture: { command: process.execPath, args: [SERVER], safe: true } };
+    await toolsRefresh(env);
     try {
       expect((await env.tools()).get("mcp").builtin).toBe(true);
       expect((await env.tools(true)).get("mcp-fixture").builtin).toBe(true);
@@ -64,7 +62,7 @@ describe("package startup after the MCP API migration", () => {
       await env.toolCall("tool-refresh", {});
       expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]);
     } finally {
-      env.close();
+      await env.close();
     }
   });
 });
@@ -77,7 +75,7 @@ describe("the mcp tool", () => {
     expect(before).toContain("ready (connects on first use)");
     // no servers configured: no tool to call
     const dir = mkdtempSync("./ai-tmp/mcp-");
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir, settingsDir: dir, settings: {} });
     expect([...(await env.tools()).keys()].filter((name) => name.startsWith("mcp"))).toEqual([]); // no MCP tools at all
   });
 
@@ -127,18 +125,19 @@ describe("the mcp tool", () => {
     expect(entry.client.transport).toBe(before); // the same live connection answered both calls
   });
 
-  test("env.close() stops every pooled server and writes held settings; a later call reconnects", async () => {
+  test("settingsFlush() persists held writes; env.close() awaits pooled server shutdown", async () => {
     const { env, context } = await fixtureContext();
     await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "a" } }, context);
     const conn = env._mcpServers.entries.get("fixture").client.transport;
     env.settings.closeProbe = 1; // a held (deferred) settings write
-    env.close();
+    await env.settingsFlush(); // the public durability barrier, independent of resource teardown
+    await env.close();
     expect(conn.closed).toBe(true);
     expect(env._mcpServers.status().connected).toEqual([]);
-    expect(JSON.parse(readFileSync(join(env._settingsDir, "settings.json"), "utf8")).closeProbe).toBe(1); // on disk already
-    expect(await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "b" } }, context)).toBe("b");
-    env.close(); // idempotent
-    env.close();
+    expect(JSON.parse(readFileSync(join(env._settingsDir, "settings.json"), "utf8")).closeProbe).toBe(1);
+    await expect(mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "b" } }, context)).rejects.toThrow(/closing/);
+    await env.close(); // idempotent
+    await env.close();
   });
 
   test("a dying server rejects the in-flight request and the next call reconnects", async () => {
@@ -186,16 +185,12 @@ describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
 
   test("an unmarked server's shortcut is absent from the safe catalog; a safe one is reachable", async () => {
     const dir = mkdtempSync("./ai-tmp/mcp-");
-    const env = new Env({
-      dir,
-      settingsDir: dir,
-      settings: {
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {
         mcp: {
           "safe-fixture": { command: process.execPath, args: [SERVER], safe: true },
           "plain-fixture": { command: process.execPath, args: [SERVER] },
         },
-      },
-    });
+      } });
     await toolsLoad(env, { dirs: ["./tools"] });
     expect(toolNamesSafe(env)).toContain("mcp-safe-fixture");
     expect(toolNamesSafe(env)).not.toContain("mcp-plain-fixture");
@@ -207,11 +202,8 @@ describe("the mcp tool — per-server shortcuts (mcp-<name>)", () => {
 
   test("removing a server from settings and refreshing drops its shortcut tool", async () => {
     const dir = mkdtempSync("./ai-tmp/mcp-");
-    const env = new Env({
-      dir,
-      settingsDir: dir,
-      settings: { mcp: { fixture: { command: process.execPath, args: [SERVER] } } },
-    });
+    const env = await Env.open(dir, { dir, settingsDir: dir });
+    env.settings.mcp = { fixture: { command: process.execPath, args: [SERVER] } };
     await toolsLoad(env, { dirs: ["./tools"] });
     expect(toolExists(env, "mcp-fixture")).toBe(true);
     env.settings.mcp = {};
@@ -224,17 +216,13 @@ describe("the mcp tool — safe mode (the SERVER's config carries the safety dec
   /** An env with one safe-marked and one unmarked fixture server. */
   async function mixedContext(extra = {}) {
     const dir = mkdtempSync("./ai-tmp/mcp-");
-    const env = new Env({
-      dir,
-      settingsDir: dir,
-      settings: {
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: {
         mcp: {
           "safe-fixture": { command: process.execPath, args: [SERVER], safe: true },
           "plain-fixture": { command: process.execPath, args: [SERVER] },
         },
         ...extra,
-      },
-    });
+      } });
     return { env, context: { env, safe: true } }; // a safe caller's context, as the Agent hands it
   }
 
@@ -269,20 +257,16 @@ describe("the mcp tool — safe mode (the SERVER's config carries the safety dec
 });
 
 describe("the mcp tool — the child environment (lib/util.js childEnv)", () => {
-  test("the config's env additions reach the server; env-refuse strips inherited keys", async () => {
+  test("the config's env additions reach the server; settings.env removes inherited keys", async () => {
     process.env[MCP_LEAK_ENV] = "top-secret";
     try {
       const dir = mkdtempSync("./ai-tmp/mcp-");
-      const env = new Env({
-        dir,
-        settingsDir: dir,
-        settings: {
-          "env-refuse": [MCP_LEAK_ENV],
+      const env = await Env.open(dir, { dir, settingsDir: dir, settings: {
+          env: { [MCP_LEAK_ENV]: false },
           mcp: {
             "env-fixture": { command: process.execPath, args: [SERVER], env: { [MCP_CFG_ENV]: "from-config" } },
           },
-        },
-      });
+        } });
       const context = { env };
       expect(await mcp({ action: "call", server: "env-fixture", tool: "getenv", arguments: { name: MCP_CFG_ENV } }, context))
         .toBe("from-config"); // the explicit addition always lands
@@ -295,17 +279,12 @@ describe("the mcp tool — the child environment (lib/util.js childEnv)", () => 
 
   test("servers start in the Env project folder, not the process cwd", async () => {
     const dir = realpathSync(mkdtempSync("./ai-tmp/mcp-cwd-"));
-    const env = new Env({
-      dir,
-      cwd: dir,
-      settingsDir: dir,
-      settings: { mcp: { "cwd-fixture": { command: process.execPath, args: [SERVER] } } },
-    });
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: { mcp: { "cwd-fixture": { command: process.execPath, args: [SERVER] } } } });
     try {
       const reported = await mcp({ action: "call", server: "cwd-fixture", tool: "cwd" }, { env });
       expect(realpathSync(reported)).toBe(dir);
     } finally {
-      env.close();
+      await env.close();
     }
   });
 });
@@ -315,7 +294,7 @@ describe("MCP dual-era transports", () => {
     test(`HTTP ${mode} parses SSE, pagination and mirrors annotated headers`, async () => {
       const fixture = startMcpHttp(mode);
       const dir = mkdtempSync("./ai-tmp/mcp-http-");
-      const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir, settingsDir: dir, settings: { mcp: { remote: { url: fixture.url } } } });
+      const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir, settingsDir: dir, settings: { mcp: { remote: { url: fixture.url } } } });
       try {
         const context = { env };
         const list = await mcp({ action: "tools", server: "remote" }, context);
@@ -333,10 +312,10 @@ describe("MCP dual-era transports", () => {
           expect(await callMcp({ server: "remote", tool: "echo", arguments: { text: "again" } }, context)).toBe("again");
           expect(fixture.seen.filter((item) => item.method === "initialize").length).toBe(2);
         }
-        env.close();
+        await env.close();
         if (mode === "legacy") await Bun.sleep(10);
         if (mode === "legacy") expect(fixture.seen.some((item) => item.method === "DELETE")).toBe(true);
-      } finally { env.close(); fixture.stop(); }
+      } finally { await env.close(); fixture.stop(); }
     });
   }
   test("a silent stdio discovery probe falls back within the short probe deadline", async () => {
@@ -349,30 +328,30 @@ describe("MCP dual-era transports", () => {
       expect(await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "ok" } }, { env }))
         .toBe("ok");
       expect(Date.now() - start).toBeLessThan(7_000);
-    } finally { env.close(); }
+    } finally { await env.close(); }
   }, 10_000);
   test("modern stdio skips initialize", async () => {
     const { env } = await fixtureContext({ mcp: { fixture: { command: process.execPath, args: [SERVER, "modern"] } } });
     try { expect(await mcp({ action: "call", server: "fixture", tool: "echo", arguments: { text: "modern" } }, { env })).toBe("modern"); }
-    finally { env.close(); }
+    finally { await env.close(); }
   });
   test("HTTP headers expand from the filtered child env without exposing values", async () => {
     const fixture = startMcpHttp("modern");
     const dir = mkdtempSync("./ai-tmp/mcp-http-");
     const name = "OMOYA_MCP_HEADER_TEST";
     process.env[name] = "secret-header-value";
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir, settingsDir: dir, settings: { "env-allow": [name], mcp: { remote: { url: fixture.url, headers: { Authorization: `Bearer ${"${" + name + "}"}` } } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir, settingsDir: dir, settings: { env: { [name]: true }, mcp: { remote: { url: fixture.url, headers: { Authorization: `Bearer ${"${" + name + "}"}` } } } } });
     try {
       expect(await mcp({ action: "call", server: "remote", tool: "echo", arguments: { text: " 世界 " } }, { env })).toBe(" 世界 ");
       const request = fixture.seen.find((item) => item.method === "tools/call");
       expect(request.headers.authorization).toBe("Bearer secret-header-value");
       expect(request.headers["mcp-param-text"]).toBe(`=?base64?${Buffer.from(" 世界 ").toString("base64")}?=`);
       expect(await mcp({ action: "servers" }, { env })).not.toContain("secret-header-value");
-    } finally { env.close(); fixture.stop(); delete process.env[name]; }
+    } finally { await env.close(); fixture.stop(); delete process.env[name]; }
   });
   test("URL policy and missing header variables report safe reasons", async () => {
     const dir = mkdtempSync("./ai-tmp/mcp-http-");
-    const env = new Env({ dir, settingsDir: dir, settings: { mcp: {
+    const env = await Env.open(dir, { dir, settingsDir: dir, settings: { mcp: {
       bad: { url: "http://example.com/mcp" }, both: { url: "https://example.com", command: "x" },
       missing: { url: "http://localhost:1234/mcp", headers: { Authorization: "Bearer ${MCP_NOT_SET_223344}" } },
     } } });
@@ -381,12 +360,12 @@ describe("MCP dual-era transports", () => {
       expect(await mcp({ action: "servers" }, { env })).toContain("both: invalid config — exactly one");
       await expect(mcp({ action: "tools", server: "missing" }, { env })).rejects.toThrow(/header Authorization: environment variable MCP_NOT_SET_223344 is unset/);
       expect(await mcp({ action: "servers" }, { env })).toContain("missing: failed — MCP header Authorization:");
-    } finally { env.close(); }
+    } finally { await env.close(); }
   });
   test("HTTP transport failures demote connected status and retry on the next use", async () => {
     const fixture = startMcpHttp("modern");
     const dir = mkdtempSync("./ai-tmp/mcp-http-");
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir, settingsDir: dir, settings: { mcp: { remote: { url: fixture.url } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir, settingsDir: dir, settings: { mcp: { remote: { url: fixture.url } } } });
     try {
       const context = { env };
       await mcp({ action: "tools", server: "remote" }, context);
@@ -400,12 +379,14 @@ describe("MCP dual-era transports", () => {
       fixture.stop();
       await expect(callMcp({ server: "remote", tool: "echo", arguments: { text: "down" } }, context)).rejects.toThrow();
       expect((await env.tools()).get("mcp").status.connected).toEqual([]);
-    } finally { env.close(); fixture.stop(); }
+    } finally { await env.close(); fixture.stop(); }
   });
   test("settings refresh closes changed transport and updates connected status", async () => {
     const fixture = startMcpHttp("modern");
     const dir = mkdtempSync("./ai-tmp/mcp-http-");
-    const env = new Env({ cwd: mkdtempSync("./ai-tmp/env-case-"), dir, settingsDir: dir, settings: { mcp: { remote: { url: fixture.url } } } });
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { dir, settingsDir: dir });
+    env.settings.mcp = { remote: { url: fixture.url } };
+    await toolsRefresh(env);
     try {
       await mcp({ action: "tools", server: "remote" }, { env });
       const transport = env._mcpServers.entries.get("remote").client.transport;
@@ -414,6 +395,6 @@ describe("MCP dual-era transports", () => {
       expect(transport.closed).toBe(true);
       expect((await env.tools()).get("mcp").status.connected).toEqual([]);
       expect(await mcp({ action: "servers" }, { env })).toContain("remote: ready (connects on first use)");
-    } finally { env.close(); fixture.stop(); }
+    } finally { await env.close(); fixture.stop(); }
   });
 });

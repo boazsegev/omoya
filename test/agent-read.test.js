@@ -18,7 +18,7 @@ function setup(files = {}) {
     mkdirSync(join(ROOT, path, ".."), { recursive: true });
     writeFileSync(join(ROOT, path), content);
   }
-  return { env: { cwd: ROOT, settings: {} } };
+  return { env: { folder: ROOT, settings: {} } };
 }
 function texts(result) { return typeof result === "string" ? result : result.filter((block) => block.type === "text").map((block) => block.text).join("\n"); }
 async function plain(query, context) { return texts(await read({ ...query, annotate: false }, context)); }
@@ -139,8 +139,22 @@ describe("read literal/regex search and discovery", () => {
     const ctx = setup({ "a.txt": "PNG", "pic.bin": Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]) });
     expect(await plain({ path: "." }, ctx)).toContain("pic.bin");
     expect(texts(await read({ path: ".", search: { text: "PNG" } }, ctx))).toContain("1 binary skipped");
-    await expect(read({ path: "pic.bin", search: { text: "PNG" } }, ctx)).rejects.toThrow(/only to text/);
+    expect(texts(await read({ path: "pic.bin", search: { text: "PNG" } }, ctx))).toContain("binary");
+    expect(texts(await read({ path: "pic.bin" }, ctx))).toContain("binary");
     expect(texts(await read({ path: ".", binary: true, search: { text: "PNG" } }, ctx))).toContain("pic.bin:1:");
+  });
+  test("invalid UTF-16-like and late invalid UTF-8 bytes never derail text searches", async () => {
+    const ctx = setup({ "a.txt": "Replace exact text in one file", ".DS_Store": Buffer.from([0, 0, 0x00, 0xd8, 0, 0]),
+      "broken.txt": Buffer.concat([Buffer.from("ASCII "), Buffer.from([0xff])]) });
+    const result = await read({ path: ".", search: { text: "Replace exact text in one file" }, limit: 20 }, ctx);
+    expect(texts(result)).toContain("a.txt:1:");
+    expect(texts(result)).toContain("2 binary skipped");
+    expect(texts(result)).not.toContain("Invalid text encoding");
+    for (const path of [".DS_Store", "broken.txt"]) {
+      const output = await read({ path }, ctx);
+      expect(texts(output)).toContain("binary");
+      expect(JSON.stringify(output)).not.toContain("content\":");
+    }
   });
 });
 
@@ -164,13 +178,13 @@ describe("read guarded auxiliary access and bounded execution", () => {
   });
   test("agent subfolder reads project siblings and gets relative root hints", async () => {
     setup({ "project/a.txt": "a", "project/agent/b.txt": "b" });
-    const ctx = { env: { cwd: `${ROOT}/project` }, agent: { folder: `${ROOT}/project/agent` } };
+    const ctx = { env: { folder: `${ROOT}/project` }, agent: { folder: `${ROOT}/project/agent` } };
     expect(await plain({ path: "../a.txt" }, ctx)).toBe("a");
     expect(texts(await read({ path: "." }, ctx))).toContain("use `../`");
     await expect(read({ path: "missing" }, ctx)).rejects.toThrow(/Hint:/);
     await expect(read({ path: "../../outside" }, ctx)).rejects.toThrow(/boundary/);
     setup({ "separate/own.txt": "own" });
-    const separate = { env: { cwd: `${ROOT}/project` }, agent: { folder: `${ROOT}/separate` } };
+    const separate = { env: { folder: `${ROOT}/project` }, agent: { folder: `${ROOT}/separate` } };
     expect(await plain({ path: "own.txt" }, separate)).toBe("own");
     expect(await plain({ path: "../project/a.txt" }, separate)).toBe("a");
     await expect(read({ path: "../outside" }, separate)).rejects.toThrow(/boundary/);
@@ -216,14 +230,14 @@ describe("read guarded auxiliary access and bounded execution", () => {
 describe("read.target shared payload and atomic failure guarantees", () => {
   test("Agent runs read as safe and read.target as a mutating sequential barrier", async () => {
     setup({ "a.txt": "hello" });
-    const env = new Env({ cwd: ROOT, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+    const env = await Env.open(ROOT, { settings: { providers: { p: { provider: "test", url: "test://script" } } }, init: { providers: false, tools: false, detect: false, models: false } });
     await toolsLoad(env);
     const io = scriptedIO([
       [...TOOLCALL(0, "save", "read", { path: "a.txt", annotate: true, target: "out.txt" }),
         ...TOOLCALL(1, "readback", "read", { path: "out.txt", annotate: false }), { type: "done" }],
       [...TEXT(0, "done"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "p/m", context: [USER("save and read")], createIO: () => io });
+    const agent = await Agent.create({ env, model: "p/m", context: [USER("save and read")], createIO: () => io });
     try {
       expect((await agent.run()).type).toBe("done");
       const result = agent.context.messages().find((message) => message.callId === "readback");
@@ -314,15 +328,15 @@ describe("read.target shared payload and atomic failure guarantees", () => {
     expect(readFileSync(join(ROOT, "empty.txt")).length).toBe(0);
   });
   test("publishes read safe/write unsafe through Env and calls the shared query", async () => {
-    const env = new Env({ cwd: ROOT, settings: {} });
+    const env = await Env.open(ROOT, { settings: {} });
     setup({ "a.txt": "hello" });
     try {
       await toolsLoad(env);
       const tools = await env.tools(true);
       expect(tools.has("read")).toBe(true); expect(tools.has("write")).toBe(false);
-      // Scanned tools keep their readOnly classifier (read.target and skill-resource target serialize).
+      // Scanned tools keep their readOnly classifier (read.target and resource target serialize).
       expect(tools.get("read").readOnly({ path: "a", target: "b" })).toBe(false);
-      expect(tools.get("skill-resource").readOnly({ name: "a", target: "b" })).toBe(false);
+      expect(tools.get("resource").readOnly({ name: "a", target: "b" })).toBe(false);
       const ctx = { env };
       expect(await env.toolCall("read", { path: "a.txt", annotate: false }, ctx)).toBe("hello");
       await env.toolCall("read", { path: "a.txt", target: "out.txt" }, ctx);

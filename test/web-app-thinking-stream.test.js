@@ -63,6 +63,27 @@ async function renderer() {
   return { ...view, state };
 }
 
+describe("transcript message fork action", () => {
+  it("forks through the selected message, not the block position, and skips virtual blocks", async () => withBrowser(async () => {
+    const { blockControls, mount } = await renderer();
+    const events = [];
+    mount(null, { emit: (channel, packet) => events.push([channel, packet]) });
+    const controls = blockControls({ kind: "text", text: "hello", messageIndex: 3, blockIndex: 2, done: true });
+    const fork = controls.querySelectorAll("button").find((node) => node.getAttribute("aria-label")?.startsWith("Fork"));
+    expect(fork).toBeDefined();
+    await fork.dispatch("click");
+    expect(events).toEqual([["server", { type: "session.fork", through: 4 }]]);
+    const tool = blockControls({ kind: "tool", messageIndex: 5, resultIndex: 6, done: true });
+    await tool.querySelectorAll("button").find((node) => node.getAttribute("aria-label")?.startsWith("Fork")).dispatch("click");
+    expect(events.at(-1)).toEqual(["server", { type: "session.fork", through: 7 }]);
+    const virtual = blockControls({ kind: "system", text: "Tools", messageIndex: -1 });
+    expect(virtual.querySelectorAll("button").some((node) => node.getAttribute("aria-label")?.startsWith("Fork"))).toBe(false);
+    const streaming = blockControls({ kind: "text", text: "partial", messageIndex: 4, done: false });
+    expect(streaming.querySelectorAll("button").some((node) => node.getAttribute("aria-label")?.startsWith("Fork"))).toBe(false);
+    mount(null, { emit() {} });
+  }));
+});
+
 describe("transcript streaming invalidation", () => {
   it("keeps every unchanged bubble mounted during text and tool streaming", async () => withBrowser(async () => {
     const view = await renderer();
@@ -149,6 +170,30 @@ describe("transcript streaming invalidation", () => {
 });
 
 describe("thinking stream DOM updates", () => {
+  it("applies declarative collapse and preview changes to mounted cards while retaining streaming controls", async () => withBrowser(async () => {
+    const { messageFrame, patchMessage, state } = await renderer();
+    const { session } = await import("../lib/app/web/public/app/orchestrators/session.js");
+    const previous = { blocks: state.blocks, prefs: state.prefs, envSettings: state.envSettings, settings: state.settings, fullRender: state.fullRender };
+    try {
+      state.prefs = { ...state.prefs, collapse: { thinking: true, tools: true }, previewRows: { default: { thinking: 8, tool: 7 } } };
+      state.blocks = [
+        { kind: "thinking", text: "head\nsecond\nthird\nfourth\nfifth", done: false, open: false },
+        { kind: "tool", name: "bash", args: "{}", output: "head\nsecond\nthird\nfourth\nfifth", done: false, state: "running", open: false },
+      ];
+      const rows = state.blocks.map(messageFrame);
+      const mounted = rows.map((row) => row.firstElementChild);
+      const shimmer = rows[0].querySelector(".shimmer-dots");
+      session.packets.settings({ state, invalidate() {} }, { settings: {}, prefs: { ...state.prefs, collapse: { thinking: false, tools: false }, previewRows: { default: { thinking: 2, tool: 2 } } } });
+      for (const [index, block] of state.blocks.entries()) patchMessage(rows[index], block);
+      expect(rows[0].firstElementChild).toBe(mounted[0]);
+      expect(rows[1].firstElementChild).toBe(mounted[1]);
+      expect(rows[0].querySelector(".shimmer-dots")).toBe(shimmer);
+      for (const row of rows) {
+        expect(row.firstElementChild.open).toBe(true);
+        expect(row.querySelector(".preview-gap").textContent).toBe("⋯ 4 more lines");
+      }
+    } finally { Object.assign(state, previous); }
+  }));
   for (const open of [false, true]) {
     it(`updates only text inside a ${open ? "expanded" : "collapsed"} thinking card`, async () => withBrowser(async () => {
       const { messageFrame, patchMessage, markdownSources } = await renderer();
@@ -202,7 +247,7 @@ describe("thinking stream DOM updates", () => {
     expect(markdownSources.get(row.querySelector(".thinking-body"))).toBe(history.text);
     expect(row.querySelector(".thinking-body").innerHTML).toContain("<strong>Final</strong>");
     expect(row.querySelector(".thinking-body").innerHTML).toContain('role="math"');
-    expect(row.querySelector(".block-controls").childNodes.length).toBe(3);
+    expect(row.querySelector(".block-controls").childNodes.length).toBe(4); // copy, view, fork, delete
   }));
 
   it("updates the capped Markdown preview from head-only to head and tail", async () => withBrowser(async () => {

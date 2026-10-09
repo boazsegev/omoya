@@ -6,13 +6,14 @@ import { mkdtempSync } from "node:fs";
 // request path (assembled message), fixed local models(), no-script
 // failure — all WITHOUT any network or real model.
 import { NAMES } from "../lib/namespace.js";
+import { Context } from "../lib/context.js";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, rmSync } from "node:fs";
 import { Env } from "../lib/env.js";
 import { IO } from "../lib/io.js";
 import { providerClass } from "./fakes.js";
 import TestPlugin from "../providers/test.js";
-import { providerAdd, providerOf, providersLoad } from "./env-internals.js";
+import { providerOf, providersLoad } from "./env-internals.js";
 
 const TestProvider = await providerClass(TestPlugin, "test");
 
@@ -26,23 +27,19 @@ afterEach(() => {
   rmSync(SCRIPT_FILE, { force: true });
 });
 
-function env() {
+async function env() {
   const root = mkdtempSync("./ai-tmp/test-provider-env-");
-  const value = new Env({
-    dir: root,
-    cwd: root,
-    settings: { providers: { test: { provider: "test", url: "test://script", secret: true } } },
-  });
-  providerAdd(value, "test", TestPlugin);
+  const value = await Env.open(root, { dir: root, settingsDir: null, providers: { test: TestPlugin }, settings: { providers: { test: { provider: "test", url: "test://script", secret: true } } }, init: { providers: false, tools: false, detect: false, models: false } });
   return value;
 }
 
 /** One IO request over the test provider; collects every event. */
 async function request(settings, context = [{ type: 2, content: [{ type: "text", text: "hi" }] }]) {
-  const aiio = new IO({ env: env(), model: "test/test-model", settings });
+  const environment = await env();
+  Object.assign(environment.settings.providers.test, settings);
+  const aiio = new IO({ env: environment, model: "test/test-model" });
   const events = [];
-  const terminal = await aiio.write(
-    context,
+  const terminal = await aiio.write(new Context({ messages: context }),
     new Proxy({}, { get: () => (e) => events.push(e) }),
   );
   return { aiio, events, terminal };
@@ -85,14 +82,14 @@ describe("test provider: script sources", () => {
 
   test("file path via settings.script (re-read per request)", async () => {
     writeFileSync(SCRIPT_FILE, JSON.stringify([[{ text: "v1" }], [{ text: "v2" }]]));
-    const aiio = new IO({
-      env: env(), model: "test/m", settings: { script: SCRIPT_FILE },
-    });
+    const environment = await env();
+    environment.settings.providers.test.script = SCRIPT_FILE;
+    const aiio = new IO({ env: environment, model: "test/m" });
     const ctx = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-    const first = await aiio.write(ctx);
+    const first = await aiio.write(new Context({ messages: ctx }));
     // extend the file between turns: the next request re-reads it
     writeFileSync(SCRIPT_FILE, JSON.stringify([[{ text: "v1" }], [{ text: "extended" }]]));
-    const second = await aiio.write(ctx);
+    const second = await aiio.write(new Context({ messages: ctx }));
     expect(first.message.content[0].text).toBe("v1");
     expect(second.message.content[0].text).toBe("extended");
   });
@@ -110,10 +107,10 @@ describe("test provider: script sources", () => {
   });
 
   test("built-in UI scripts are selected by model", async () => {
-    const aiio = new IO({ env: env(), model: "test/ui" });
+    const aiio = new IO({ env: await env(), model: "test/ui" });
     const context = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
     const turns = [];
-    for (let index = 0; index < 10; index++) turns.push(await aiio.write(context));
+    for (let index = 0; index < 10; index++) turns.push(await aiio.write(new Context({ messages: context })));
     expect(turns[0].type).toBe("done");
     expect(turns[0].message.content.some((block) => block.name === "note")).toBe(true);
     const workerCall = turns.flatMap((turn) => turn.message?.content ?? []).find((block) => block.name === "worker-create");
@@ -131,11 +128,13 @@ describe("test provider: script sources", () => {
 describe("test provider: turn consumption", () => {
   test("turns serve in order per IO; the last turn repeats", async () => {
     const script = [[{ text: "one" }], [{ text: "two" }]];
-    const aiio = new IO({ env: env(), model: "test/m", settings: { script } });
+    const environment = await env();
+    environment.settings.providers.test.script = script;
+    const aiio = new IO({ env: environment, model: "test/m" });
     const ctx = [{ type: 2, content: [{ type: "text", text: "hi" }] }];
-    const t1 = await aiio.write(ctx);
-    const t2 = await aiio.write(ctx);
-    const t3 = await aiio.write(ctx);
+    const t1 = await aiio.write(new Context({ messages: ctx }));
+    const t2 = await aiio.write(new Context({ messages: ctx }));
+    const t3 = await aiio.write(new Context({ messages: ctx }));
     expect(t1.message.content[0].text).toBe("one");
     expect(t2.message.content[0].text).toBe("two");
     expect(t3.message.content[0].text).toBe("two"); // exhausted: repeat last
@@ -205,7 +204,7 @@ describe("test provider: block translation", () => {
 
 describe("test provider: package scan registration", () => {
   test("Env scan-load registers test from the package providers dir", async () => {
-    const pkgEnv = new Env({ cwd: mkdtempSync("./ai-tmp/test-provider-pkg-") });
+    const pkgEnv = await Env.open(mkdtempSync("./ai-tmp/test-provider-pkg-"), {  });
     const names = await providersLoad(pkgEnv);
     expect(names).toContain("test");
     const Protocol = providerOf(pkgEnv, "test");

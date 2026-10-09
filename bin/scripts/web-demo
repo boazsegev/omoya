@@ -14,10 +14,16 @@
  */
 import { mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { NAMES } from "../../lib/namespace.js";
 
-const usage = "usage: bun bin/scripts/web-demo [--port N] [--stream] — hermetic web UI demo (scripted test provider, ai-tmp/web-demo settings)";
+const usage = `usage: bun bin/scripts/web-demo [--port N] [--stream] [--help]
+Hermetic web UI demo with a scripted test provider (ai-tmp/web-demo settings).
+  --port N   Bind port (default: 9911).
+  --stream   Pace scripted output to exercise streaming.
+  --help, -h  Show this text and exit.
+The demo settings folder is wiped on each start.`;
 const args = process.argv.slice(2);
-if (args.includes("--help")) {
+if (args.includes("--help") || args.includes("-h")) {
   console.log(usage);
   process.exit(0);
 }
@@ -32,7 +38,7 @@ const root = resolve(import.meta.dir, "../..");
 const dir = resolve(root, "ai-tmp/web-demo");
 rmSync(dir, { recursive: true, force: true });
 mkdirSync(dir, { recursive: true });
-process.env.OMOYA_SETTINGS_DIR = dir;
+process.env[NAMES.settingsEnv] = dir;
 
 const script = [
   [
@@ -42,7 +48,7 @@ const script = [
   ],
   [
     { thinking: "Now I can answer with a concise summary." },
-    { text: "## Summary\n\nOmoya is a **zero-dependency** agent. Highlights:\n\n| Surface | Notes |\n| :--- | :--- |\n| CLI | `om` |\n| Web | `om --serve` |\n\n```diff\n- old line\n+ new line\n```\n\n- [x] themes\n- [ ] more\n\n```js\nconst answer = 42;\n```" },
+    { text: `## Summary\n\n${NAMES.Namespace} is a **zero-dependency** agent. Highlights:\n\n| Surface | Notes |\n| :--- | :--- |\n| CLI | \`${NAMES.cliPrefix}\` |\n| Web | \`${NAMES.cliPrefix} --serve\` |\n\n\`\`\`diff\n- old line\n+ new line\n\`\`\`\n\n- [x] themes\n- [ ] more\n\n\`\`\`js\nconst answer = 42;\n\`\`\`` },
   ],
   [
     { toolCall: { name: "question", arguments: { questions: [{ header: "Format", question: "How should I format the report?", multiSelect: false, options: [
@@ -53,12 +59,12 @@ const script = [
   [{ text: "Got it — thanks for choosing." }],
 ];
 
-process.env.OMOYA_TEST_SCRIPT = JSON.stringify(script); // the provider's script channel
-await import("../../lib/index_app.js"); // enables bundled theme loading
+process.env[NAMES.testScriptEnv] = JSON.stringify(script); // the provider's script channel
+await import("../../lib/app.js"); // enables bundled theme loading
 const { default: Env } = await import("../../lib/env.js");
 const { serve } = (await import("../../lib/app/web/index.js")).default;
-const env = await Env.create({
-  cwd: root, settingsDir: dir, // package dir stays default: bundled themes/ + settings.json load
+const env = await Env.open(root, {
+  settingsDir: dir, // package dir stays default: bundled themes/ + settings.json load
   settings: {
     providers: { demo: { provider: "test", url: "test://script", models: { scripted: {}, "scripted-large": {} } } },
   },
@@ -80,9 +86,13 @@ const pacedIO = () => ({
   async kill() { this.state = "closed"; },
 });
 const stream = args.includes("--stream");
-const web = await serve({
-  env, port, model: { selector: "demo/scripted" },
-  ...(stream ? { createSession: async () => ({ agent: new Agent({ env, model: "demo/scripted", context: [], createIO: pacedIO }) }) } : {}),
-});
-process.stderr.write(`web demo: ${web.url}\n`);
-await web.done;
+try {
+  const web = await serve({
+    env, port, model: { selector: "demo/scripted" },
+    ...(stream ? { createSession: async () => ({ agent: await Agent.create({ env, model: "demo/scripted", context: [], createIO: pacedIO }) }) } : {}),
+  });
+  process.stderr.write(`web demo: ${web.url}\n`);
+  await web.done;
+} finally {
+  await env.close();
+}

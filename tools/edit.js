@@ -2,7 +2,7 @@
  * tools/edit.js — the `edit` tool: exact-text replacement in one file
  * (pi edit semantics): edits[] are matched against the ORIGINAL file
  * content, never incrementally; every edits[].oldText must match
- * exactly ONE location (or every occurrence, when `matchAll` is set),
+ * exactly ONE location (or every occurrence, when that edit's `matchAll` is set),
  * and matched regions must not overlap. Matching
  * runs on LF-normalized text (a BOM is stripped and restored, the
  * file's dominant line ending is preserved), so oldText never needs
@@ -20,13 +20,13 @@
  * is asked for permission with a 5-line preview of the offending
  * line(s).
  *
- * DIFF + ROLLBACK: every applied edit is RECORDED under its tool
+ * DIFF + UNDO: every applied edit is RECORDED under its tool
  * call's id in the CALLING AGENT's session store (tools/edit/diff.js
- * — context.agent.toolStorage("edit"); one agent can never roll back
+ * — context.storage; one agent can never roll back
  * another's edit) and returned as a git-style unified patch in the
  * result's DISPLAY payload — shown to the user, never appended to the
  * conversation (the {result, display} contract,
- * lib/agent/tool-exec.js). `edit { path, rollback: "<toolCallID>" }`
+ * lib/agent/tool-exec.js). `edit-undo { path, editId: "<toolCallID>" }`
  * reverses a recorded edit: the given path must MATCH the record —
  * a rollback is intentional, never a random id — and the record
  * keeps each match's exact
@@ -41,6 +41,7 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { toolRevision } from "../lib/tool-runtime.js"; // the tool-runtime leaf: one instance across cache-busted imports — no whole-library load for a timestamp
 
 const timestamp = toolRevision(); // shared tool-registry revision
@@ -48,6 +49,11 @@ const { resolveCwdPath, relativeCwdPath } = await import(`./guard/resolve.js?now
 const { rejectSymlinkPath } = await import(`./guard/symlinks.js?now=${timestamp}`);
 const { enforceContentPolicy } = await import(`./guard/paths.js?now=${timestamp}`);
 const { unifiedPatch, recordEdit, peekEdit, removeEdit } = await import(`./edit/diff.js?now=${timestamp}`);
+const { queueEdit } = await import(`./edit/queue.js?now=${timestamp}`);
+
+function contentHash(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
 
 /** Split a leading BOM from the text. */
 function splitBom(text) {
@@ -66,17 +72,19 @@ function detectLineEnding(text) {
  * unique, non-overlapping exact matches; all replacements computed
  * first, then applied from the end backwards so positions stay true.
  * @param {string} content - LF-normalized original
- * @param {Array<{oldText: string, newText: string}>} edits
+ * @param {Array<{oldText: string, newText: string, matchAll?: boolean}>} edits
  * @param {string} path - for error messages
- * @param {boolean} [matchAll] - replace every occurrence of each oldText
  * @returns {{out: string, matches: Array<{start: number, end: number, i: number}>}}
  */
-function applyEdits(content, edits, path, matchAll = false) {
+function applyEdits(content, edits, path) {
   const matches = [];
   for (let i = 0; i < edits.length; i++) {
-    const { oldText, newText } = edits[i] ?? {};
+    const { oldText, newText, matchAll } = edits[i] ?? {};
     if (typeof oldText !== "string" || oldText === "" || typeof newText !== "string") {
       throw new TypeError("Give every edit a non-empty oldText string and a newText string.");
+    }
+    if (matchAll !== undefined && typeof matchAll !== "boolean") {
+      throw new TypeError("Each edit's matchAll must be a boolean.");
     }
     const hits = [];
     // at most TWO hits matter in unique mode: zero = not found, one =
@@ -94,7 +102,7 @@ function applyEdits(content, edits, path, matchAll = false) {
       throw new Error("oldText was not found in the file. Read the file and copy its exact current text into oldText.");
     }
     if (hits.length > 1 && !matchAll) {
-      throw new Error("oldText matches more than once. Add surrounding context to make it unique, or pass matchAll: true to replace every occurrence.");
+      throw new Error("oldText matches more than once. Add surrounding context to make it unique, or set matchAll: true on this edit to replace every occurrence.");
     }
     for (const at of hits) matches.push({ start: at, end: at + oldText.length, newText, i });
   }
@@ -116,8 +124,11 @@ function applyEdits(content, edits, path, matchAll = false) {
  * {oldText: newText, newText: oldText, at} — the rollback's redo
  * record. `at` is carried through: after a restore, the region sits
  * at the SAME offset it was recorded at. */
-function reverseEdits(edits) {
-  return edits.map(({ oldText, newText, at }) => ({ oldText: newText, newText: oldText, at }));
+function reverseEdits(edits, restored) {
+  return edits.map(({ oldText, newText, at }) => ({
+    oldText: newText, newText: oldText, at,
+    ...(oldText === "" ? { postHash: contentHash(restored) } : {}),
+  }));
 }
 
 /**
@@ -133,8 +144,8 @@ function reverseEdits(edits) {
  * @returns {string} the restored text
  */
 function restoreEdit(normalized, entry) {
-  const regions = entry.edits.map(({ oldText, newText, at }, k) => {
-    if (!Number.isInteger(at) || normalized.slice(at, at + newText.length) !== newText) {
+  const regions = entry.edits.map(({ oldText, newText, at, postHash }) => {
+    if (!Number.isInteger(at) || (newText === "" && (!postHash || postHash !== contentHash(normalized))) || normalized.slice(at, at + newText.length) !== newText) {
       throw new Error("The file changed since this edit. Read it and make a new targeted edit instead.");
     }
     return { start: at, end: at + newText.length, oldText };
@@ -152,25 +163,8 @@ async function writeOutcome(resolved, bom, ending, out) {
   await writeFile(resolved, bom + (ending === "\r\n" ? out.replace(/\n/g, "\r\n") : out), "utf8");
 }
 
-// Each file has a private promise tail.  The queue encloses read, exact-match
-// validation, and write so independent edits never overwrite each other.
-const editQueues = new Map();
-async function queueEdit(resolved, task) {
-  const previous = editQueues.get(resolved);
-  let release;
-  const current = new Promise((resolve) => { release = resolve; });
-  editQueues.set(resolved, current);
-  if (previous) await previous;
-  try {
-    return await task();
-  } finally {
-    release();
-    if (editQueues.get(resolved) === current) editQueues.delete(resolved);
-  }
-}
-
 /**
- * Reverse a recorded edit (the `rollback: "<toolCallID>"` form):
+ * Reverse a recorded edit (the `edit-undo { path, editId }` form):
  * the record keeps each match's exact offset in the post-edit text,
  * so the restore replaces exactly the regions the original edit wrote
  * — the same exact-match semantics as the forward edit, scoped to the
@@ -181,27 +175,25 @@ async function queueEdit(resolved, task) {
  * id, so IT can be rolled back in turn (a redo), and consumes the
  * record only after the rewrite succeeded. The reverse patch rides
  * the display payload.
- * @param {string} rollback - the recorded edit's tool call id
- * @param {string} path - the file the recorded edit belongs to (must
- *   match the record: a rollback is intentional, never a random id)
- * @param {Object} [context] - harness tool context ({agent, call})
+ * @param {{path: string, editId: string}} args - the recorded edit's call id and matching file path
+ * @param {Object} [context] - harness tool context ({agent, call}); the undo mutates the file and consumes its record only after success
  * @returns {Promise<{result: string, display: string}>}
  */
-async function rollbackEdit(rollback, path, context) {
-  if (typeof rollback !== "string" || rollback === "") {
+export async function editUndo({ path, editId } = {}, context) {
+  if (typeof editId !== "string" || editId === "") {
     throw new TypeError("Give the edit id to roll back.");
   }
   if (typeof path !== "string" || path === "") {
-    throw new TypeError("Give the file path the rollback id belongs to.");
+    throw new TypeError("Give the file path the edit id belongs to.");
   }
-  const entry = peekEdit(rollback, context);
+  const entry = peekEdit(editId, context);
   if (!entry) {
     throw new Error("Use an edit id returned by a recent successful edit, or make a new targeted edit.");
   }
-  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
+  const writeCwd = context?.agent?.folder ?? context?.env?.folder ?? context?.agent?.env?.folder ?? process.cwd();
   const requested = resolveCwdPath(path, { cwd: writeCwd });
   if (resolveCwdPath(entry.path, { cwd: writeCwd }) !== requested) {
-    throw new Error("Use the `path` matching the `rollback` id you want to roll back, or make a targeted edit.");
+    throw new Error("Use the `path` matching the `editId` you want to undo, or make a targeted edit.");
   }
   // Rollback obeys the same agent-local write boundary as forward edits.
   const resolved = await rejectSymlinkPath(resolveCwdPath(entry.path, { cwd: writeCwd }), { cwd: writeCwd });
@@ -214,13 +206,13 @@ async function rollbackEdit(rollback, path, context) {
     // never a re-detection: line-ending style is not the rollback's
     // business.
     await writeOutcome(resolved, bom, entry.ending ?? "\n", out);
-    removeEdit(rollback, context); // consume only after success — a failed rollback stays retryable
+    removeEdit(editId, context); // consume only after success — a failed undo stays retryable
     const callId = context?.call?.callId;
-    const redo = reverseEdits(entry.edits);
+    const redo = reverseEdits(entry.edits, out);
     if (callId) recordEdit(callId, { path: entry.path, edits: redo, ending: entry.ending }, context); // the redo
-    const suffix = callId ? ` Rollback id: ${callId} (reverses again).` : "";
+    const suffix = callId ? ` Edit id: ${callId} (reverses again).` : "";
     return {
-      result: `Rolled back: restored ${entry.edits.length} block(s) in ${entry.path}.${suffix}`,
+      result: `Undid edit: restored ${entry.edits.length} block(s) in ${entry.path}.${suffix}`,
       display: unifiedPatch(entry.path, normalized, out),
     };
   });
@@ -230,27 +222,18 @@ async function rollbackEdit(rollback, path, context) {
  * Edit a single file using exact text replacement.
  * @param {Object} args
  * @param {string} args.path - file path, inside the working folder
- * @param {Array<{oldText: string, newText: string}>} args.edits
+ * @param {Array<{oldText: string, newText: string, matchAll?: boolean}>} args.edits
  * @param {boolean} [args.ask] - on a content-policy violation, ask the
  *   user for permission (5-line preview) instead of refusing outright
- * @param {string} [args.rollback] - reverse a RECORDED edit by its
- *   tool call id (the path must match the record; edits are not needed)
- * @param {boolean} [args.matchAll] - replace every occurrence of each
- *   oldText instead of requiring a unique match
  * @param {Object} [context] - harness tool context ({question, call})
  * @returns {Promise<{result: string, display: string}>}
  */
-export async function edit({ path, edits, ask, rollback, matchAll } = {}, context) {
-  // a FALSEY rollback ("" / null / false — a model that fills every
-  // schema field with "no value") is ABSENT: a non-empty edits array
-  // alongside an empty rollback string clearly means "nothing to roll
-  // back", never an error
-  if (rollback && rollback != ""&& rollback != "false") return rollbackEdit(rollback, path, context);
+export async function edit({ path, edits, ask } = {}, context) {
   if (!Array.isArray(edits) || edits.length === 0) {
     throw new TypeError("Give one or more edits, each with oldText and newText.");
   }
-  // Mutations stay in the agent folder even when Env.cwd is elsewhere.
-  const writeCwd = context?.agent?.folder ?? context?.env?.cwd ?? context?.agent?.env?.cwd ?? process.cwd();
+  // Mutations stay in the agent folder even when Env.folder is elsewhere.
+  const writeCwd = context?.agent?.folder ?? context?.env?.folder ?? context?.agent?.env?.folder ?? process.cwd();
   const contentCwd = writeCwd;
   const resolved = await rejectSymlinkPath(resolveCwdPath(path, { cwd: writeCwd }), { cwd: writeCwd }); // filename guard
   path = relativeCwdPath(path, { cwd: writeCwd });
@@ -267,10 +250,9 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
     const { bom, text } = splitBom(raw);
     const ending = detectLineEnding(text);
     const normalized = text.replace(/\r\n/g, "\n");
-    const { out, matches } = applyEdits(normalized, edits, path, matchAll === true);
+    const { out, matches } = applyEdits(normalized, edits, path);
     await writeOutcome(resolved, bom, ending, out);
-    // record under the tool call's id: `edit { path, rollback: "<id>" }`
-    // reverses
+    // Record under the call id for a later edit-undo.
     const callId = context?.call?.callId;
     if (callId) {
       // One record per MATCH (a matchAll edit writes several regions).
@@ -280,6 +262,7 @@ export async function edit({ path, edits, ask, rollback, matchAll } = {}, contex
         oldText: edits[m.i].oldText,
         newText: m.newText,
         at: m.start + matches.slice(0, k).reduce((delta, p) => delta + p.newText.length - (p.end - p.start), 0),
+        ...(m.newText === "" ? { postHash: contentHash(out) } : {}),
       }));
       recordEdit(callId, { path, edits: recorded, ending }, context);
     }
@@ -295,7 +278,7 @@ export function toolDescription() {
   return {
     edit: {
       trusted: true,
-      description: "Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll: true to replace every occurrence of each oldText. To reverse an edit, pass the edit id returned after it as rollback.",
+      description: "Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll on an item to replace every occurrence of that item's oldText. Use edit-undo with the returned edit id to reverse it.",
       inputSchema: {
         type: "object",
         properties: {
@@ -303,7 +286,7 @@ export function toolDescription() {
           edits: {
             type: "array",
             description:
-              "The replacements to make; required unless using rollback. Match each oldText against the file " +
+              "The replacements to make. Match each oldText against the file " +
               "as it is now, not against earlier edits in the same call. Never " +
               "send overlapping or nested edits; merge them into one edit.",
             items: {
@@ -311,9 +294,10 @@ export function toolDescription() {
               properties: {
                 oldText: {
                   type: "string",
-                  description: "The exact text to replace. Make it unique in the file and never overlap another edit\u2019s oldText.",
+                  description: "The exact text to replace. Make it unique unless matchAll is true; never overlap another edit\u2019s oldText.",
                 },
                 newText: { type: "string", description: "The replacement text." },
+                matchAll: { type: "boolean", description: "Replace every occurrence of this oldText. Omit to require a unique match." },
               },
               required: ["oldText", "newText"],
             },
@@ -325,21 +309,22 @@ export function toolDescription() {
               "newText names an existing outside path or an existing absolute project path. Omit it to refuse " +
               "such edits outright.",
           },
-          matchAll: {
-            type: "boolean",
-            description: "Replace every occurrence of each oldText. Omit it to require a unique match.",
-          },
-          rollback: {
-            type: "string",
-            description:
-              "Reverse a recent edit by passing the edit id returned after it " +
-              "succeeded. Omit edits when using rollback. Pass the same path the edit targeted. The file " +
-              "must still hold the replacement text at the edited positions; " +
-              "if it does not, read the file and make a new targeted edit " +
-              "instead.",
-          },
         },
-        required: ["path"]
+        required: ["path", "edits"]
+      },
+    },
+    "edit-undo": {
+      fn: editUndo,
+      trusted: true,
+      storage: "edit",
+      description: "Reverse a recent edit using its returned edit id and the same file path. The file must still hold the replacement text at the edited positions; otherwise read the file and make a new targeted edit. Undo itself returns an edit id for redo.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "The file path used for the original edit, inside the Agent folder." },
+          editId: { type: "string", description: "The edit id returned by a recent successful edit or edit-undo." },
+        },
+        required: ["path", "editId"],
       },
     },
   };

@@ -3,26 +3,26 @@
  * Problems are logged by the library in ai-jobs/errors/, not printed here. */
 import { NAMES } from "../../lib/namespace.js";
 import Jobs from "../../lib/jobs.js";
-import CLI from "../../lib/cli.js";
+import { App } from "../../lib/app.js";
+const { CLI } = App;
 
 const name = `${NAMES.pr}-jobs`;
 const help = `${name} — project-local Jobs
 usage: ${name} <init|disable|status|run> [--model endpoint/model]
-       ${name} daemon foreground
+       ${name} --help
 Actions also accept --init, --disable, --status, --run.
 init      Enable local Jobs; idempotent. Never starts a daemon.
 disable   Rename ai-jobs to ai-jobs-disabled preserving bytes; a prepared attempt may strand.
 run       One best-effort scan; never initializes or repairs. Restore then scan reconciles stranded work without replay. Optional --model fallback.
 status    Read-only folder and outcome projection (JSON); never starts a daemon.
-Manual run and task CRUD do not require a daemon. Foreground stays attached.
-Daemon scans immediately, then five minutes after each scan completes, and exits when ai-jobs is absent or damaged. Stopping it cancels the running job.
-No locks or singleton ownership exist: concurrent runs, CRUD, daemons, archival and disable may duplicate work or lose updates.
+Manual run and task CRUD do not require a daemon. Use the separate supervisor command for periodic scans.
+No locks or singleton ownership exist: concurrent runs, CRUD, supervisors, archival and disable may duplicate work or lose updates.
 Actions print short notes; problems and warnings are logged readably in ai-jobs/errors/YYYY-MM-DD.md (the scan record: ai-jobs/last-run.json, runs/). Failure/refusal exits 1, cancellation 130.
 Tasks live in ai-jobs/tasks. Removing tasks does not cancel running work.
+--help, -h, help  Show this text and exit.
 `;
 const note = (text) => process.stdout.write(`${name}: ${text}\n`);
 const problem = (text) => process.stderr.write(`${name}: ${text}\n`);
-const clock = () => new Date().toLocaleTimeString();
 /** A mistake in this script's own arguments — shown verbatim. */
 class UsageError extends Error {}
 
@@ -55,11 +55,6 @@ async function run(root, model) {
   if (cancelled) note("cancelled");
   process.exitCode = cancelled ? CLI.EXIT.cancelled : errors.length ? 1 : 0;
 }
-async function daemon(root) {
-  const state = (value) => note(value === "running" ? `${clock()} scanning` : `${clock()} waiting 5 min (Ctrl-C to stop)`);
-  await cancellable((signal) => Jobs.daemonRun(root, { signal, state }));
-  note(`${clock()} daemon stopped`);
-}
 async function disable(root) {
   const { state } = await Jobs.disable(root);
   note(state === "absent" ? "not initialized; nothing to disable" : state === "disabled" ? "already disabled" : "disabled (ai-jobs -> ai-jobs-disabled)");
@@ -73,10 +68,6 @@ async function status(root) {
 async function main() {
   const args = process.argv.slice(2), root = process.cwd();
   if (!args.length || (args.length === 1 && ["--help", "-h", "help"].includes(args[0]))) { process.stdout.write(help); return; }
-  if (args[0] === "daemon") {
-    if (args.length !== 2 || args[1] !== "foreground") throw new UsageError("expected daemon foreground");
-    return daemon(root);
-  }
   const { action, model } = parse(args);
   if (action === "init") { await Jobs.init(root); note("enabled (ai-jobs/)"); }
   if (action === "disable") await disable(root);

@@ -1,4 +1,4 @@
-# API (2026-10-08)
+# API (2026-10-26)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -91,6 +91,9 @@ schema and safety unless the provider declares its own).
 async callTool(env, name, args, context = {…}): Exact flattened lookup + invoke. Missing names are ordinary errors
 (Agent surfaces them as tool-result errors), never a crash. The
 optional TOOL CONTEXT is handed to every tool as its second argument.
+In-process dispatch supplies agent-local storage and messageSet(text), plus
+background.start(options)/list()/output(id, from)/stop(id) capabilities.
+Detectors receive storage, messageSet(text), agent, and env.
 Forked sandbox workers receive the reduced data context plus explicit
 JSONL request/reply bridges; host callbacks never cross that boundary.
 
@@ -170,11 +173,15 @@ export function toolDescription() {
 }
 ```
 
-### PUBLISHES — Agent-owned background commands: bash(background) and process(list/output/stop)
+### PUBLISHES — Agent-owned background commands: bash(background) and process-list/output/stop
 
 Source: `tools/process.js`
 
-async process({ action, id, from } = {…}, context): Inspect or stop a process started by this Agent's background bash.
+async processList(_args = {…}, context): List processes started by this Agent's background bash. Read-only.
+
+async processOutput({ id, from } = {…}, context): Read buffered output from one of this Agent's background processes. Read-only.
+
+async processStop({ id } = {…}, context): Stop one of this Agent's background process groups. Unavailable in safe mode.
 
 toolDescription(): 
 
@@ -184,7 +191,7 @@ Source: `lib/agent.js`
 
 get tools(): Current model-facing tools: `const tools = await agent.tools`;
 `tools.get(name)` returns a provider-neutral descriptor with its schema.
-Uses IO's publication filter: dynamic availability, effective safety,
+Uses IO's publication filter: dynamic availability,
 configured selection, hidden-tool exclusion and the model's provider tools.
 Provider dialect conversion remains IO/provider-owned; this is the current
 catalog, not a capture of an earlier request's wire payload.
@@ -281,7 +288,7 @@ tool-answer contract. A tool may return:
   - any other JSON value → JSON.stringify'd into one text block;
   - `{result, system?, display?}` → `result` is normalized by the rules above,
     while `system` (string or string[]) appends as System messages
-    right after the tool result and `display` is retained on it for
+    after the complete tool-call batch and `display` is retained on it for
     context viewers (handled by the caller, not here).
 Throwing fails the call: the error message becomes the tool-result
 error content (error: true on the result message).
@@ -293,8 +300,8 @@ Returns { message, system, display }: the tool result, plus any
 SYSTEM PAYLOAD and any DISPLAY PAYLOAD the tool attached. A tool
 returning a plain object with a `system` and/or `display` key
 answers briefly via `result` (any normal return shape) while
-`system` (a string or string[]) appends as System messages right
-after the tool result, and `display` (a string or string[]) is
+`system` (a string or string[]) appends as System messages after
+all results in the assistant's tool-call batch, and `display` (a string or string[]) is
 retained on that ToolResult for context viewers and also rides to
 the binding. It is not exposed as normal tool-result content to
 the model; a tool can show data without sending it to the model. A THROWN error may carry the same `system` payload
@@ -315,7 +322,7 @@ Source: `tools/bash.js`; flags: sandbox
   "properties": {
     "command": {
       "type": "string",
-      "description": "The Bash command to run (no cd or ln). Visible paths may read the agent and project folders; the OS jail restricts writes to the agent folder."
+      "description": "The Bash command to run within a weak sandbox (no cd or ln).  `\\` is often rejected unless it matches known allowed path within this folder tree (save temporary scripts files before running them)."
     },
     "timeout": {
       "type": "integer",
@@ -327,7 +334,7 @@ Source: `tools/bash.js`; flags: sandbox
     },
     "background": {
       "type": "boolean",
-      "description": "Start under this Agent and return a process id after a short output grace period; inspect or stop it with process."
+      "description": "Use for processes intended to keep running (servers, daemons, etc'); not a timeout extension. Returns process id. Inspect with process-list/process-output or stop with process-stop."
     }
   },
   "required": [
@@ -338,7 +345,7 @@ Source: `tools/bash.js`; flags: sandbox
 
 ### `edit`
 
-Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll: true to replace every occurrence of each oldText. To reverse an edit, pass the edit id returned after it as rollback.
+Replace exact text in one file. Read the file first, then send oldText/newText pairs from its current content. Merge nearby or overlapping changes into one edit. Set matchAll on an item to replace every occurrence of that item's oldText. Use edit-undo with the returned edit id to reverse it.
 
 Source: `tools/edit.js`; flags: trusted
 
@@ -352,17 +359,21 @@ Source: `tools/edit.js`; flags: trusted
     },
     "edits": {
       "type": "array",
-      "description": "The replacements to make; required unless using rollback. Match each oldText against the file as it is now, not against earlier edits in the same call. Never send overlapping or nested edits; merge them into one edit.",
+      "description": "The replacements to make. Match each oldText against the file as it is now, not against earlier edits in the same call. Never send overlapping or nested edits; merge them into one edit.",
       "items": {
         "type": "object",
         "properties": {
           "oldText": {
             "type": "string",
-            "description": "The exact text to replace. Make it unique in the file and never overlap another edit’s oldText."
+            "description": "The exact text to replace. Make it unique unless matchAll is true; never overlap another edit’s oldText."
           },
           "newText": {
             "type": "string",
             "description": "The replacement text."
+          },
+          "matchAll": {
+            "type": "boolean",
+            "description": "Replace every occurrence of this oldText. Omit to require a unique match."
           }
         },
         "required": [
@@ -374,18 +385,37 @@ Source: `tools/edit.js`; flags: trusted
     "ask": {
       "type": "boolean",
       "description": "Ask the user for permission, showing the offending lines, when a newText names an existing outside path or an existing absolute project path. Omit it to refuse such edits outright."
-    },
-    "matchAll": {
-      "type": "boolean",
-      "description": "Replace every occurrence of each oldText. Omit it to require a unique match."
-    },
-    "rollback": {
-      "type": "string",
-      "description": "Reverse a recent edit by passing the edit id returned after it succeeded. Omit edits when using rollback. Pass the same path the edit targeted. The file must still hold the replacement text at the edited positions; if it does not, read the file and make a new targeted edit instead."
     }
   },
   "required": [
-    "path"
+    "path",
+    "edits"
+  ]
+}
+```
+
+### `edit-undo`
+
+Reverse a recent edit using its returned edit id and the same file path. The file must still hold the replacement text at the edited positions; otherwise read the file and make a new targeted edit. Undo itself returns an edit id for redo.
+
+Source: `tools/edit.js`; flags: trusted
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "The file path used for the original edit, inside the Agent folder."
+    },
+    "editId": {
+      "type": "string",
+      "description": "The edit id returned by a recent successful edit or edit-undo."
+    }
+  },
+  "required": [
+    "path",
+    "editId"
   ]
 }
 ```
@@ -543,9 +573,22 @@ Source: `tools/note.js`; flags: safe
 }
 ```
 
-### `process`
+### `process-list`
 
-List, read buffered output from, or stop this Agent's background Bash processes. Stop is unavailable in safe mode.
+List this Agent's background Bash processes.
+
+Source: `tools/process.js`; flags: safe
+
+```json
+{
+  "type": "object",
+  "properties": {}
+}
+```
+
+### `process-output`
+
+Read buffered output from this Agent's background Bash process.
 
 Source: `tools/process.js`; flags: safe
 
@@ -553,27 +596,39 @@ Source: `tools/process.js`; flags: safe
 {
   "type": "object",
   "properties": {
-    "action": {
-      "type": "string",
-      "enum": [
-        "list",
-        "output",
-        "stop"
-      ],
-      "description": "List processes, read output, or stop a process group."
-    },
     "id": {
       "type": "string",
-      "description": "Process id returned by background Bash; required for output and stop."
+      "description": "Process id returned by background Bash."
     },
     "from": {
       "type": "integer",
       "minimum": 0,
-      "description": "Byte offset for output (default 0); pass the returned next offset on subsequent calls."
+      "description": "Byte offset (default 0); pass the returned next offset on subsequent calls."
     }
   },
   "required": [
-    "action"
+    "id"
+  ]
+}
+```
+
+### `process-stop`
+
+Stop this Agent's background Bash process group. Unavailable in safe mode.
+
+Source: `tools/process.js`; flags: trusted
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Process id returned by background Bash."
+    }
+  },
+  "required": [
+    "id"
   ]
 }
 ```
@@ -855,6 +910,77 @@ Source: `tools/read.js`; flags: safe
 }
 ```
 
+### `request`
+
+List Projects. Exchange requests / replies with external agents (not your worker/parent). Use to collaborate on complex tasks that require a number of teams to complete, or to file bug reports or ask questions in other projects. Not for delegating tasks to workers. Not for copying resources from other projects (user `resource`). Start an agent with `to: "new:<role-name>@<project>"`; later use the <name>@<project> from the result or from a received request's label. The receiver may refuse. Replies arrive as messages; finish your turn to wait. Projects: this (your own project).
+
+Source: `tools/request.js`; flags: trusted
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "to",
+    "prompt"
+  ],
+  "properties": {
+    "to": {
+      "type": "string",
+      "minLength": 3,
+      "description": "<name>@<project>, or new:<role-name>@<project> (e.g. new:api-reviewer@this) to start an agent."
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Self-contained: include context and expected outcome. Use skill when available."
+    },
+    "model": {
+      "type": "string",
+      "description": "Model for a new agent; omit unless critical. Matching a contact's current model is ignored."
+    },
+    "safe": {
+      "type": "boolean",
+      "description": "Start the new agent read-only; false on an existing contact is ignored."
+    }
+  }
+}
+```
+
+### `resource`
+
+List, read or copy files of a skill or a project. A path missing from a skill is looked up in the project of the same name. Copies never overwrite: an existing destination is saved as "<name> 002.<ext>". Symbolic links are never followed: searches and listings skip them; copies refuse them. Projects: this (your own project).
+
+Source: `tools/resource.js`; flags: safe, trusted
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Skill or project name."
+    },
+    "path": {
+      "type": "string",
+      "description": "File, folder or glob relative to the skill or project root. Omit for the root. Folders and glob matches list automatically without target."
+    },
+    "list": {
+      "type": "boolean",
+      "default": false,
+      "description": "List names instead of reading file content. With target, copy the selected resources."
+    },
+    "target": {
+      "type": "string",
+      "description": "Copy selected resources to this file or folder in your folder, with or without list; an existing folder receives the copy. Multiple matches use a folder, numbered if a file occupies target."
+    }
+  },
+  "required": [
+    "name"
+  ]
+}
+```
+
 ### `skill`
 
 Load relevant skills before starting a task and follow their instructions. Omit names to list available skills; pass an array of catalog names to load them.
@@ -874,35 +1000,6 @@ Source: `tools/skill.js`; flags: safe
       "description": "Skill names to load, e.g. [\"api-design\"]. Omit to list the catalog."
     }
   }
-}
-```
-
-### `skill-resource`
-
-Access a skill's supporting files without loading or executing them. Supply name to list resources, add path to read one, or add path and target to save its exact bytes to a new file inside the Agent folder. Saving is available only if `write` is available.
-
-Source: `tools/skill-resource.js`; flags: safe, trusted
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "name": {
-      "type": "string",
-      "description": "Skill name from the skill catalog."
-    },
-    "path": {
-      "type": "string",
-      "description": "Resource filename relative to the skill, e.g. examples/build.js. Omit to list resources. Do not use parent traversal or symlinks."
-    },
-    "target": {
-      "type": "string",
-      "description": "Optional project filename/path to save exact bytes (up to 16 MiB); creates parents, refuses existing files. Omit to read UTF-8 text up to 128 KiB."
-    }
-  },
-  "required": [
-    "name"
-  ]
 }
 ```
 
@@ -957,7 +1054,7 @@ Source: `tools/web.js`; flags: safe, trusted
 
 ### `worker-close`
 
-Closes named workers, /regex/ matches, or all with ["*"]. Busy workers receive /handoff first and finish queued work before closing.
+Close named workers, /regex/ matches, or all with ["*"]. Busy workers are asked to hand off their work first.
 
 Source: `tools/worker-close.js`; flags: trusted
 
@@ -984,7 +1081,7 @@ Source: `tools/worker-close.js`; flags: trusted
 
 ### `worker-create`
 
-Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Create named workers and optionally send the same self-contained first prompt to each. Omit or empty prompt creates idle workers. State role, task, context, constraints, deliverable, and acceptance checks. Replies arrive as messages; finish your turn rather than waiting.
 
 Source: `tools/worker-create.js`; flags: trusted
 
@@ -1014,11 +1111,11 @@ Source: `tools/worker-create.js`; flags: trusted
           "name": {
             "type": "string",
             "minLength": 1,
-            "description": "Unique worker name."
+            "description": "Short unique role name, e.g. reviewer."
           },
           "model": {
             "type": "string",
-            "description": "Endpoint/model; omit to use your model."
+            "description": "Model for the worker; omit to use yours."
           },
           "thinking": {
             "type": "string",
@@ -1030,7 +1127,7 @@ Source: `tools/worker-create.js`; flags: trusted
               "xhigh",
               "max"
             ],
-            "description": "Thinking level; omit for model default."
+            "description": "Thinking level; omit unless critical. Default to empty or medium."
           },
           "description": {
             "type": "string",
@@ -1038,10 +1135,11 @@ Source: `tools/worker-create.js`; flags: trusted
           },
           "safe": {
             "type": "boolean",
-            "description": "Restrict worker to read-only tools."
+            "description": "Start the worker read-only."
           },
           "subfolder": {
-            "description": "Existing project subfolder inside the leader folder; sets the worker write root. Reads may still access the project. Omit or use \"\", \".\", \"/\", \"./\", false, or null to inherit the leader folder (\"/\" never means the filesystem root). Absolute paths, parent traversal, and escaping symlinks are forbidden."
+            "type": "string",
+            "description": "Existing subfolder of your folder that limits the worker's writes; omit for your folder."
           }
         }
       }
@@ -1052,7 +1150,7 @@ Source: `tools/worker-create.js`; flags: trusted
 
 ### `worker-message`
 
-Sends one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive automatically as attributed messages; finish your turn rather than waiting.
+Send one prompt to named workers, /regex/ matches, or all with ["*"]. Replies arrive as messages; finish your turn rather than waiting.
 
 Source: `tools/worker-message.js`; flags: trusted
 
@@ -1061,11 +1159,11 @@ Source: `tools/worker-message.js`; flags: trusted
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "workers",
+    "to",
     "prompt"
   ],
   "properties": {
-    "workers": {
+    "to": {
       "type": "array",
       "minItems": 1,
       "items": {
@@ -1077,7 +1175,7 @@ Source: `tools/worker-message.js`; flags: trusted
     "prompt": {
       "type": "string",
       "minLength": 1,
-      "description": "Message sent unchanged to every selected worker; /handoff requests a handoff."
+      "description": "Self-contained message sent unchanged to each worker. A leading /compact or /<prompt> runs that command (see worker-status)."
     }
   }
 }
@@ -1085,7 +1183,7 @@ Source: `tools/worker-message.js`; flags: trusted
 
 ### `worker-status`
 
-Shows workers grouped by busy/idle, available models, and the commands a worker accepts at the start of a message (/compact, /<prompt>). Omit flags for all; request sections with workers, models, or commands.
+Show workers (busy/idle), models with free capacity, and the commands a message may start with (/compact, /<prompt>). Omit flags for all sections. Not for worker polling / busy waiting (just finish your turn and they will update you when they're done).
 
 Source: `tools/worker-status.js`; flags: safe, trusted
 
@@ -1096,15 +1194,15 @@ Source: `tools/worker-status.js`; flags: safe, trusted
   "properties": {
     "workers": {
       "type": "boolean",
-      "description": "Includes workers and their models, grouped by busy/idle."
+      "description": "Include workers and their models."
     },
     "models": {
       "type": "boolean",
-      "description": "Includes models and available capacity for new work."
+      "description": "Include models and their free capacity."
     },
     "commands": {
       "type": "boolean",
-      "description": "Includes /compact and the prompt commands workers expand."
+      "description": "Include message commands."
     }
   }
 }
@@ -1148,29 +1246,66 @@ The agent: the ordered context, the provider/model selection, the
 tool loop, the pending queue and the session persistence, behind one
 headless object.
 
-### `Agent.backgroundList()`
+### `Agent.Context`
 
-List this Agent's retained process records.
+Constructor namespace; see [Agent.Context](#agentcontext) for its full contract.
 
-### `Agent.backgroundOutput(id, from)`
+Returns `typeof Agent.Context` — The shared constructor namespace.
 
-Read buffered process output from a byte offset.
+### `Agent.Env`
 
-### `Agent.backgroundStart(options)`
+Constructor namespace; see [Agent.Env](#agentenv) for its full contract.
 
-Start an Agent-owned background command; command validation remains in bash.
+Returns `typeof Agent.Env` — The shared constructor namespace.
 
-### `Agent.backgroundStop(id)`
+### `Agent.IO`
 
-Stop an owned background process group.
+Constructor namespace; see [Agent.IO](#agentio) for its full contract.
 
-### `Agent.backgroundStopAll()`
+Returns `typeof Agent.IO` — The shared constructor namespace.
 
-Stop all Agent-owned processes (also used by Env close).
+### `Agent.Jobs`
 
-### `Agent.get busy()`
+Constructor namespace; see [Agent.Jobs](#agentjobs) for its full contract.
+
+Returns `typeof Agent.Jobs` — The shared constructor namespace.
+
+### `Agent.EVENT`
+
+The Symbol event vocabulary for Agent.onEvent — events about THIS
+agent only (Env reports membership: AGENT_ADDED/AGENT_REMOVED):
+REQUEST_START, TEXT_START, TEXT_DELTA, TEXT_END, THINKING_START,
+THINKING_DELTA, THINKING_END, TOOL_CALL_START, TOOL_CALL_DELTA,
+TOOL_CALL_END, REQUEST_DONE, REQUEST_ERROR,
+MESSAGE_COMMITTED, LOG, TOOL_EXECUTE, TOOL_DATA, TOOL_RESULT,
+CLOSE_MARKED, CLOSED, SENT_MESSAGE, CONTEXT_REPLACED — see Agent.onEvent's
+documentation for each value's meaning and payload.
+
+### `Agent.EVENT_CALLBACKS`
+
+The [responseCallbackName, Agent.EVENT] pairs: every EVENT value's
+corresponding option-callback name ("onTextDelta" for
+Agent.EVENT.TEXT_DELTA, …), for hosts that prefer per-event
+callbacks over one onEvent listener.
+
+### `Agent.NAMES`
+
+Namespace-derived runtime names. `Namespace` is the canonical product
+name; the public library façades retain their own names (see lib/agent.js).
+The UPPER/lower variations supply prefixes for environment variables and
+namespace-specific runtime paths.
+
+### `Agent.busy`
+
+**Read** — `get busy()`
 
 Whether an agent run is currently in progress. @returns {boolean}
+
+### `Agent.can`
+
+Live agent-owned capability map. `read` is always true; `write` is subject to sandbox and parent restrictions; a child's `delegate` and `interact` are always false. Tools may define their own keys; only boolean values allow or deny, others require asking. Assignments persist with session settings.
+
+Returns `{read: boolean, write: boolean, delegate: *, interact: boolean, [capability: string]: *}` — Live agent-owned capability map. `read` is always true; `write` is subject to sandbox and parent restrictions; a child's `delegate` and `interact` are always false. Tools may define their own keys; only boolean values allow or deny, others require asking. Assignments persist with session settings.
 
 ### `Agent.cancel()`
 
@@ -1185,35 +1320,44 @@ relationship is authoritative for ownership and delegation denial.
 
 - `[options]` (object)
 
-Returns `Agent`
+Returns `Promise<Agent>`
 
-### `Agent.get children()`
+Throws — {Error} when this agent's env is closed (env.agentCreate)
+
+### `Agent.children`
+
+**Read** — `get children()`
 
 Snapshot of directly owned workers.
 
 ### `Agent.close()`
 
-Refuse new messages immediately; finish the current turn before releasing
-resources, or release them now when idle. This does not interrupt IO or
-tools; call cancel() first to interrupt. CLOSE_MARKED precedes CLOSED;
-repeated calls are no-ops. Listener exceptions cannot prevent cleanup;
-CLOSED follows deregistration and context release. Cleanup failures are
-aggregated after all releases have been attempted.
+Mark closure synchronously, refusing admission immediately. Finish an active
+turn without cancelling it; callers who need interruption call cancel().
+Await completion for all owned IO, context persistence, background processes,
+registry and hook removal, never the borrowed Env. Concurrent and repeated
+calls await the same outcome. CLOSE_MARKED
+precedes cleanup; CLOSED follows every attempted release. All cleanup and
+listener failures are reported together after the remaining releases run.
 
-Returns `boolean` — true only when this call marks the agent
+Returns `Promise<void>` — Completion of owned teardown; rejects with AggregateError on failures.
 
-### `Agent.get closed()`
+### `Agent.closeMarked`
 
-Whether close cleanup has completed.
-
-### `Agent.get closeMarked()`
+**Read** — `get closeMarked()`
 
 Whether close has been requested, including while a turn finishes.
+
+### `Agent.closed`
+
+**Read** — `get closed()`
+
+Whether close cleanup has completed.
 
 ### `Agent.compact(focus = "")`
 
 Compact: ask the model to summarize the conversation
-(a structured, self-contained prompt), then replace the context
+(a structured, self-contained prompt), then continue in a new context
 with the surviving SYSTEM messages plus one ASSISTANT message
 holding the marked summary (lib/agent/compact.js). Compact is an
 ordinary turn observed through Agent events; a no-op (context
@@ -1223,7 +1367,7 @@ untouched) when the model's turn returns no usable summary text.
 
 Returns `Promise<{ok: boolean, before: number, summaryText?: string}>`
 
-### `Agent.constructor({ env, model, url, timeout, settings, context, tools, parent, name, description, folder, contextId, contextSave = true, createIO, toolCall, safe, spawnPermission, question, ...options } = {…})`
+### `Agent.constructor(options = {…}, construction)`
 
 Build an agent over an environment; wires the session store (a
 named file session, a resumed one, an injected store, or none) and
@@ -1231,70 +1375,41 @@ takes ownership of the seed context — a NEW (non-resumed) context
 starts with the seeded system prompt as its FIRST message(s).
 
 - `[options]` (Object)
-- `[options.env]` (Env) — the sole registry surface (default: Env.envs[process.cwd()], else a new Env closed with its last Agent)
-- `[options.model]` (string) — default `<endpoint>/<model>` selector (per-request override via run options)
-- `[options.url]` (string)
-- `[options.timeout]` (number|string) — overall provider-request timeout
-- `[options.settings]` (object) — per-invocation provider overrides
-- `[options.context]` (Array|Context) — seed messages (deep-copied into the owned Context), or a ready Context used as is (then no `session`) (the seeded system prompt lands AHEAD of it)
+- `options.env` (Env) — required borrowed environment; use Agent.create() for asynchronous acquisition
+- `[options.model]` (string) — default `<endpoint>/<model>` selector
+- `[options.context]` (Array|Context) — seed messages (deep-copied into the owned Context), or a ready Context used as is (then no `session`) (seed arrays receive the system prompt ahead of them; a ready Context is adopted without changing its messages or stored settings)
 - `[options.tools]` (string[]) — availability selection (omitted/["*"]=all, []=none)
 - `[options.parent]` (Agent) — creating Agent, or unset for non-Agents
 - `[options.name]` (string) — display name (default: `agent-<counter>`); names that read as an address or a privileged identity are reserved (see `name`)
 - `[options.description]` (string) — display description (empty allowed)
-- `[options.folder]` (string) — existing env.cwd-relative or absolute working folder; validated before the agent is registered (omitted uses env.cwd)
-- `[options.spawnPermission]` (*) — generic permission for delegation tools to create another Agent: false denies, true allows, and any other value asks through the tool's own user-interaction policy
-- `[options.safe]` (boolean) — SAFE MODE: publish and execute ONLY read-only tools (schemas with `safe: true`) — exploration and planning without mutation. Unsafe calls are refused with a tool-result error, never executed (defense in depth: the filtered catalog alone is not the enforcement). FORCED on when no supported OS sandbox is available (Sandbox.osAvailable()) — there is no opt-out: mutation tools run only under an active OS sandbox
-- `[options.contextId]` (string|false) — names the context: an existing id (in env.settings.sessions) is resumed — only a session recorded in env.cwd; an absent id creates it. `false` (or omitted, or an anonymous spelling "0"/"false"/"anon") gives a memory-only context that is not logged — (agent.context.save = true) starts logging it at any time.
+- `[options.folder]` (string) — existing env.folder-relative or absolute working folder; validated before the agent is registered (omitted uses env.folder)
+- `[options.can]` (object) — agent capabilities: read is always true; write false denies mutations while preserving the full catalog, and is forced false without OS sandbox or when the parent denies writes; delegate allows child creation (false denies; other values ask); interact defaults true but is false for children. Additional tool-owned keys are allowed.
+- `[options.contextId]` (string|false) — names the context: an existing id (in env.settings.sessions) is resumed — only a session recorded in env.folder; an absent id creates it. `false` (or omitted, or an anonymous spelling "0"/"false"/"anon") gives a memory-only context that is not logged — (agent.context.save = true) starts logging it at any time.
 - `[options.contextSave=true]` (boolean) — whether a context named by `contextId` is logged to disk
 - `[options.createIO]` ((opts:object)=>object) — IO factory (tests inject fakes)
+- `[options.onStart]` ((payload: object) => void) — response callback; onStart, onTextStart, onTextDelta, onTextEnd, onThinkingStart, onThinkingDelta, onThinkingEnd, onToolCallStart, onToolCallDelta, onToolCallEnd, onDone, and onError map to Agent.EVENT_CALLBACKS. Supplied callbacks register through onEvent before Env membership events; done/error fire after request bookkeeping.
+
+Throws — {TypeError} Direct construction, missing or invalid Env, non-object options, unknown own keys (including symbols), non-function response callbacks, and unknown toolCall keys are rejected before Context adoption. Use can.write instead of the removed safe key; count limits and toolCall.async are unsupported.
+
+### `Agent.contacts`
+
+**Read** — `get contacts()`
+
+Sorted contact addresses (`alias@project`); aliases never change.
+
+Returns `string[]` — Sorted contact addresses (`alias@project`); aliases never change.
 
 ### `Agent.context`
 
-This Agent's owned conversation store.
+**Read** — `get context()`
 
-Returns `Context` — This Agent's owned conversation store.
+The live conversation owned and closed by this Agent. Mutate its messages/settings through Context; construct another Agent for another conversation. Identity is read-only for the Agent's lifetime.
 
-### `Agent.Context`
+Returns `Context` — The live conversation owned and closed by this Agent. Mutate its messages/settings through Context; construct another Agent for another conversation. Identity is read-only for the Agent's lifetime.
 
-Public Context namespace member; see its owning module for the contract.
+### `Agent.contextUsage`
 
-### `Agent.contextFork(id)`
-
-Fork the context into a NEW context id: the conversation continues
-in a fresh Context (flushed immediately when logged); the old file
-stays behind as a snapshot. The fork keeps the logging setting; an
-anonymous spelling (false/"0"/"false"/"anon") forks into one that is
-not logged.
-
-- `[id]` (string|false)
-
-Returns `{id: string, file: string, save: boolean}`
-
-### `Agent.contextNew(id)`
-
-Start a NEW, EMPTY context (re-seeded with the system prompt): the
-old one is closed (its flushed content stays on disk — contextFork()
-first to keep a snapshot). With no id a random UUID is chosen. The
-new context keeps the logging setting (one not logged stays not
-logged); an anonymous spelling (false/"0"/"false"/"anon") always
-starts one that is not logged.
-
-- `[id]` (string|false)
-
-Returns `{id: string, file: string, save: boolean}`
-
-### `Agent.contextResume(id)`
-
-Resume a LOGGED context by id (from env.settings.sessions): it replaces the
-current one, which is closed (its flushed content stays on disk); its
-recorded settings apply (lib/agent/context-lifecycle.js). Only a session
-of this project resumes: its recorded origin folder must be env.cwd.
-
-- `id` (string) — context id (Context.latest finds the newest)
-
-Returns `{id: string, file: string}`
-
-### `Agent.get contextUsage()`
+**Read** — `get contextUsage()`
 
 The context-window readout for the status surface (most exact
 first: the provider's own report, the last provider-reported
@@ -1302,11 +1417,28 @@ envelope, the word-count estimate marked `approximate`).
 
 Returns `{used: number, total: number|null, approximate: boolean}`
 
-### `Agent.get description()`
+### `Agent.create(options = {…})`
+
+Open an Agent with a ready Env. When env is omitted, acquire the Env for
+cwd (the process cwd by default) through Env.open. The returned Env is
+borrowed: the caller, not Agent.close(), decides when to close it.
+`folder` independently selects the Agent's tool root, never the Env path.
+
+- `[options={}]` (object) — Agent creation options plus cwd and envOptions.
+- `[options.cwd=process.cwd()]` (string) — Env project path, only when env is omitted.
+- `[options.envOptions]` (object) — Options forwarded to Env.open, only when env is omitted.
+
+Returns `Promise<Agent>` — A fully constructed Agent; options are not mutated or retained.
+
+Throws — {TypeError|Error} Invalid options or Env startup/Agent construction failure; fix inputs before retrying. Env acquisition is not undone if Agent construction fails.
+
+### `Agent.description`
+
+**Read** — `get description()`
 
 Human-friendly Agent description; an empty string is valid.
 
-### `Agent.set description(value)`
+**Write** — `set description(value)`
 
 Describe the agent (recorded into a logged context's settings).
 
@@ -1316,31 +1448,11 @@ Returns `void` — Assignment records the new description.
 
 ### `Agent.env`
 
-The shared live environment: the given one, else the process folder's (Env.envs), else one created for it and closed with its last Agent.
+**Read** — `get env()`
 
-Returns `Env` — The shared live environment: the given one, else the process folder's (Env.envs), else one created for it and closed with its last Agent.
+Borrowed, read-only environment identity; Agent never closes it.
 
-### `Agent.Env`
-
-Public Env namespace member; see its owning module for the contract.
-
-### `Agent.EVENT`
-
-The numeric event vocabulary for Agent.onEvent — events about THIS
-agent only (Env reports membership: AGENT_ADDED/AGENT_REMOVED):
-REQUEST_START, TEXT_START, TEXT_DELTA, TEXT_END, THINKING_START,
-THINKING_DELTA, THINKING_END, TOOL_CALL_START, TOOL_CALL_DELTA,
-TOOL_CALL_END, REQUEST_DONE, REQUEST_ERROR,
-MESSAGE_COMMITTED, LOG, TOOL_EXECUTE, TOOL_DATA, TOOL_RESULT,
-CLOSE_MARKED, CLOSED, SENT_MESSAGE — see Agent.onEvent's
-documentation for each value's meaning and payload.
-
-### `Agent.EVENT_CALLBACKS`
-
-The [responseCallbackName, Agent.EVENT] pairs: every EVENT value's
-corresponding option-callback name ("onTextDelta" for
-Agent.EVENT.TEXT_DELTA, …), for hosts that prefer per-event
-callbacks over one onEvent listener.
+Returns `Env` — Borrowed, read-only environment identity; Agent never closes it.
 
 ### `Agent.finishAdd(fn, { process: proc = process } = {…})`
 
@@ -1352,53 +1464,65 @@ Register `fn` for synchronous execution on the configured process's `exit` event
 
 Returns `() => void` — Idempotent function that unregisters `fn` from the shared cleanup set.
 
+Throws — {TypeError} If `fn` is not a function.
+
 ### `Agent.finishRun()`
 
 Invoke a snapshot of all registered cleanups synchronously; swallow callback errors.
 
 Returns `void`
 
-### `Agent.finishSignalsArm({ process: proc = process, signals = ["SIGINT", "SIGTERM", "SIGHUP"], } = {…})`
+### `Agent.folder`
 
-Attach handlers that run cleanups and re-raise a termination signal after removing those handlers.
-If already armed, returns the existing disarm function without applying new options.
-
-- `[options]` (Object) — Signal-arming options.
-- `[options.process=process]` (NodeJS.Process) — Process on which to install handlers and call `kill`.
-- `[options.signals=["SIGINT", "SIGTERM", "SIGHUP"]` (string[]) — ] Signals to handle.
-
-Returns `() => void` — Idempotent function that removes these signal handlers and clears the armed state.
-
-### `Agent.set folder(folder)`
+**Write** — `set folder(folder)`
 
 Set this agent's tool working folder to an existing directory.
-`undefined` restores the parent folder for children, or Env.cwd for independent Agents.
+`undefined` restores the parent folder for children, or Env.folder for independent Agents.
 Embedded independent Agents may use another tree.
 
-- `folder` (string|undefined|null) — absolute or env.cwd-relative
+- `folder` (string|undefined|null) — absolute or env.folder-relative
 
 Returns `void` — Read folder afterwards for the resolved root.
 
-### `Agent.get folder()`
+**Read** — `get folder()`
 
 The agent-local root used for file tools and their OS sandbox.
 
-### `Agent.folderResolve(env, folder)`
+### `Agent.fork({ id, through } = {…})`
 
-Resolve an existing working folder; embedded Agents may use a separate root.
-Side-effect-free; callers should validate again at construction/use if the
-filesystem can change after this check.
+Create an independent Agent from a deep copy of this conversation at a message boundary.
+The source is neither closed nor changed; the returned Agent owns its new Context
+and has no parent. Its runtime work, event listeners and usage are not copied.
 
-- `env` (Env) — environment owning the project root
-- `folder` (string|undefined|null) — absolute or env.cwd-relative
+Returns `Promise<Agent>` — A new Agent owned by the caller; close it independently.
 
-Returns `string` — Validated working folder
+Throws — {TypeError|RangeError|Error} Invalid options, boundary, existing session id, or a closing/running source; correct the input or wait for the source to become idle. Factory failures leave the source intact; retry after resolving the failure.
 
-### `Agent.IO`
+### `Agent.io`
 
-Public IO namespace member; see its owning module for the contract.
+**Read** — `get io()`
 
-### `Agent.get ioState()`
+The selected IO session, lazily created for this Agent's model; undefined when no model is selected.
+
+Returns `IO|undefined` — Agent-owned active provider IO; the Context is never stored in IO between requests.
+
+Effects — Creates a provider IO on first read without sending a request.
+
+**Write** — `set io(value)`
+
+Adopt another idle IO session for subsequent requests using the same Context.
+
+- `value` (IO) — IO using this Env, configured with this Agent's safety/tool policy.
+
+Returns `void` — The adopted IO is closed with this Agent. The caller owns and closes any displaced IO obtained from the getter.
+
+Throws — {TypeError} Invalid IO, another Env, busy/closed Agent or IO; correct configuration or await idle before retrying. Validation failures leave selection unchanged.
+
+Effects — Selects and records value.model, then replaces the cached IO. Reassigning the same IO is idempotent.
+
+### `Agent.ioState`
+
+**Read** — `get ioState()`
 
 The connection/work state for the TUI's status indicator:
 "working" (a run is in flight), "disconnected" (the last turn
@@ -1406,7 +1530,9 @@ failed connection-class), "idle" (otherwise).
 
 Returns `"idle"|"working"|"disconnected"`
 
-### `Agent.set model(selector)`
+### `Agent.model`
+
+**Write** — `set model(selector)`
 
 Select an exact, configured endpoint/model pair for subsequent turns.
 Validation happens before the live model changes, so a failed attempt
@@ -1416,17 +1542,23 @@ leaves the current selection intact.
 
 Returns `void` — Assign the selector; read model for the current value.
 
-### `Agent.get model()`
+Throws — {TypeError} Invalid selector or unavailable endpoint/model; keep the old selection and choose a valid model.
+
+Effects — Records the default model and session settings; undefined clears it. Repeating a valid selection is safe and updates its last-used timestamp.
+
+**Read** — `get model()`
 
 The current qualified model selector. Assign to validate and record a whole model-state change; an active request finishes on its already-open IO.
 
 Returns `string|undefined` — The current qualified model selector. Assign to validate and record a whole model-state change; an active request finishes on its already-open IO.
 
-### `Agent.get name()`
+### `Agent.name`
+
+**Read** — `get name()`
 
 Human-friendly Agent name.
 
-### `Agent.set name(value)`
+**Write** — `set name(value)`
 
 Rename the agent (recorded into a logged context's settings).
 Reserved (any case, look-alike letters and separators ignored): `new`,
@@ -1438,9 +1570,7 @@ developer, owner, operator, supervisor, moderator, privilege, authority).
 
 Returns `void` — Assignment records the new name; read name for the current value.
 
-### `Agent.NAMES`
-
-Public NAMES namespace member; see its owning module for the contract.
+Throws — {TypeError} For a non-string or reserved name.
 
 ### `Agent.offEvent(handle)`
 
@@ -1448,13 +1578,13 @@ Remove one registration; returns false when it is absent.
 
 ### `Agent.onEvent(event, callback)`
 
-Register a synchronous listener for one numeric Agent.EVENT value.
+Register a synchronous listener for one Symbol Agent.EVENT value.
 Response payloads deliberately omit IO's string `type`. Indexed
 payloads carry `contentIndex` plus `content`, the assembled block
 after that IO event was consumed. End-event `text`, when present,
 is the provider-normalized authoritative full block snapshot.
 MESSAGE_COMMITTED receives the stored message after persistence.
-SENT_MESSAGE receives a queued user message as it enters context.
+SENT_MESSAGE receives a user message when it enters context.
 The possible `event` values (the Agent.EVENT constants):
 - `Agent.EVENT.REQUEST_START` — a provider request began (once per request; a tool-loop run makes several); payload is the request start
 - `Agent.EVENT.TEXT_START` / `TEXT_DELTA` / `TEXT_END` — one
@@ -1474,27 +1604,24 @@ The possible `event` values (the Agent.EVENT constants):
 - `Agent.EVENT.TOOL_RESULT` — a tool call's outcome was appended
 - `Agent.EVENT.CLOSE_MARKED` — close() was requested (no new work)
 - `Agent.EVENT.CLOSED` — close cleanup completed; the agent is dead
-- `Agent.EVENT.SENT_MESSAGE` — a queued user message entered context
+- `Agent.EVENT.SENT_MESSAGE` — a user message entered context
+- `Agent.EVENT.CONTEXT_REPLACED` — compaction switched contexts; {previous, context}
 - `Agent.EVENT.THROTTLED` — a delayed continuation was scheduled; {until} is epoch ms
 
-- `event` (number) — one Agent.EVENT constant (see the list above)
-- `callback` ((payload: object) => void)
+- `event` (symbol) — one Agent.EVENT constant (see the list above)
+- `callback` ((payload: object) => void) — synchronous listener; returned promises are not awaited. Async listeners must observe their own rejections and cannot delay teardown.
 
-Returns `number` — opaque random registration handle (offEvent removes it)
+Returns `number` — deterministic opaque registration handle (offEvent removes it)
 
-### `Agent.get parent()`
+### `Agent.parent`
+
+**Read** — `get parent()`
 
 The creating Agent, or undefined when none was supplied.
 
-### `Agent.pathInfo(path, options = {…})`
+### `Agent.pending`
 
-Inspect a path using the Agent's file-security boundary.
-
-- `path` (string)
-
-Returns `Promise<{path:string,isFolder:boolean,mimetype?:string}>`
-
-### `Agent.get pending()`
+**Read** — `get pending()`
 
 Unsent messages queued while busy (array copy; message objects are shared).
  An error leaves them pending until a later run or pendingPop().
@@ -1507,34 +1634,9 @@ for editing).
 
 Returns `Array` — the drained messages
 
-### `Agent.get planUsage()`
+### `Agent.question`
 
-The provider-reported PLAN/QUOTA readout of the current endpoint
-(`{label?, quotas}`; in-memory, last-known). null until a request
-reports one.
-
-Returns `{label?: string, quotas: Object}|null`
-
-### `Agent.get policy()`
-
-The settings this Agent runs by, resolved from env.settings when it
-was created, re-resolved only when it selects another model
-(lib/agent/policy.js): context {cap, turn, autocompact} (the runaway
-guard and the auto-compaction threshold; global, then endpoint, then
-model overrides), retry {attempts, base, max},
-tools {timeout, timeoutLimit, concurrency}.
-
-Returns `Readonly<object>`
-
-### `Agent.promptCatalog(prompts, options)`
-
-The `# Prompt Catalog` text of env.prompts().
-
-- `prompts` (Map<string, object>)
-
-Returns `string`
-
-### `Agent.set question(callbacks)`
+**Write** — `set question(callbacks)`
 
 Set (or replace) the QUESTION BRIDGE at runtime — the binding's
 rendering engine wires it once its overlays exist (the TUI hands
@@ -1544,29 +1646,32 @@ the next tool call.
 
 Returns `void`
 
-### `Agent.get question()`
+**Read** — `get question()`
 
 The live question bridge; a trusted host capability, never provider data.
 
 Returns `object|null` — The live question bridge; a trusted host capability, never provider data.
 
-### `Agent.questionInstall(bridge)`
+### `Agent.request(request)`
 
-Install a question bridge and return an idempotent disposer that restores the previous bridge only while this installation still owns it. @param {object} bridge Question callbacks. @returns {() => void} Restore this installation.
+Send a request (handoff, question or reply) to another root agent and return
+at once; replies arrive later as user-role messages labelled with the
+sender's contact address. Requires `can.request === true`; workers never may.
+`to: "<name>@<project>"` (see `contacts`) messages a known agent again: queued
+while busy, resumed from its saved session when closed, never duplicated.
+`to: "new:<name>@<project>"` starts a fresh root agent with that role name
+(a taken name gets `-2`, `-3`…) in `this` (this project) or a pinned project
+sharing a settings group. It inherits this Agent's capabilities, model,
+thinking, tools, IO factory and session logging; `safe: true` makes it read-only
+and `model` picks a known model with free capacity. On a known contact,
+`safe: false` and a `model` equal to that contact's current model are
+harmless; changing either setting requires a new agent. An empty string,
+false or null model means no override for both kinds of request. The
+receiver gains this Agent as a known agent, so it can reply.
 
-### `Agent.questionTimeoutReset()`
+Returns `Promise<string>` — The target's contact address (`<alias>@<project>`).
 
-Renew the active tool's inactivity deadline; no-op outside a tool call. @returns {void}
-
-### `Agent.reseat(agent, { id } = {…})`
-
-Build the FRESH Agent that replaces `agent` for a new session.
-
-- `agent` (object) — the agent being replaced (the TUI's viewed one)
-- `[options={}]` (Object) — session creation options
-- `[options.id]` (string|false) — the new session id; an anonymous spelling (false/"0"/"false"/"anon") disables logging, and otherwise the fresh session keeps the old one's logging setting
-
-Returns `object` — the fresh Agent, seated in the old one's group
+Throws — {TypeError|Error} Invalid input, worker caller, missing permission, unknown project/contact/model, unsaved closed contact, or creation failure.
 
 ### `Agent.run(options = {…})`
 
@@ -1575,26 +1680,12 @@ Run the tool loop until done/error (lib/agent/run.js).
 - `[options]` (Object)
 - `[options.timeout]` (number|string) — per-request provider-request timeout
 - `[options.after]` (number) — non-negative delay in ms before running; an immediate run cancels a pending delayed continuation
-- `[options.contextGuard]` (boolean) — false only for internal compaction, which must run above the normal 90% ceiling
 
 Returns `Promise<object|null>` — terminal done/error, or null if a delayed run is superseded
 
-### `Agent.get safe()`
+Throws — {TypeError} Unsupported options, including model/endpoint and internal loop controls; assign agent.model before running.
 
-safe mode: only read-only (`safe`) tools publish and execute
-
-Returns `boolean` — safe mode: only read-only (`safe`) tools publish and execute
-
-### `Agent.set safe(value)`
-
-Switch safe mode at runtime (the /safe command, the ^X menu).
-Applies from the NEXT request: idle cached provider connections
-are dropped (their tool selection was fixed at construction); an
-in-flight request finishes with the old catalog.
-
-- `value` (boolean)
-
-Returns `void` — Read safe afterwards for the effective, possibly enforced mode.
+Effects — Executes provider requests and tools, updates this Context and usage, and persists completed turns. Concurrent calls share the active run.
 
 ### `Agent.send(message)`
 
@@ -1615,9 +1706,9 @@ tabs, every white space) before it is queued; a submission that is
 whitespace only carries no turn at all — it behaves exactly like
 /continue: no message is appended and the existing context runs.
 
-- `message` (object)
+- `message` (object|string) — a context message, or plain text converted to a user message
 
-Returns `Promise<object>` — the active run's terminal done/error event. Awaiting a busy send waits for that run, not a distinct reply to this message; on failure the queued message remains pending for a later run.
+Returns `Promise<object>` — the active run's terminal done/error event. Invalid input and closed-agent submissions return a rejected Promise without changing the queue or context. Awaiting a busy send waits for that run, not a distinct reply; on failure queued messages remain pending.
 
 ### `Agent.sendFile(fileName)`
 
@@ -1629,51 +1720,28 @@ and paths outside that folder fail before any message is queued.
 
 Returns `Promise<object>` — the run's terminal done/error event
 
-### `Agent.settings`
+### `Agent.skillLoad(names)`
 
-Live invocation-only provider settings overrides.
+Activate named skills in this Agent's Context, or list the Env catalog.
+Validate all requested names before injection; already active skills are no-ops.
 
-Returns `object|undefined` — Live invocation-only provider settings overrides.
+- `[names]` (string|string[]) — Names to activate; omitted lists available skills.
 
-### `Agent.skillCatalog(skills, options)`
+Returns `string` — Catalog text or activation summary; inputs are not retained or mutated.
 
-The `# Skill Catalog` text of env.skills() (the skill tool's answer,
-the skills CLI).
+Throws — {TypeError|Error} Invalid names, unknown skills, or closed Agent; correct names before retrying. Lookup failures inject nothing.
 
-- `skills` (Map<string, object>)
+Effects — Appends durable system guidance; repeated activation in the same Context is idempotent.
 
-Returns `string`
+### `Agent.thinking`
 
-### `Agent.skillSection(skill)`
-
-One skill's full content as the model reads it:
-`<skill name="...">\n<body>\n</skill>`.
-
-Returns `string`
-
-### `Agent.get spawnPermission()`
-
-Generic delegation permission. A child Agent may never delegate further,
-regardless of its stored host/user policy. Tools decide how to ask when
-an independent Agent's permission is unset; Agent performs no spawning.
-
-Returns `*`
-
-### `Agent.set spawnPermission(value)`
-
-Set generic delegation permission; non-booleans restore tool-owned asking.
-
-- `value` (*) — Permission value
-
-Returns `void` — Read spawnPermission afterwards for the effective permission.
-
-### `Agent.get thinking()`
+**Read** — `get thinking()`
 
 the current thinking level (undefined = provider default)
 
 Returns `string|undefined` — the current thinking level (undefined = provider default)
 
-### `Agent.set thinking(level)`
+**Write** — `set thinking(level)`
 
 Set the thinking level for subsequent requests (THINKING_LEVELS;
 each provider translates it to the nearest symbol the model accepts).
@@ -1681,19 +1749,11 @@ Applies to already-open provider connections too.
 
 - `[level]` (string) — none/low/medium/high/xhigh/max (undefined: the model's default)
 
-### `Agent.get throttledUntil()`
+### `Agent.throttledUntil`
+
+**Read** — `get throttledUntil()`
 
 Epoch-ms deadline of a pending continuation, or null.
-
-### `Agent.timeout`
-
-Invocation-only request timeout.
-
-Returns `number|string|undefined` — Invocation-only request timeout.
-
-### `Agent.TOOL_TIMEOUT_DEFAULT`
-
-Default Agent-enforced cap for one tool call, in milliseconds (two minutes).
 
 ### `Agent.toolMessages()`
 
@@ -1701,858 +1761,40 @@ tools with a live sticky message
 
 Returns `Array<{name: string, text: string}>` — tools with a live sticky message
 
-### `Agent.toolMessagesDetect()`
+### `Agent.tools`
 
-Re-detect tool-provided display information from the current context.
-
-Returns `Promise<Array<{name: string, text: string}>>` — the messages after detection
-
-### `Agent.toolMessageSet(name, text)`
-
-Set (or clear) a tool's sticky MESSAGE on THIS agent — a compact
-live text the TUI renders above the input area (collected from
-the VIEWED agent; lib/agent/tool-messages.js).
-
-- `name` (string) — the tool's display name
-- `[text]` (string|null) — the message; null/undefined/"" clears
-
-Returns `string|null` — the tool's current message
-
-### `Agent.get tools()`
+**Read** — `get tools()`
 
 Current model-facing tools: `const tools = await agent.tools`;
 `tools.get(name)` returns a provider-neutral descriptor with its schema.
-Uses IO's publication filter: dynamic availability, effective safety,
+Uses IO's publication filter: dynamic availability,
 configured selection, hidden-tool exclusion and the model's provider tools.
 Provider dialect conversion remains IO/provider-owned; this is the current
 catalog, not a capture of an earlier request's wire payload.
 
 Returns `Promise<Map<string, object>>` — Fresh map/descriptors, no callables or execution metadata. Nested schemas are shared registry data.
 
-### `Agent.toolStorage(toolname)`
+Throws — {Error} Availability-check failures propagate; retry by reading again after correcting the tool/environment.
 
-Return this agent's mutable, transient storage object for one tool.
+Effects — Rechecks dynamic availability; does not open a provider connection or mutate context. O(n) in catalog size.
 
-- `toolname` (string)
+### `Agent.usage`
 
-Returns `object`
-
-### `Agent.toolStorageClear(toolname)`
-
-Clear one tool's transient storage, or every tool store when omitted.
-
-- `[toolname]` (string)
-
-Returns `void`
-
-### `Agent.url`
-
-Invocation-only provider URL override.
-
-Returns `string|undefined` — Invocation-only provider URL override.
-
-### `Agent.get usage()`
+**Read** — `get usage()`
 
 Cumulative usage across every request THIS Agent has made — every
 IO terminal event's usage envelope, summed in memory. Never
-persisted: a fresh Agent starts at zero.
-
-Returns `{inputTokens: number, outputTokens: number, cost: number}`
-
-### `Agent.EVENT_CALLBACKS = Object.freeze([…]`
-
-IO callback property paired directly with its numeric Agent event.
-
-### `Agent.TOOL_TIMEOUT_DEFAULT = 120_000`
-
-Default Agent-enforced cap for one tool call, in milliseconds (two minutes).
-
-### `Agent.finishAdd(fn, { process: proc = process } = {…})`
-
-Register `fn` for synchronous execution on the configured process's `exit` event.
-
-- `fn` (() => void) — Cleanup callback; must be synchronous and may run more than once.
-- `[options]` (Object) — Registration options.
-- `[options.process=process]` (NodeJS.Process) — Process to attach the exit hook to.
-
-Returns `() => void` — Idempotent function that unregisters `fn` from the shared cleanup set.
-
-### `Agent.finishRun()`
-
-Invoke a snapshot of all registered cleanups synchronously; swallow callback errors.
-
-Returns `void`
-
-### `Agent.finishSignalsArm({ process: proc = process, signals = ["SIGINT", "SIGTERM", "SIGHUP"], } = {…})`
-
-Attach handlers that run cleanups and re-raise a termination signal after removing those handlers.
-If already armed, returns the existing disarm function without applying new options.
-
-- `[options]` (Object) — Signal-arming options.
-- `[options.process=process]` (NodeJS.Process) — Process on which to install handlers and call `kill`.
-- `[options.signals=["SIGINT", "SIGTERM", "SIGHUP"]` (string[]) — ] Signals to handle.
-
-Returns `() => void` — Idempotent function that removes these signal handlers and clears the armed state.
-
-### `Agent.reseat(agent, { id } = {…})`
-
-Build the FRESH Agent that replaces `agent` for a new session.
-
-- `agent` (object) — the agent being replaced (the TUI's viewed one)
-- `[options={}]` (Object) — session creation options
-- `[options.id]` (string|false) — the new session id; an anonymous spelling (false/"0"/"false"/"anon") disables logging, and otherwise the fresh session keeps the old one's logging setting
-
-Returns `object` — the fresh Agent, seated in the old one's group
-
-## App
-
-### `class App`
-
-Static namespace for the application front ends. The class has no instance
-methods; its exported static properties are attached immediately after its
-declaration. Constructing an instance has no application side effects.
-
-### `App.GTUI`
-
-Public GTUI namespace member; see its owning module for the contract.
-
-### `App.Markdown`
-
-Public Markdown namespace member; see its owning module for the contract.
-
-### `App.TUI`
-
-Public TUI namespace member; see its owning module for the contract.
-
-### `App.Web`
-
-Public Web namespace member; see its owning module for the contract.
-
-## CLI
-
-### `class CLI`
-
-Static namespace exposing every named CLI helper and `execute`.
-
-### `CLI.adoptResumeOrigin({ resume, anonymous = false, dir } = {…})`
-
-Move the process to the recorded origin folder for an explicit session resume.
-Skips cwd changes for anonymous, absent, `"true"`, and `"latest"` resume values.
-Resolves the session origin (using `dir` or the configured sessions folder),
-verifies that folder exists, then changes `process.cwd()` before environment setup.
-
-- `[options={}]` (Object) — Resume selection and session lookup options.
-- `[options.resume]` (string) — The `--resume` value; values other than `"true"` and `"latest"` are treated as explicit session IDs.
-- `[options.anonymous=false]` (boolean) — Whether this is an anonymous session.
-- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to the configured sessions folder when omitted or nullish.
-
-Returns `string|null` — The origin folder after changing cwd, or `null` when no explicit origin should be adopted.
-
-### `CLI.armCancelSignals({ onCancel, process: proc = process })`
-
-Arm SIGINT/SIGTERM cancellation for a CLI binding.
-
-- `options` (Object) — configuration object
-- `options.onCancel` ((signal: string) => void) — invoked once, with "SIGINT" or "SIGTERM", on the first caught signal
-- `[options.process=process]` (NodeJS.Process) — process-like signal emitter; defaults to the global Node.js `process` and can be injected for tests
-
-Returns `() => void` — disarm function; removes both listeners, and is safe to call repeatedly
-
-### `CLI.close({ env, agent } = {…})`
-
-Close a command-line library runtime. This is the sole public housekeeping
-boundary: agents are cancelled, sessions are flushed/closed, and tool-owned
-background resources are released. Repeated calls are safe.
-
-Returns `{agent?: object, session: {id: string, file?: string}|null}` — The explicit agent and its context's id/file when present, otherwise a null session. Starts background-resource teardown without awaiting it.
-
-### `CLI.completeOAuthPaste(input)`
-
-Feed pasted authorization input (a redirect URL, `code#state`, or code) to the current authorization-code flow.
-
-- `input` (string) — User-pasted authorization input passed to the waiting flow for parsing.
-
-Returns `boolean` — `true` if a flow was waiting and was resumed, otherwise `false`.
-
-### `CLI.defaultUrl(provider)`
-
-Return the built-in setup URL for a provider; runtime endpoint discovery
-remains owned by the environment.
-
-- `provider` (string) — Provider protocol identifier.
-
-Returns `string` — The provider's default URL, or an empty string if none is known.
-
-### `CLI.endpointPolicies(env)`
-
-List every endpoint the catalog knows (disabled ones included) with its
-configured policies and each visible model's configured maxActive.
-`effective` is the capacity the Agent plugin computed (absent without it).
-
-- `env` (object) — Env providing models(true) and settings
-
-Returns `Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>`
-
-### `CLI.endpointPolicySet(env, selector, change)`
-
-Set one endpoint policy. `selector` is `<endpoint>` or, for maxActive
-only, `<endpoint>/<model>`. `disabled: false` removes the key;
-`maxActive: undefined` removes the override (inherit).
-
-- `env` (object) — Env whose settings persist the change
-- `selector` (string) — `<endpoint>` or `<endpoint>/<model>`
-
-Returns `void`
-
-### `CLI.execute(command)`
-
-Execute one normalized administrative command.
-Argument parsing and flag names remain the executable's concern. This
-function creates an environment and closes it in a `finally` block, even if
-command handling fails.
-
-Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "mcpLogin", name: string} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
-
-### `CLI.EXIT`
-
-Exit codes shared by the command-line tools.
-
-### `CLI.exitCodeFor(terminal)`
-
-Map a terminal done/error event (or an error-shaped `{kind}`) to the
-process exit code.
-
-Returns `number` — The mapped process exit code; this function is synchronous and has no side effects.
-
-### `CLI.formatToolResult(result)`
-
-Convert a result to printable text, preserving strings and pretty-printing
-other values as JSON; values without a JSON representation are string-coerced.
-
-- `result` (*) — Value to format; there is no default.
-
-Returns `string` — The original string, indented JSON text, or string coercion when JSON serialization yields `undefined`.
-
-### `CLI.listEndpointModels(env)`
-
-Build menu entries for published endpoints and their published model ids.
-`loginRequired` is set for endpoints whose credentials failed (see Agent).
-
-- `env` (object) — Env providing the optionally available published model catalog.
-
-Returns `{name: string, models: string[], loginRequired?: boolean}[]` — Endpoint entries in catalog order.
-
-### `CLI.listEndpoints(env)`
-
-List every endpoint known to the catalog, including secret entries, for logout choices.
-
-- `env` (object) — Env providing the optionally available full model catalog.
-
-Returns `string[]` — Unique endpoint ids in first-seen order.
-
-### `CLI.listModelCandidates(env)`
-
-List published endpoint, model, and endpoint/model completion candidates.
-
-- `env` (object) — Env providing the optionally available model catalog.
-
-Returns `string[]` — Unique candidate strings in first-seen order.
-
-### `CLI.listModels(env)`
-
-Return every published endpoint's model ids after background collection
-completes; provider failure can leave a cached/static catalog.
-
-- `env` (object) — Env with a `modelsReady` promise and model catalog.
-
-Returns `Promise<{name: string, models: string[]}[]>` — Endpoint names and their published model ids.
-
-### `CLI.loginEndpoint(env, { name, provider, url, token, auth, scope = "package", } = {…})`
-
-Configure and log in to one endpoint via `Env.login`. The provider shapes
-credentials (or uses supplied `auth`, such as browser-OAuth tokens), then
-verifies the connection and fetches its models; failed login leaves nothing
-behind.
-
-- `env` (object) — Environment that owns the login operation.
-- `options` (object) — Login options; defaults to `{}`.
-- `options.name` (string) — Endpoint name.
-- `options.provider` (string) — Provider protocol identifier.
-- `options.url` (string) — Endpoint URL.
-- `[options.token]` (string) — Optional API token.
-- `[options.auth]` (object) — Optional pre-seeded authentication data.
-- `[options.scope="package"]` (string) — Endpoint scope.
-
-Returns `Promise<*>` — Resolves with the result of `env.login`.
-
-### `CLI.logoutEndpoint(env, name)`
-
-Remove an endpoint using the `Env.logout` contract. Persisted configuration
-and auth files are removed; an environment-detected endpoint is cleared
-only in memory and will be rediscovered while the environment provides it.
-
-- `env` (object) — Environment whose endpoint to log out.
-- `name` (string) — Endpoint name.
-
-Returns `{name: string, dynamic: boolean}` — Logout result from `env.logout`.
-
-### `CLI.oauthPasteOnly(descriptor)`
-
-Determine whether a flow is paste-only: an authorization-code flow with
-a non-loopback redirect URI, where the provider-hosted callback displays
-the code instead of delivering it to a local listener.
-
-- `descriptor` (object) — The endpoint preset's `oauth` block.
-
-Returns `boolean` — `true` when there is no string device-authorization URL and the string redirect URI is not loopback.
-
-### `CLI.parseAuthorizationInput(input)`
-
-Parse pasted authorization input: a full redirect URL
-(`...?code=…&state=…`), `code#state`, or a bare code.
-
-- `input` (string) — Pasted full redirect URL, `code#state`, or bare code; nullish values are treated as empty text.
-
-Returns `{code?: string, state?: string}` — Parsed non-empty code and/or state; empty input yields an empty object.
-
-### `CLI.parseFlags(argv, { flags, bools = [], durations = ["timeout"], numbers = ["max-turns", "max-tool-calls"] })`
-
-Parse command-line arguments into a flat options object. Value-taking flags
-use `--name value`; boolean flags use `--name`. `--help` and `-h` return
-`{help: true}` immediately. Repeated flags overwrite earlier values.
-Configured duration values are converted with `durationParse`; configured
-numeric values are converted with `Number` and must be finite and positive.
-Flag relationships and value-specific transformations remain caller policy.
-
-- `argv` (string[]) — Arguments to parse, typically `process.argv.slice(2)`.
-- `spec` (Object) — Flag-name configuration.
-- `spec.flags` (string[]) — Names of value-taking flags (required).
-- `[spec.bools=[]` (string[]) — ] - Names of valueless boolean flags.
-- `[spec.durations=["timeout"]` (string[]) — ] - Value-taking flag names converted by `durationParse` when present.
-- `[spec.numbers=["max-turns", "max-tool-calls"]` (string[]) — ] - Value-taking flag names converted to finite, positive numbers when present.
-
-Returns `Object` — Parsed options; values are strings except converted duration/number values, boolean flags (`true`), or `{help: true}`.
-
-### `CLI.readContextFromStdin()`
-
-Read standard input through EOF and parse its UTF-8 contents as messages.
-
-Returns `Promise<Array<object>>` — The parsed context/message array.
-
-### `CLI.readLastCombo(env)`
-
-Return the published endpoint/model pair used last: the pinned project's
-newest pair first (`projectLastUsed`), else the global newest (`lastUsed`).
-
-- `env` (object) — Env whose model catalog is inspected.
-
-Returns `string|null` — The newest qualified selector, or null when no model has been used.
-
-### `CLI.readStdin()`
-
-Read and buffer all bytes from standard input until the stream reaches EOF,
-then decode the concatenated bytes as UTF-8.
-
-Returns `Promise<string>` — The complete stdin contents as a UTF-8 string.
-
-### `CLI.refreshOAuthTokens(descriptor, refresh, { signal } = {…})`
-
-Refresh stored OAuth credentials without repeating browser or device authorization.
-The response may omit `refresh_token`; callers can preserve the prior value when mapping it with `tokensToAuth`.
-
-- `descriptor` (object) — OAuth descriptor containing a string `tokenUrl` and the client ID.
-- `refresh` (string) — Non-empty stored refresh token.
-
-Returns `Promise<object>` — Resolves with the parsed token response.
-
-### `CLI.renderSettingsTemplate(env)`
-
-Render the project settings template from the settings schema exposed by `env`.
-Emits one commented-out line per known key in sorted order, using its default
-as the placeholder (`null` if undefined) and its description as a trailing comment.
-
-Returns `string` — Complete JSONC template text, ending with a newline.
-
-### `CLI.resolveCliToolArgs(argv, entry)`
-
-Resolve CLI arguments from JSON or shell-friendly shorthand. A single
-argument is first tried as JSON; otherwise a colon in the first argument
-selects key/value object form, and arguments without that colon become a
-string-array shorthand for the tool's first schema property.
-
-- `argv` (string[]) — CLI argument strings; an empty array defaults to no arguments (`{}`).
-
-Returns `object` — The resolved argument object.
-
-### `CLI.resolveModelCombo(value, env)`
-
-Resolve `<endpoint>/<model>`, a model id, an endpoint, or a bare model.
-An endpoint alone selects its first published model once background
-collection has answered (`env.modelsReady`).
-
-- `value` (string) — Selector to resolve; must be a non-empty string.
-- `env` (object) — Env providing model catalog, validation, and readiness.
-
-Returns `Promise<string|undefined>` — Qualified selector, or undefined when no endpoint/model resolves.
-
-### `CLI.resolveToolArgs(raw, entry)`
-
-Parse raw JSON arguments, passing a JSON object through or wrapping a bare
-JSON value in the tool's first schema property.
-
-- `raw` (string|undefined) — JSON text; omitted or empty text defaults to no arguments (`{}`).
-
-Returns `object` — The parsed argument object or shorthand wrapper.
-
-### `CLI.runLoginWizard(env, { input = process.stdin, output = process.stderr, } = {…})`
-
-Run the cooked-terminal wizard used by `--login`. Lists known endpoints
-from `Env.loginPresets` alongside a manual URL option, then prompts for
-endpoint details and credentials or browser OAuth where available. Closes
-its readline interface on completion or failure.
-
-- `env` (object) — Environment providing presets and endpoint login.
-- `[options={}]` (object) — I/O options; defaults to `{}`.
-- `[options.input=process.stdin]` (import("node:stream").Readable) — Prompt input stream.
-- `[options.output=process.stderr]` (import("node:stream").Writable) — Wizard and OAuth output stream.
-
-Returns `Promise<*>` — Resolves with the result of the selected endpoint login.
-
-### `CLI.runMcpLogin(env, name, { input = process.stdin, output = process.stderr } = {…})`
-
-Start explicit MCP browser sign-in. Loopback callback wins without waiting
-for Enter; in a terminal, a full pasted redirect URL is a fallback.
-
-- `env` (object) — Environment with mcpLogin/mcpPaste methods.
-- `name` (string) — Configured MCP server name.
-
-Returns `Promise<{name: string}>` — Signed-in server identity.
-
-### `CLI.runOAuthFlow(descriptor, options = {…})`
-
-Run one OAuth sign-in, selecting device authorization when the descriptor
-has a string `deviceAuthorizationUrl`, otherwise authorization code + PKCE.
-
-- `descriptor` (object) — The endpoint preset's `oauth` block for the selected grant.
-- `[options={}]` (object) — Flow options forwarded to the selected implementation.
-- `[options.onAuthUrl]` ((url: string) => void) — Called with the URL the user must visit; browser opening is attempted separately.
-- `[options.onLog]` ((line: string) => void) — Called with progress messages; defaults to a no-op.
-- `[options.signal]` (AbortSignal) — Signal used to cancel the sign-in where supported.
-- `[options.open]` ((url: string) => boolean) — Browser-opening function; defaults to `openInBrowser`.
-
-Returns `Promise<object>` — Resolves with the provider's token response.
-
-### `CLI.selectEndpointModel(env, args, { lastUsed = false, log = () => {} } = {…})`
-
-Select a qualified model from CLI input or the last-used published model.
-
-- `env` (object) — Environment providing model resolution and login.
-- `args` (object) — CLI arguments: model selector and optional invocation-only URL.
-- `[options={}]` (object) — Selection options.
-- `[options.lastUsed=false]` (boolean) — Consider the newest available last-used model when no explicit model is supplied.
-- `[options.log=()=>{}]` (Function) — Log the selected last-used qualified model.
-
-Returns `Promise<string|undefined>` — Qualified `<endpoint>/<model>`, or undefined if unresolved.
-
-### `CLI.tokensToAuth(tokens, previous = {…})`
-
-Map a provider token response to the stored OAuth auth payload. `token` mirrors
-`access` so bearer-auth wire code needs no OAuth awareness.
-
-- `tokens` (object) — Provider response; requires a non-empty string `access_token`, with optional `refresh_token` and finite `expires_in`.
-- `[previous={}]` (object) — Prior auth payload; its non-empty string `refresh` is retained if the response omits a usable refresh token.
-
-Returns `{type: string, access: string, token: string, refresh?: string, expires?: number}` — Auth payload; `expires` is the current time plus `expires_in` seconds when finite.
-
-### `CLI.unwrapToolResult(value)`
-
-Unwrap a tool return envelope into its result and side-channel arrays. An
-object with a `system` or `display` property is treated as an envelope;
-any other value is returned as `result` with empty side channels.
-
-- `value` (*) — Tool return value; there is no default.
-
-Returns `{result: *, system: string[], display: string[]}` — The result plus normalized `system` and `display` arrays (missing/falsy channels become empty arrays, and scalar channels become one-element arrays).
-
-### `CLI.usageSummary(usage)`
-
-Format usage as a one-line human-readable summary for host diagnostics.
-Missing/falsy usage returns `usage: unknown`; a finite cost is included to
-four decimal places. Does not mutate the supplied usage object.
-
-- `usage` (object) — usage envelope with inputTokens, outputTokens, source, and optional cost
-
-Returns `string` — formatted usage summary
-
-### `CLI.writeSettingsTemplate(env, { force = false } = {…})`
-
-Write a namespaced settings template to the project settings path under `env.cwd`.
-Refuses to replace an existing file unless `options.force` is true.
-
-Returns `string` — Path of the written settings file.
-
-### `CLI.EXIT = Object.freeze({…})`
-
-Exit codes shared by the command-line tools.
-
-### `CLI.adoptResumeOrigin({ resume, anonymous = false, dir } = {…})`
-
-Move the process to the recorded origin folder for an explicit session resume.
-Skips cwd changes for anonymous, absent, `"true"`, and `"latest"` resume values.
-Resolves the session origin (using `dir` or the configured sessions folder),
-verifies that folder exists, then changes `process.cwd()` before environment setup.
-
-- `[options={}]` (Object) — Resume selection and session lookup options.
-- `[options.resume]` (string) — The `--resume` value; values other than `"true"` and `"latest"` are treated as explicit session IDs.
-- `[options.anonymous=false]` (boolean) — Whether this is an anonymous session.
-- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to the configured sessions folder when omitted or nullish.
-
-Returns `string|null` — The origin folder after changing cwd, or `null` when no explicit origin should be adopted.
-
-### `CLI.armCancelSignals({ onCancel, process: proc = process })`
-
-Arm SIGINT/SIGTERM cancellation for a CLI binding.
-
-- `options` (Object) — configuration object
-- `options.onCancel` ((signal: string) => void) — invoked once, with "SIGINT" or "SIGTERM", on the first caught signal
-- `[options.process=process]` (NodeJS.Process) — process-like signal emitter; defaults to the global Node.js `process` and can be injected for tests
-
-Returns `() => void` — disarm function; removes both listeners, and is safe to call repeatedly
-
-### `CLI.close({ env, agent } = {…})`
-
-Close a command-line library runtime. This is the sole public housekeeping
-boundary: agents are cancelled, sessions are flushed/closed, and tool-owned
-background resources are released. Repeated calls are safe.
-
-Returns `{agent?: object, session: {id: string, file?: string}|null}` — The explicit agent and its context's id/file when present, otherwise a null session. Starts background-resource teardown without awaiting it.
-
-### `CLI.completeOAuthPaste(input)`
-
-Feed pasted authorization input (a redirect URL, `code#state`, or code) to the current authorization-code flow.
-
-- `input` (string) — User-pasted authorization input passed to the waiting flow for parsing.
-
-Returns `boolean` — `true` if a flow was waiting and was resumed, otherwise `false`.
-
-### `CLI.defaultUrl(provider)`
-
-Return the built-in setup URL for a provider; runtime endpoint discovery
-remains owned by the environment.
-
-- `provider` (string) — Provider protocol identifier.
-
-Returns `string` — The provider's default URL, or an empty string if none is known.
-
-### `CLI.endpointPolicies(env)`
-
-List every endpoint the catalog knows (disabled ones included) with its
-configured policies and each visible model's configured maxActive.
-`effective` is the capacity the Agent plugin computed (absent without it).
-
-- `env` (object) — Env providing models(true) and settings
-
-Returns `Array<{name: string, disabled: boolean, maxActive: number|false|undefined, effective: number|undefined, models: Array<{id: string, maxActive: number|false|undefined, effective: number|undefined}>}>`
-
-### `CLI.endpointPolicySet(env, selector, change)`
-
-Set one endpoint policy. `selector` is `<endpoint>` or, for maxActive
-only, `<endpoint>/<model>`. `disabled: false` removes the key;
-`maxActive: undefined` removes the override (inherit).
-
-- `env` (object) — Env whose settings persist the change
-- `selector` (string) — `<endpoint>` or `<endpoint>/<model>`
-
-Returns `void`
-
-### `async CLI.execute(command)`
-
-Execute one normalized administrative command.
-Argument parsing and flag names remain the executable's concern. This
-function creates an environment and closes it in a `finally` block, even if
-command handling fails.
-
-Returns — {Promise< {type: "login", name: string, endpoint: object, auth?: object, scope: string, verified?: *} | {type: "mcpLogin", name: string} | {type: "logout", name: string, dynamic: boolean} | {type: "initialize", file: string} | {type: "listModels", endpoints: Array<{name: string, models: string[]}>} >} A promise for the result corresponding to `command.type`.
-
-### `CLI.exitCodeFor(terminal)`
-
-Map a terminal done/error event (or an error-shaped `{kind}`) to the
-process exit code.
-
-Returns `number` — The mapped process exit code; this function is synchronous and has no side effects.
-
-### `CLI.formatToolResult(result)`
-
-Convert a result to printable text, preserving strings and pretty-printing
-other values as JSON; values without a JSON representation are string-coerced.
-
-- `result` (*) — Value to format; there is no default.
-
-Returns `string` — The original string, indented JSON text, or string coercion when JSON serialization yields `undefined`.
-
-### `CLI.listEndpointModels(env)`
-
-Build menu entries for published endpoints and their published model ids.
-`loginRequired` is set for endpoints whose credentials failed (see Agent).
-
-- `env` (object) — Env providing the optionally available published model catalog.
-
-Returns `{name: string, models: string[], loginRequired?: boolean}[]` — Endpoint entries in catalog order.
-
-### `CLI.listEndpoints(env)`
-
-List every endpoint known to the catalog, including secret entries, for logout choices.
-
-- `env` (object) — Env providing the optionally available full model catalog.
-
-Returns `string[]` — Unique endpoint ids in first-seen order.
-
-### `CLI.listModelCandidates(env)`
-
-List published endpoint, model, and endpoint/model completion candidates.
-
-- `env` (object) — Env providing the optionally available model catalog.
-
-Returns `string[]` — Unique candidate strings in first-seen order.
-
-### `async CLI.listModels(env)`
-
-Return every published endpoint's model ids after background collection
-completes; provider failure can leave a cached/static catalog.
-
-- `env` (object) — Env with a `modelsReady` promise and model catalog.
-
-Returns `Promise<{name: string, models: string[]}[]>` — Endpoint names and their published model ids.
-
-### `async CLI.loginEndpoint(env, { name, provider, url, token, auth, scope = "package", } = {…})`
-
-Configure and log in to one endpoint via `Env.login`. The provider shapes
-credentials (or uses supplied `auth`, such as browser-OAuth tokens), then
-verifies the connection and fetches its models; failed login leaves nothing
-behind.
-
-- `env` (object) — Environment that owns the login operation.
-- `options` (object) — Login options; defaults to `{}`.
-- `options.name` (string) — Endpoint name.
-- `options.provider` (string) — Provider protocol identifier.
-- `options.url` (string) — Endpoint URL.
-- `[options.token]` (string) — Optional API token.
-- `[options.auth]` (object) — Optional pre-seeded authentication data.
-- `[options.scope="package"]` (string) — Endpoint scope.
-
-Returns `Promise<*>` — Resolves with the result of `env.login`.
-
-### `CLI.logoutEndpoint(env, name)`
-
-Remove an endpoint using the `Env.logout` contract. Persisted configuration
-and auth files are removed; an environment-detected endpoint is cleared
-only in memory and will be rediscovered while the environment provides it.
-
-- `env` (object) — Environment whose endpoint to log out.
-- `name` (string) — Endpoint name.
-
-Returns `{name: string, dynamic: boolean}` — Logout result from `env.logout`.
-
-### `CLI.oauthPasteOnly(descriptor)`
-
-Determine whether a flow is paste-only: an authorization-code flow with
-a non-loopback redirect URI, where the provider-hosted callback displays
-the code instead of delivering it to a local listener.
-
-- `descriptor` (object) — The endpoint preset's `oauth` block.
-
-Returns `boolean` — `true` when there is no string device-authorization URL and the string redirect URI is not loopback.
-
-### `CLI.parseAuthorizationInput(input)`
-
-Parse pasted authorization input: a full redirect URL
-(`...?code=…&state=…`), `code#state`, or a bare code.
-
-- `input` (string) — Pasted full redirect URL, `code#state`, or bare code; nullish values are treated as empty text.
-
-Returns `{code?: string, state?: string}` — Parsed non-empty code and/or state; empty input yields an empty object.
-
-### `CLI.parseFlags(argv, { flags, bools = [], durations = ["timeout"], numbers = ["max-turns", "max-tool-calls"] })`
-
-Parse command-line arguments into a flat options object. Value-taking flags
-use `--name value`; boolean flags use `--name`. `--help` and `-h` return
-`{help: true}` immediately. Repeated flags overwrite earlier values.
-Configured duration values are converted with `durationParse`; configured
-numeric values are converted with `Number` and must be finite and positive.
-Flag relationships and value-specific transformations remain caller policy.
-
-- `argv` (string[]) — Arguments to parse, typically `process.argv.slice(2)`.
-- `spec` (Object) — Flag-name configuration.
-- `spec.flags` (string[]) — Names of value-taking flags (required).
-- `[spec.bools=[]` (string[]) — ] - Names of valueless boolean flags.
-- `[spec.durations=["timeout"]` (string[]) — ] - Value-taking flag names converted by `durationParse` when present.
-- `[spec.numbers=["max-turns", "max-tool-calls"]` (string[]) — ] - Value-taking flag names converted to finite, positive numbers when present.
-
-Returns `Object` — Parsed options; values are strings except converted duration/number values, boolean flags (`true`), or `{help: true}`.
-
-### `async CLI.readContextFromStdin()`
-
-Read standard input through EOF and parse its UTF-8 contents as messages.
-
-Returns `Promise<Array<object>>` — The parsed context/message array.
-
-### `CLI.readLastCombo(env)`
-
-Return the published endpoint/model pair used last: the pinned project's
-newest pair first (`projectLastUsed`), else the global newest (`lastUsed`).
-
-- `env` (object) — Env whose model catalog is inspected.
-
-Returns `string|null` — The newest qualified selector, or null when no model has been used.
-
-### `async CLI.readStdin()`
-
-Read and buffer all bytes from standard input until the stream reaches EOF,
-then decode the concatenated bytes as UTF-8.
-
-Returns `Promise<string>` — The complete stdin contents as a UTF-8 string.
-
-### `async CLI.refreshOAuthTokens(descriptor, refresh, { signal } = {…})`
-
-Refresh stored OAuth credentials without repeating browser or device authorization.
-The response may omit `refresh_token`; callers can preserve the prior value when mapping it with `tokensToAuth`.
-
-- `descriptor` (object) — OAuth descriptor containing a string `tokenUrl` and the client ID.
-- `refresh` (string) — Non-empty stored refresh token.
-
-Returns `Promise<object>` — Resolves with the parsed token response.
-
-### `CLI.renderSettingsTemplate(env)`
-
-Render the project settings template from the settings schema exposed by `env`.
-Emits one commented-out line per known key in sorted order, using its default
-as the placeholder (`null` if undefined) and its description as a trailing comment.
-
-Returns `string` — Complete JSONC template text, ending with a newline.
-
-### `CLI.resolveCliToolArgs(argv, entry)`
-
-Resolve CLI arguments from JSON or shell-friendly shorthand. A single
-argument is first tried as JSON; otherwise a colon in the first argument
-selects key/value object form, and arguments without that colon become a
-string-array shorthand for the tool's first schema property.
-
-- `argv` (string[]) — CLI argument strings; an empty array defaults to no arguments (`{}`).
-
-Returns `object` — The resolved argument object.
-
-### `async CLI.resolveModelCombo(value, env)`
-
-Resolve `<endpoint>/<model>`, a model id, an endpoint, or a bare model.
-An endpoint alone selects its first published model once background
-collection has answered (`env.modelsReady`).
-
-- `value` (string) — Selector to resolve; must be a non-empty string.
-- `env` (object) — Env providing model catalog, validation, and readiness.
-
-Returns `Promise<string|undefined>` — Qualified selector, or undefined when no endpoint/model resolves.
-
-### `CLI.resolveToolArgs(raw, entry)`
-
-Parse raw JSON arguments, passing a JSON object through or wrapping a bare
-JSON value in the tool's first schema property.
-
-- `raw` (string|undefined) — JSON text; omitted or empty text defaults to no arguments (`{}`).
-
-Returns `object` — The parsed argument object or shorthand wrapper.
-
-### `async CLI.runLoginWizard(env, { input = process.stdin, output = process.stderr, } = {…})`
-
-Run the cooked-terminal wizard used by `--login`. Lists known endpoints
-from `Env.loginPresets` alongside a manual URL option, then prompts for
-endpoint details and credentials or browser OAuth where available. Closes
-its readline interface on completion or failure.
-
-- `env` (object) — Environment providing presets and endpoint login.
-- `[options={}]` (object) — I/O options; defaults to `{}`.
-- `[options.input=process.stdin]` (import("node:stream").Readable) — Prompt input stream.
-- `[options.output=process.stderr]` (import("node:stream").Writable) — Wizard and OAuth output stream.
-
-Returns `Promise<*>` — Resolves with the result of the selected endpoint login.
-
-### `async CLI.runMcpLogin(env, name, { input = process.stdin, output = process.stderr } = {…})`
-
-Start explicit MCP browser sign-in. Loopback callback wins without waiting
-for Enter; in a terminal, a full pasted redirect URL is a fallback.
-
-- `env` (object) — Environment with mcpLogin/mcpPaste methods.
-- `name` (string) — Configured MCP server name.
-
-Returns `Promise<{name: string}>` — Signed-in server identity.
-
-### `async CLI.runOAuthFlow(descriptor, options = {…})`
-
-Run one OAuth sign-in, selecting device authorization when the descriptor
-has a string `deviceAuthorizationUrl`, otherwise authorization code + PKCE.
-
-- `descriptor` (object) — The endpoint preset's `oauth` block for the selected grant.
-- `[options={}]` (object) — Flow options forwarded to the selected implementation.
-- `[options.onAuthUrl]` ((url: string) => void) — Called with the URL the user must visit; browser opening is attempted separately.
-- `[options.onLog]` ((line: string) => void) — Called with progress messages; defaults to a no-op.
-- `[options.signal]` (AbortSignal) — Signal used to cancel the sign-in where supported.
-- `[options.open]` ((url: string) => boolean) — Browser-opening function; defaults to `openInBrowser`.
-
-Returns `Promise<object>` — Resolves with the provider's token response.
-
-### `async CLI.selectEndpointModel(env, args, { lastUsed = false, log = () => {} } = {…})`
-
-Select a qualified model from CLI input or the last-used published model.
-
-- `env` (object) — Environment providing model resolution and login.
-- `args` (object) — CLI arguments: model selector and optional invocation-only URL.
-- `[options={}]` (object) — Selection options.
-- `[options.lastUsed=false]` (boolean) — Consider the newest available last-used model when no explicit model is supplied.
-- `[options.log=()=>{}]` (Function) — Log the selected last-used qualified model.
-
-Returns `Promise<string|undefined>` — Qualified `<endpoint>/<model>`, or undefined if unresolved.
-
-### `CLI.tokensToAuth(tokens, previous = {…})`
-
-Map a provider token response to the stored OAuth auth payload. `token` mirrors
-`access` so bearer-auth wire code needs no OAuth awareness.
-
-- `tokens` (object) — Provider response; requires a non-empty string `access_token`, with optional `refresh_token` and finite `expires_in`.
-- `[previous={}]` (object) — Prior auth payload; its non-empty string `refresh` is retained if the response omits a usable refresh token.
-
-Returns `{type: string, access: string, token: string, refresh?: string, expires?: number}` — Auth payload; `expires` is the current time plus `expires_in` seconds when finite.
-
-### `CLI.unwrapToolResult(value)`
-
-Unwrap a tool return envelope into its result and side-channel arrays. An
-object with a `system` or `display` property is treated as an envelope;
-any other value is returned as `result` with empty side channels.
-
-- `value` (*) — Tool return value; there is no default.
-
-Returns `{result: *, system: string[], display: string[]}` — The result plus normalized `system` and `display` arrays (missing/falsy channels become empty arrays, and scalar channels become one-element arrays).
-
-### `CLI.usageSummary(usage)`
-
-Format usage as a one-line human-readable summary for host diagnostics.
-Missing/falsy usage returns `usage: unknown`; a finite cost is included to
-four decimal places. Does not mutate the supplied usage object.
-
-- `usage` (object) — usage envelope with inputTokens, outputTokens, source, and optional cost
-
-Returns `string` — formatted usage summary
-
-### `CLI.writeSettingsTemplate(env, { force = false } = {…})`
-
-Write a namespaced settings template to the project settings path under `env.cwd`.
-Refuses to replace an existing file unless `options.force` is true.
-
-Returns `string` — Path of the written settings file.
-
-## Context
-
-### `Context.ContentType = Object.freeze({…})`
-
-Content block discriminators.
+persisted: a fresh Agent starts at zero. Only canonical token/cache/reasoning
+counters and reported cost are summed; totalTokens is inputTokens + outputTokens.
+Cache counters are input subsets; reasoningTokens is an output subset. Optional
+serviceTier, inferenceGeo and bounded provider details describe only the latest
+request (missing metadata clears previous values). Unknown numeric details are
+snapshots, not additive counters. Quotas remain separate Context.planUsage snapshots.
+The returned deep snapshot shares no mutable data with this Agent; reading has no effects.
+
+Returns `{inputTokens: number, outputTokens: number, cost: number, totalTokens?: number, cacheReadTokens?: number, cacheWriteTokens?: number, cacheWrite5mTokens?: number, cacheWrite1hTokens?: number, uncachedInputTokens?: number, reasoningTokens?: number, serviceTier?: string, inferenceGeo?: string, details?: object}`
+
+## Agent.Context
 
 ### `class Context`
 
@@ -2562,7 +1804,7 @@ methods below), optionally NAMED (`id`/`name`) and LOGGED to a
 session file in `dir` (`save`). Crash safety is the owner's: an Agent
 flushes its context from a process-finish hook.
 
-### `Context.append(message, options)`
+### `Agent.Context.append(message, options)`
 
 Append a message, MERGING with the last one when possible
 (consecutive same-type messages / same-sub-type blocks fold —
@@ -2570,29 +1812,9 @@ Context.appendMessage); `{merge: false}` keeps a boundary.
 
 - `message` (object)
 
-Returns `object` — the stored message
+Returns `object|undefined` — the stored message, or `undefined` when an empty message is skipped
 
-### `Context.assemblerCallbacks(assembler)`
-
-Build the camelCase callback set used by Context to feed response events to
-an assembler. Includes callbacks for start, text/thinking block events,
-tool-call events, done, and error.
-
-- `assembler` (ReturnType<typeof createAssembler>) — Assembler receiving the events; no default is provided.
-
-Returns `Object<string, function(object): void>` — Callbacks keyed by names such as `onStart`, `onTextDelta`, `onDone`, and `onError`.
-
-### `Context.assemblerCreate()`
-
-Create an assembler that folds normalized response events into one
-assistant message. Events mutate the in-progress message; valid message
-snapshots on `start`, `done`, or `error` replace it. Unknown event types are
-ignored, and malformed tool-call JSON is retained as raw text. The returned
-message remains partial until completion and is exposed by reference.
-
-Returns `{consume: (event: object) => void, message: () => object}` — The event consumer and accessor for the current message.
-
-### `Context.at(i)`
+### `Agent.Context.at(i)`
 
 The message at index `i` (negative counts from the end).
 
@@ -2600,7 +1822,7 @@ The message at index `i` (negative counts from the end).
 
 Returns `object|undefined`
 
-### `Context.blockAt(i, j)`
+### `Agent.Context.blockAt(i, j)`
 
 Block `j` of message `i` (RangeError when either index is out of range).
 
@@ -2609,76 +1831,70 @@ Block `j` of message `i` (RangeError when either index is out of range).
 
 Returns `object`
 
-### `Context.callbacksNormalize(callbacks = {…}, binding = {…})`
-
-Build the full callback set for a binding.
-
-- `[callbacks={}]` (Object) — consumer-supplied callbacks, keyed by camelCase callback name. A function is used as-is; explicit `false` or `null` selects a no-op; an omitted or `undefined` callback gets the binding default.
-- `[binding={}]` (Object) — binding-appropriate default handlers.
-- `[binding.onData]` ((event:object)=>void) — receives every event whose callback was omitted (stdout replacement)
-- `[binding.onLog]` ((line:string)=>void) — receives error reports (stderr replacement)
-- `[binding.onTerminal]` ((event:object)=>void|false|null) — completes the binding; called for `done` and `error` even when the consumer supplied its own terminal callback. `false` or `null` disables this additional call.
-
-Returns `Object` — Complete callback set keyed by camelCase names.
-
-### `Context.close()`
+### `Agent.Context.close()`
 
 Flush and close; subsequent mutations fail. Flush errors propagate and
 leave the context open.
 
-Returns `void`
+Returns `Promise<void>` — Resolves once durable; on failure reopens for retry.
 
-### `Context.constructor({ id, dir, messages = [], origin, uuid, name, settings, save = dir !== undefined } = {…})`
+### `Agent.Context.constructor(options = {…})`
 
 Create a context, optionally named and logged (the file is created
 on the first flush of a started conversation).
 
 - `[options]` (Object)
-- `[options.id]` (string) — session id (default: random UUID)
+- `[options.id]` (string|false) — session id (default: random UUID); false, "0", "false", "anon" normalize to an anonymous context with no id or logging
 - `[options.dir]` (string) — the sessions folder (env.settings.sessions); required to log
 - `[options.messages]` (Array) — initial messages, deep-copied into this context; no objects are shared with another context
 - `[options.origin]` (string) — the folder the session RUNS in (default: process.cwd()) — recorded in the file's metadata line; resume's scans list only sessions of the current folder
 - `[options.uuid]` (string) — carry an existing sessionUUID forward (Context.resume() only — a fresh session always gets a new one)
 - `[options.name]` (string) — carry an existing stored NAME forward (Context.resume() only — see the module doc)
 - `[options.settings]` (object) — the session-owned agent settings snapshot (Agent-managed; see the settings setter)
-- `[options.save]` (boolean) — whether the context is logged to disk (default: whenever a `dir` is given); false keeps it in memory
+- `[options.save]` (boolean) — whether the context is logged to disk (default: whenever a `dir` is given); false or an anonymous id keeps it in memory
 
-### `Context.contentBinary(path, buffer)`
+Throws — {TypeError} Invalid options container or unknown own top-level key (including symbols) before reading metadata or creating a folder; stored settings remain unrestricted.
 
-Build a canonical base64 binary Context block without exposing the source path.
+### `Agent.Context.contextUsage`
 
-- `path` (string) — Non-empty local path; only its basename is retained.
-- `buffer` (Uint8Array) — Binary data to encode.
+**Read** — `get contextUsage()`
 
-Returns `{type: "binary", mimetype: string, filename: string, content: string}` — A block containing the basename, detected media type, and base64 data.
+Provider-reported context consumption and model window (tokens). A stable immutable
+snapshot until the next accepted report or invalidation; identity changes even when a
+report repeats the same numbers. Values survive replacing IO and are not persisted.
 
-### `Context.contentIndexer()`
+Returns `{used: number|undefined, total: number|undefined}` — The current Context's report.
 
-Create a per-request content-block indexer for a provider translator. `of`
-reuses an index for a previously seen wire-item key, while `next` always
-reserves a fresh index; indexes are dense and follow first appearance.
+Effects — None.
 
-Returns `{of: (key: *) => number, next: () => number}` — Indexing operations.
+**Write** — `set contextUsage({ used, total } = {…})`
 
-### `Context.contentText(text)`
+Merge a provider report into this conversation. Nonnegative finite used and positive
+finite total values are floored; invalid values do not replace previous data.
 
-Wrap a value's string representation in a text content block.
+Returns `void` — No result.
 
-- `text` (*) — Value converted with `String()`.
+Effects — Updates in-memory Context usage; reports survive changing transport IO.
 
-Returns `TextContent` — A block with `type: ContentType.Text` and the converted text.
+### `Agent.Context.contextUsageInvalidate({ window = false } = {…})`
 
-### `Context.ContentType`
+Invalidate exact input consumption after structural changes (e.g. compaction).
+On a different model identity, also discard the old model's window; an IO
+replacement for the same model does not require invalidation.
 
-Content block discriminators.
+Returns `void` — No result.
 
-### `Context.created`
+Effects — Clears in-memory `used`, and optionally `total`; does not affect quota or persisted messages.
+
+### `Agent.Context.created`
+
+**Read** — `get created()`
 
 Creation timestamp in ISO form.
 
 Returns `string` — Creation timestamp in ISO form.
 
-### `Context.deleteAll({ dir } = {…})`
+### `Agent.Context.deleteAll({ dir } = {…})`
 
 Delete EVERY session file in the folder (the /sessions-delete-all!
 contract — the user confirmed; foreign files stay untouched).
@@ -2688,7 +1904,7 @@ contract — the user confirmed; foreign files stay untouched).
 
 Returns `{deleted: number}`
 
-### `Context.deleteById({ id, dir } = {…})`
+### `Agent.Context.deleteById({ id, dir } = {…})`
 
 Permanently delete a STORED session by id: every session file whose
 metadata carries that id (a leftover duplicate goes with it). A store
@@ -2700,13 +1916,31 @@ still holding it open would re-persist it — close it first.
 
 Returns `{deleted: number}`
 
-### `Context.dir`
+### `Agent.Context.dir`
+
+**Read** — `get dir()`
 
 Session logging directory.
 
 Returns `string|undefined` — Session logging directory.
 
-### `Context.edit(i, message)`
+### `Agent.Context.dirty`
+
+**Read** — `get dirty()`
+
+Where the context changed since its entries were last accepted:
+`false` when nothing did, else the index of the first changed entry
+(an edit, insertion, removal or reorder there; may be 0). Every
+append accepts the current entries again, except a changed message
+that still carries replay data (provider fields on text, thinking or
+tool-call blocks, such as a thinking signature): that one stays
+dirty until the replay data is removed, so a provider sees an edit
+of history it already answered even when new messages followed.
+Removing trailing entries is not a change.
+
+Returns `false|number`
+
+### `Agent.Context.edit(i, message)`
 
 Replace message `i` (rebuilt from recognized fields; stale provider
 identifiers dropped).
@@ -2716,7 +1950,7 @@ identifiers dropped).
 
 Returns `object` — the stored message
 
-### `Context.editBlock(i, j, block)`
+### `Agent.Context.editBlock(i, j, block)`
 
 Replace block `j` of message `i` (the message is rebuilt).
 
@@ -2726,7 +1960,7 @@ Replace block `j` of message `i` (the message is rebuilt).
 
 Returns `object` — the stored block
 
-### `Context.errorPop()`
+### `Agent.Context.errorPop()`
 
 Retract a trailing FAILED RESPONSE before the context is submitted
 again: an assistant message carrying `error` that is still the last
@@ -2736,91 +1970,30 @@ user reply) keeps it: then it is part of the conversation.
 
 Returns `object|undefined` — the removed message
 
-### `Context.eventCallbackName(eventName)`
+### `Agent.Context.file`
 
-Map an event name to its camelCase callback name.
-"text_delta" -> "onTextDelta"; "tool_call_start" -> "onToolCallStart".
-
-- `eventName` (string) — normalized event name to convert.
-
-Returns `string` — The corresponding camelCase callback name.
-
-### `Context.eventDispatch(set, event)`
-
-Dispatch one event through a normalized callback set. Validates the event
-before invoking its matching callback; callback errors propagate to the caller.
-
-- `set` (Object) — callback set returned by `normalizeCallbacks`.
-- `event` (object) — normalized response event to dispatch.
-
-Returns `void`
-
-### `Context.EventType`
-
-The full normalized event vocabulary.
-
-### `Context.eventValid(event)`
-
-Is this a well-formed normalized response event (a known `type`;
-indexed events carry a non-negative integer `contentIndex`)?
-
-- `event` (*) — value to check.
-
-Returns `boolean` — `true` for an object with a known event type and, for indexed events, a non-negative integer `contentIndex`; otherwise `false`.
-
-### `Context.eventValidate(event)`
-
-Validate a normalized response event (used by IO to check connector
-output). Returns the same object; throws on violation.
-
-- `event` (*) — value to validate.
-
-Returns `object` — The same event object when it is valid.
-
-### `Context.FALLBACK_CONTEXT_WINDOWS`
-
-Curated context windows for the CURRENT OpenAI tier, from the models
-docs (developers.openai.com/api/docs/models, reviewed 2026-09-28 —
-the gpt-6 family lists 1.05M; o-series 200K). OpenAI's API-key
-surface publishes NO window anywhere (/models, /models/{id}, and the
-response envelope are all bare — probed with
-ai-tmp/probe-openai-models.js), so the status gauge reads this table
-while a lazy registry lookup (lib/env/model-windows.js) fills the
-endpoint's model cache. Any provider-published or looked-up value
-outranks it. Review when a new tier ships.
-
-### `Context.fallbackContextWindow(model)`
-
-The curated fallback window for one model id, or null: an exact key,
-then the longest table prefix the id starts with ("gpt-6-sol" ->
-"gpt-6", "o3-2025-04-16" -> "o3").
-
-- `model` (*) — bare model id; non-string or empty values are rejected
-
-Returns `number|null` — matching fallback token window, or `null` when none
-
-### `Context.file`
+**Read** — `get file()`
 
 Backing session file, when a logging directory exists.
 
 Returns `string|undefined` — Backing session file, when a logging directory exists.
 
-### `Context.fileOf({ id, dir } = {…})`
+### `Agent.Context.fileOf({ id, dir } = {…})`
 
 The session file holding `id` in `dir` (a metadata-line scan), or
 undefined.
 
 Returns `string|undefined`
 
-### `Context.flush()`
+### `Agent.Context.flush()`
 
-Synchronously make the CURRENT context durable (see _planFlush for
-the remove/none/append/full decision). Idempotent; a no-op when
+Synchronously make the CURRENT context durable (choosing remove, none,
+append or full rewrite). Idempotent; a no-op when
 nothing changed since the last flush. Filesystem errors propagate.
 
 Returns `void`
 
-### `Context.flushAsync()`
+### `Agent.Context.flushAsync()`
 
 Async counterpart for a live loop (Agent's request/tool turns); the
 synchronous flush() remains the crash/exit contract.
@@ -2831,22 +2004,15 @@ flush rather than being lost. I/O errors reject the returned promise.
 
 Returns `Promise<void>`
 
-### `Context.id`
+### `Agent.Context.id`
 
-Stable context identifier; use rename() to update logged identity.
+**Read** — `get id()`
 
-Returns `string` — Stable context identifier; use rename() to update logged identity.
+Canonical identifier; undefined for anonymous memory-only contexts. Use rename() to name one.
 
-### `Context.idAnonymous(id)`
+Returns `string|undefined` — Canonical identifier; undefined for anonymous memory-only contexts. Use rename() to name one.
 
-Does `id` spell an ANONYMOUS (memory-only, never logged) context:
-false, "0", "false" or "anon"?
-
-- `id` (*)
-
-Returns `boolean`
-
-### `Context.latest({ dir, cwd } = {…})`
+### `Agent.Context.latest({ dir, cwd } = {…})`
 
 The id of the most recently modified session in the folder (of
 the `cwd` origin when given), or undefined when the folder has none.
@@ -2857,13 +2023,15 @@ the `cwd` origin when given), or undefined when the folder has none.
 
 Returns `string|undefined`
 
-### `Context.get length()`
+### `Agent.Context.length`
+
+**Read** — `get length()`
 
 the message count
 
 Returns `number` — the message count
 
-### `Context.list({ dir, cwd, limit = 50 } = {…})`
+### `Agent.Context.list({ dir, cwd, limit = 50 } = {…})`
 
 Every session in the folder, LATEST FIRST (one entry per id), each
 with a small preview: the first meaningful line of the first user
@@ -2882,7 +2050,7 @@ not). Unreadable files list without a preview, never an error.
 
 Returns `Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>`
 
-### `Context.listAsync({ dir, cwd, limit = 50 } = {…})`
+### `Agent.Context.listAsync({ dir, cwd, limit = 50 } = {…})`
 
 Nonblocking counterpart of list(). It deliberately has its own async
 folder identity rather than calling sameFolder(), whose realpathSync
@@ -2890,213 +2058,27 @@ would stall the interactive loop.
 
 Returns `Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>>`
 
-### `Context.messageAppend(context, message, { merge = true } = {…})`
-
-Append a message to a caller-owned context, MERGING when possible:
-the message's own adjacent same-sub-type blocks fold first; when the
-context's last message is mergeable with it (same type, no linkage),
-their content concatenates (and re-folds) instead of appending a new
-message. Consecutive same-type text messages — queued user input,
-repeated /system, a cancel-partial assistant followed by the next
-turn's — become ONE message, so the context (and every replay of
-it) shows one merged block per sub-type, not a chain of fragments.
-Mutates the array in place.
-
-- `context` (Array<object>) — Caller-owned context array, mutated in place.
-- `message` (object) — Message or metadata record to append.
-
-Returns `object` — The stored message (the previous message when merged, otherwise the appended value).
-
-### `Context.messageAssistant(content = [])`
-
-Create an assistant message using the supplied content blocks.
-
-- `[content=[]` (Content[]) — ] - Ordered content blocks; defaults to an empty array.
-
-Returns `Message` — An assistant message whose content is the supplied array; no validation or copying is performed.
-
-### `Context.messageErrorText(msg)`
-
-Get the presentation text of a normalized assistant failure; tool-result
-boolean errors are distinct and produce an empty string.
-
-- `msg` (*) — Value whose error field is inspected.
-
-Returns `string` — The error string, `error.message`, or an empty string.
-
-### `Context.messageFile(path, buffer)`
-
-Wrap one local file's bytes in the canonical user-message content structure.
-
-- `path` (string) — Non-empty local file path passed to {@link binaryContent}.
-- `buffer` (Uint8Array) — File bytes passed to {@link binaryContent}.
-
-Returns `{type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>}` — A user message containing a single binary content block.
-
-### `Context.messageHasContent(msg)`
-
-Has this message any CONTENT a provider can consume? A block with
-no payload — a text/thinking block whose text is empty, a block
-reduced to its discriminator alone — is not content; an empty
-content array is not content either. Chat-completions dialects
-serialize an empty assistant message as `content: null` and
-providers 400 the whole request over it (corrupted sessions), so
-emptiness is a hard contract, not a style point.
-
-- `msg` (*) — Value whose `content` blocks are inspected.
-
-Returns `boolean` — True if at least one block carries provider-consumable content.
-
-### `Context.messageHasError(msg)`
-
-Does this message report a FAILED RESPONSE? A provider or transport
-failure is normalized as the response message carrying `error` — a
-text string or {message, retry} for timed rate limits — beside whatever content arrived before it (possibly
-none: the error is then its whole payload). A tool result's boolean
-`error: true` is not one: that is the tool's own (answered) failure.
-
-- `msg` (*) — Value whose normalized response error is inspected.
-
-Returns `boolean` — True for a nonempty error string or nonempty `error.message`.
-
-### `Context.messageIsRecord(msg)`
-
-Test whether a value is a metadata record: a non-array object with a
-string `type` (not a numeric message type). Records may share context and
-session files with messages; they are not messages and are skipped by
-message validators. Other components pass them through unmerged or filter
-them from provider-bound contexts as appropriate.
-
-- `msg` (*) — Value to test.
-
-Returns `boolean` — True when `msg` carries a string `type`.
-
-### `Context.messageRebuild(msg)`
-
-Rebuild a message from recognized schema fields only — the stale
-provider/cache identifier cleanup. See the module header for the
-field policy.
-
-- `msg` (object) — Message to validate and rebuild.
-
-Returns `object` — A new message containing recognized fields only.
-
-### `Context.messages()`
+### `Agent.Context.messages()`
 
 A new array of LIVE message objects. Mutating a message changes this context only, without marking it dirty; use edit/update for persistence bookkeeping. Construction deep-copies seeds, so forks never share message objects.
 
 Returns `object[]` — A new array of LIVE message objects. Mutating a message changes this context only, without marking it dirty; use edit/update for persistence bookkeeping. Construction deep-copies seeds, so forks never share message objects.
 
-### `Context.messagesParse(input)`
+### `Agent.Context.name`
 
-Parse buffered CLI input into a context array using the shared grammar.
-First, the entire input is parsed as JSON; if that is an array, it is
-returned unchanged. Otherwise, each nonblank line is parsed independently:
-message objects and valid messages in arrays are included, while other
-values become user text messages containing the original line.
+Stored or automatically derived session label; remains writable.
 
-- `input` (string) — Complete stdin text after EOF; there is no default.
+Returns `string|undefined` — Stored or automatically derived session label; remains writable.
 
-Returns `Array<object>` — The resulting context array. This is synchronous and returns no Promise.
+### `Agent.Context.origin`
 
-### `Context.messagesValid(ctx)`
-
-Test whether a value is a context array containing only core-shaped
-messages and/or metadata records.
-
-- `ctx` (*) — Value to test.
-
-Returns `boolean` — True when `ctx` is such an array; an empty array passes.
-
-### `Context.messagesValidate(ctx)`
-
-Validate a context array, allowing metadata records and validating every
-other entry as a message. Returns the same array reference without mutation.
-
-- `ctx` (*) — Value to validate as a context.
-
-Returns `Array` — The same `ctx` array, unchanged.
-
-### `Context.messageSystem(text)`
-
-Create a system message containing one text block made from the given value.
-
-- `text` (*) — Value converted to a string for the text block.
-
-Returns `Message` — A system message with one text content block.
-
-### `Context.MessageType`
-
-Numeric message types. 0 is reserved.
-
-### `Context.messageUser(text, metadata = undefined)`
-
-Create a user message from plain text or an existing ordered block array.
-Non-array input is converted to a text block; array input is used as-is.
-If supplied, metadata is spread over the message and can override its fields.
-
-- `text` (string|Content[]|*) — Plain-text value to convert, or an array of content blocks to preserve.
-- `[metadata=undefined]` (*) — Optional value whose enumerable own properties are spread last onto the message.
-
-Returns `Message` — The resulting user message.
-
-### `Context.messageValid(msg)`
-
-Test whether a value has the core message shape: a non-array object with
-a numeric `type` and an array `content`.
-
-- `msg` (*) — Value to test.
-
-Returns `boolean` — True when `msg` has the core message shape.
-
-### `Context.messageValidate(msg, at = "message")`
-
-Validate a message's CORE SHAPE, throwing on a violation.
-Returns the SAME object reference — metadata is never copied,
-stripped, or reordered. Emptiness is deliberately NOT part of the
-shape: appendMessage REFUSES (drops) an empty incoming message,
-and IO DROPS empty messages from every provider-bound context
-(no dialect can carry one), while a merge that consumed an
-incoming message's whole payload into the previous message may
-legitimately leave it empty inside the live array.
-
-- `msg` (*) — Value to validate.
-- `[at="message"]` (string) — Address hint for error messages (e.g. "context[2]").
-
-Returns `object` — The same `msg` reference, unchanged.
-
-### `Context.MIME_BY_EXTENSION`
-
-Context-owned media-type map and byte detection for content blocks.
-
-### `Context.mimeDetect({ path, buffer } = {…})`
-
-Determine a media type from a filename extension, then recognized leading bytes.
-
-Returns `string` — The matching media type, or `application/octet-stream` when neither input identifies a supported type.
-
-### `Context.mimeOf(block)`
-
-Return a content block's media type, preferring its non-empty `mimetype`
-field and then its non-empty `mime` field.
-
-- `block` (Object|null|undefined) — Block to inspect; nullish values are allowed.
-
-Returns `string|undefined` — The selected media type, or `undefined` when neither field is a non-empty string.
-
-### `Context.name`
-
-Stored or automatically derived session label.
-
-Returns `string|undefined` — Stored or automatically derived session label.
-
-### `Context.origin`
+**Read** — `get origin()`
 
 Origin project folder recorded in metadata.
 
 Returns `string` — Origin project folder recorded in metadata.
 
-### `Context.originOf({ id, dir } = {…})`
+### `Agent.Context.originOf({ id, dir } = {…})`
 
 The ORIGIN FOLDER recorded in a session file's metadata line (the
 cwd the session ran in), or undefined (no such session). A
@@ -3109,20 +2091,39 @@ session resumes only in an Env of this folder; an explicit
 
 Returns `string|undefined`
 
-### `Context.pop()`
+### `Agent.Context.planUsage`
+
+**Read** — `get planUsage()`
+
+Last complete provider quota/metadata deep snapshot. Replaces reports; never persisted.
+
+**Write** — `set planUsage(report = {…})`
+
+Replace a provider report with an independent bounded canonical snapshot.
+Canonical quota fields outrank count/percentage and snake-case aliases;
+windowSeconds is a duration, never a reset. Known Anthropic unified header
+details become window/account state; unconsumed details remain available.
+
+- `[report={}]` (object) — Complete plan report; neither mutated nor retained.
+
+Returns `void` — No result. Idempotent; no failures for JSON data.
+
+Effects — Replaces in-memory quotas/metadata only; never persisted or added to Agent lifetime totals.
+
+### `Agent.Context.pop()`
 
 the removed last message
 
 Returns `object|undefined` — the removed last message
 
-### `Context.prepend(messages)`
+### `Agent.Context.prepend(messages)`
 
 Insert messages at the FRONT — e.g. an Agent's seeded system
 prompt, always the first message(s) of a fresh context.
 
 - `messages` (object[])
 
-### `Context.remove(indexes)`
+### `Agent.Context.remove(indexes)`
 
 Remove the messages at `indexes`.
 
@@ -3130,7 +2131,7 @@ Remove the messages at `indexes`.
 
 Returns `object[]` — the removed messages
 
-### `Context.rename(newId)`
+### `Agent.Context.rename(newId)`
 
 Rename the session: BOTH the stable `id` and the file's NAME
 segment become `newId` (the same session — the date/uuid8 prefix
@@ -3142,7 +2143,7 @@ file name no longer being a direct function of it).
 
 Returns `{id: string, file: string}`
 
-### `Context.renameById({ id, name, dir } = {…})`
+### `Agent.Context.renameById({ id, name, dir } = {…})`
 
 Rename a STORED session by id (the sidebar/menu path for a session
 no store holds open — a live one renames through its store): loads
@@ -3155,7 +2156,9 @@ it, renames it (see rename()) and closes it again.
 
 Returns `{id: string, file: string}`
 
-### `Context.resume({ id, dir, save = true } = {…})`
+Throws — {Error} when no such session exists or the name is taken
+
+### `Agent.Context.resume({ id, dir, save = true } = {…})`
 
 Load a session file into a fresh store holding its live context.
 The file is found by a directory scan matching `id` against each
@@ -3171,7 +2174,7 @@ loadMessages).
 
 Returns `Context` — the loaded context
 
-### `Context.rollback(i)`
+### `Agent.Context.rollback(i)`
 
 Remove every message at index >= i (RangeError unless i is an
 existing index).
@@ -3180,22 +2183,26 @@ existing index).
 
 Returns `object[]` — the removed messages
 
-### `Context.get save()`
+### `Agent.Context.save`
+
+**Read** — `get save()`
 
 whether this context is logged to disk
 
 Returns `boolean` — whether this context is logged to disk
 
-### `Context.set save(value)`
+**Write** — `set save(value)`
 
 Enable or disable persistence without replacing the live context. Enabling
-saving makes the complete current context eligible for the next flush.
+saving gives an anonymous context a fresh id and makes the complete current context eligible for the next flush.
 
 - `value` (boolean)
 
 Returns `void` — Read save after assignment for the logging state.
 
-### `Context.get settings()`
+### `Agent.Context.settings`
+
+**Read** — `get settings()`
 
 the owner's settings snapshot riding the
  session file (undefined: none recorded — resume keeps the caller's
@@ -3203,7 +2210,7 @@ the owner's settings snapshot riding the
 
 Returns `object|undefined` — the owner's settings snapshot riding the session file (undefined: none recorded — resume keeps the caller's configuration)
 
-### `Context.set settings(value)`
+**Write** — `set settings(value)`
 
 Record the owner's SETTINGS snapshot (an Agent's (safe, thinking,
   endpoint/model, name, … — Agent writes it; the store only persists
@@ -3214,44 +2221,20 @@ Record the owner's SETTINGS snapshot (an Agent's (safe, thinking,
 
 - `value` (object)
 
-### `Context.get summary()`
+### `Agent.Context.summary`
+
+**Read** — `get summary()`
 
 one line for status/command output:
  `<id> — <file>` while logging, `<id> — not logged (memory only)` otherwise
 
 Returns `string` — one line for status/command output: `<id> — <file>` while logging, `<id> — not logged (memory only)` otherwise
 
-### `Context.toJSON()`
+### `Agent.Context.toJSON()`
 
 JSON form: the message array.
 
-### `Context.TOKENS_PER_WORD`
-
-tokens ≈ words × 4/3 (token-per-word likelihood ratio)
-
-### `Context.tokensEstimate(text)`
-
-Estimate a token count for text, rounding the heuristic up to a whole token.
-Non-string inputs produce zero.
-
-- `text` (*) — value to estimate when it is a string
-
-Returns `number` — estimated whole-token count
-
-### `Context.tokensEstimateMessages(context = [])`
-
-Estimated token count of a whole context (the input side of a
-request — also the live "window consumption" readout when no
-provider-reported count exists yet). Counts words per block: the
-historical one-giant-string + word-array version allocated several
-full copies of the context per call, per frame. Updates the internal
-per-message memo cache as needed.
-
-- `[context=[]` (Array) — ] - context messages; each message's supported content-block text and arguments are counted
-
-Returns `number` — estimated input tokens, rounded up to a whole token
-
-### `Context.update(fn)`
+### `Agent.Context.update(fn)`
 
 A batch in-place change (a repair pass): `fn` receives the live
 message array and returns true when it changed anything — the
@@ -3262,57 +2245,23 @@ never mutated.
 
 Returns `boolean` — whether anything changed
 
-### `Context.usageEstimate(context = [], message)`
+### `Agent.Context.uuid`
 
-Estimate usage from the request context and the assembled response.
-
-- `[context=[]` (Array) — ] - request messages used for input estimation
-- `[message=undefined]` (object) — assembled assistant message used for output estimation; its content text/arguments are concatenated before estimating
-
-Returns `{inputTokens:number, outputTokens:number, source:"estimate"}` — estimated usage
-
-### `Context.usageFinalize(reported, context, message)`
-
-Normalize provider-reported usage, or fall back to estimation.
-Provider numbers win per-field only as a whole: a partial/invalid
-report is treated as absent (honest fallback, no mixed sources).
-
-- `reported` (*) — connector-extracted usage; accepted only when both inputTokens and outputTokens are finite numbers, with finite cost copied through when present
-- `[context=undefined]` (Array) — request context for fallback input estimation; when omitted, the estimator's empty-array default applies
-- `[message=undefined]` (object) — assembled message for fallback output estimation
-
-Returns `{inputTokens:number, outputTokens:number, source:string, cost?:number}` — provider usage or estimated fallback
-
-### `Context.usageSummary(usage)`
-
-Format usage as a one-line human-readable summary for host diagnostics.
-Missing/falsy usage returns `usage: unknown`; a finite cost is included to
-four decimal places. Does not mutate the supplied usage object.
-
-- `usage` (object) — usage envelope with inputTokens, outputTokens, source, and optional cost
-
-Returns `string` — formatted usage summary
-
-### `Context.uuid`
+**Read** — `get uuid()`
 
 Persistent session UUID.
 
 Returns `string` — Persistent session UUID.
 
-### `Context.wordCount(text)`
+### `Agent.Context.ContentType = Object.freeze({…})`
 
-Count runs of non-whitespace characters without allocating a split array.
-Non-string and empty inputs produce zero.
+Content block discriminators.
 
-- `text` (*) — value to count when it is a string
-
-Returns `number` — number of whitespace-separated words
-
-### `Context.EventType = Object.freeze({…})`
+### `Agent.Context.EventType = Object.freeze({…})`
 
 The full normalized event vocabulary.
 
-### `Context.FALLBACK_CONTEXT_WINDOWS = Object.freeze({…})`
+### `Agent.Context.FALLBACK_CONTEXT_WINDOWS = Object.freeze({…})`
 
 Curated context windows for the CURRENT OpenAI tier, from the models
 docs (developers.openai.com/api/docs/models, reviewed 2026-09-28 —
@@ -3324,19 +2273,19 @@ while a lazy registry lookup (lib/env/model-windows.js) fills the
 endpoint's model cache. Any provider-published or looked-up value
 outranks it. Review when a new tier ships.
 
-### `Context.MessageType = Object.freeze({…})`
-
-Numeric message types. 0 is reserved.
-
-### `Context.MIME_BY_EXTENSION = Object.freeze({…})`
+### `Agent.Context.MIME_BY_EXTENSION = Object.freeze({…})`
 
 Context-owned media-type map and byte detection for content blocks.
 
-### `Context.TOKENS_PER_WORD = 4 / 3`
+### `Agent.Context.MessageType = Object.freeze({…})`
+
+Numeric message types. 0 is reserved.
+
+### `Agent.Context.TOKENS_PER_WORD = 4 / 3`
 
 tokens ≈ words × 4/3 (token-per-word likelihood ratio)
 
-### `Context.assemblerCallbacks(assembler)`
+### `Agent.Context.assemblerCallbacks(assembler)`
 
 Build the camelCase callback set used by Context to feed response events to
 an assembler. Includes callbacks for start, text/thinking block events,
@@ -3346,7 +2295,11 @@ tool-call events, done, and error.
 
 Returns `Object<string, function(object): void>` — Callbacks keyed by names such as `onStart`, `onTextDelta`, `onDone`, and `onError`.
 
-### `Context.assemblerCreate()`
+Effects — Creates a new callback object; each callback delegates to assembler.consume and therefore mutates that assembler.
+
+Throws — Throws if assembler is missing or does not provide consume, or if event processing throws when a callback is invoked.
+
+### `Agent.Context.assemblerCreate()`
 
 Create an assembler that folds normalized response events into one
 assistant message. Events mutate the in-progress message; valid message
@@ -3356,7 +2309,9 @@ message remains partial until completion and is exposed by reference.
 
 Returns `{consume: (event: object) => void, message: () => object}` — The event consumer and accessor for the current message.
 
-### `Context.callbacksNormalize(callbacks = {…}, binding = {…})`
+Throws — Creating the assembler does not intentionally throw. Its returned `consume` method can propagate errors from malformed events or message mutations; JSON parse errors for tool arguments are suppressed.
+
+### `Agent.Context.callbacksNormalize(callbacks = {…}, binding = {…})`
 
 Build the full callback set for a binding.
 
@@ -3368,7 +2323,9 @@ Build the full callback set for a binding.
 
 Returns `Object` — Complete callback set keyed by camelCase names.
 
-### `Context.contentBinary(path, buffer)`
+Throws — {Error} If an invoked binding handler throws; its error propagates to the caller.
+
+### `Agent.Context.contentBinary(path, buffer)`
 
 Build a canonical base64 binary Context block without exposing the source path.
 
@@ -3377,7 +2334,9 @@ Build a canonical base64 binary Context block without exposing the source path.
 
 Returns `{type: "binary", mimetype: string, filename: string, content: string}` — A block containing the basename, detected media type, and base64 data.
 
-### `Context.contentIndexer()`
+Throws — {TypeError} If path is not a non-empty string or buffer is not a Uint8Array.
+
+### `Agent.Context.contentIndexer()`
 
 Create a per-request content-block indexer for a provider translator. `of`
 reuses an index for a previously seen wire-item key, while `next` always
@@ -3385,7 +2344,7 @@ reserves a fresh index; indexes are dense and follow first appearance.
 
 Returns `{of: (key: *) => number, next: () => number}` — Indexing operations.
 
-### `Context.contentText(text)`
+### `Agent.Context.contentText(text)`
 
 Wrap a value's string representation in a text content block.
 
@@ -3393,7 +2352,9 @@ Wrap a value's string representation in a text content block.
 
 Returns `TextContent` — A block with `type: ContentType.Text` and the converted text.
 
-### `Context.eventCallbackName(eventName)`
+Throws — {*} Propagates a thrown value encountered during string conversion.
+
+### `Agent.Context.eventCallbackName(eventName)`
 
 Map an event name to its camelCase callback name.
 "text_delta" -> "onTextDelta"; "tool_call_start" -> "onToolCallStart".
@@ -3402,7 +2363,9 @@ Map an event name to its camelCase callback name.
 
 Returns `string` — The corresponding camelCase callback name.
 
-### `Context.eventDispatch(set, event)`
+Throws — {TypeError} If `eventName` does not support `split` (for example, it is not a string).
+
+### `Agent.Context.eventDispatch(set, event)`
 
 Dispatch one event through a normalized callback set. Validates the event
 before invoking its matching callback; callback errors propagate to the caller.
@@ -3412,7 +2375,9 @@ before invoking its matching callback; callback errors propagate to the caller.
 
 Returns `void`
 
-### `Context.eventValid(event)`
+Throws — {TypeError} If `event` is invalid or the callback cannot be invoked; errors thrown by the callback also propagate unchanged.
+
+### `Agent.Context.eventValid(event)`
 
 Is this a well-formed normalized response event (a known `type`;
 indexed events carry a non-negative integer `contentIndex`)?
@@ -3421,7 +2386,7 @@ indexed events carry a non-negative integer `contentIndex`)?
 
 Returns `boolean` — `true` for an object with a known event type and, for indexed events, a non-negative integer `contentIndex`; otherwise `false`.
 
-### `Context.eventValidate(event)`
+### `Agent.Context.eventValidate(event)`
 
 Validate a normalized response event (used by IO to check connector
 output). Returns the same object; throws on violation.
@@ -3430,7 +2395,9 @@ output). Returns the same object; throws on violation.
 
 Returns `object` — The same event object when it is valid.
 
-### `Context.fallbackContextWindow(model)`
+Throws — {TypeError} If the value is not a well-formed normalized response event.
+
+### `Agent.Context.fallbackContextWindow(model)`
 
 The curated fallback window for one model id, or null: an exact key,
 then the longest table prefix the id starts with ("gpt-6-sol" ->
@@ -3440,7 +2407,7 @@ then the longest table prefix the id starts with ("gpt-6-sol" ->
 
 Returns `number|null` — matching fallback token window, or `null` when none
 
-### `Context.messageAppend(context, message, { merge = true } = {…})`
+### `Agent.Context.messageAppend(context, message, { merge = true } = {…})`
 
 Append a message to a caller-owned context, MERGING when possible:
 the message's own adjacent same-sub-type blocks fold first; when the
@@ -3455,9 +2422,13 @@ Mutates the array in place.
 - `context` (Array<object>) — Caller-owned context array, mutated in place.
 - `message` (object) — Message or metadata record to append.
 
-Returns `object` — The stored message (the previous message when merged, otherwise the appended value).
+Returns `object|undefined` — The stored message (the previous message when merged, otherwise the appended value), or `undefined` when an empty message is skipped.
 
-### `Context.messageAssistant(content = [])`
+Throws — {TypeError} If context/message validation fails.
+
+Throws — {TypeError} If folding or merge comparisons fail during processing.
+
+### `Agent.Context.messageAssistant(content = [])`
 
 Create an assistant message using the supplied content blocks.
 
@@ -3465,7 +2436,7 @@ Create an assistant message using the supplied content blocks.
 
 Returns `Message` — An assistant message whose content is the supplied array; no validation or copying is performed.
 
-### `Context.messageErrorText(msg)`
+### `Agent.Context.messageErrorText(msg)`
 
 Get the presentation text of a normalized assistant failure; tool-result
 boolean errors are distinct and produce an empty string.
@@ -3474,7 +2445,7 @@ boolean errors are distinct and produce an empty string.
 
 Returns `string` — The error string, `error.message`, or an empty string.
 
-### `Context.messageFile(path, buffer)`
+### `Agent.Context.messageFile(path, buffer)`
 
 Wrap one local file's bytes in the canonical user-message content structure.
 
@@ -3483,7 +2454,9 @@ Wrap one local file's bytes in the canonical user-message content structure.
 
 Returns `{type: 2, content: Array<{type: "binary", mimetype: string, filename: string, content: string}>}` — A user message containing a single binary content block.
 
-### `Context.messageHasContent(msg)`
+Throws — {TypeError} If either argument fails {@link binaryContent}'s validation.
+
+### `Agent.Context.messageHasContent(msg)`
 
 Has this message any CONTENT a provider can consume? A block with
 no payload — a text/thinking block whose text is empty, a block
@@ -3497,7 +2470,7 @@ emptiness is a hard contract, not a style point.
 
 Returns `boolean` — True if at least one block carries provider-consumable content.
 
-### `Context.messageHasError(msg)`
+### `Agent.Context.messageHasError(msg)`
 
 Does this message report a FAILED RESPONSE? A provider or transport
 failure is normalized as the response message carrying `error` — a
@@ -3509,7 +2482,7 @@ none: the error is then its whole payload). A tool result's boolean
 
 Returns `boolean` — True for a nonempty error string or nonempty `error.message`.
 
-### `Context.messageIsRecord(msg)`
+### `Agent.Context.messageIsRecord(msg)`
 
 Test whether a value is a metadata record: a non-array object with a
 string `type` (not a numeric message type). Records may share context and
@@ -3521,7 +2494,7 @@ them from provider-bound contexts as appropriate.
 
 Returns `boolean` — True when `msg` carries a string `type`.
 
-### `Context.messageRebuild(msg)`
+### `Agent.Context.messageRebuild(msg)`
 
 Rebuild a message from recognized schema fields only — the stale
 provider/cache identifier cleanup. See the module header for the
@@ -3531,7 +2504,59 @@ field policy.
 
 Returns `object` — A new message containing recognized fields only.
 
-### `Context.messagesParse(input)`
+Throws — {TypeError} If the message is invalid.
+
+### `Agent.Context.messageSystem(text)`
+
+Create a system message containing one text block made from the given value.
+
+- `text` (*) — Value converted to a string for the text block.
+
+Returns `Message` — A system message with one text content block.
+
+Throws — {*} Propagates a thrown value encountered during string conversion.
+
+### `Agent.Context.messageUser(text, metadata = undefined)`
+
+Create a user message from plain text or an existing ordered block array.
+Non-array input is converted to a text block; array input is used as-is.
+If supplied, metadata is spread over the message and can override its fields.
+
+- `text` (string|Content[]|*) — Plain-text value to convert, or an array of content blocks to preserve.
+- `[metadata=undefined]` (*) — Optional value whose enumerable own properties are spread last onto the message.
+
+Returns `Message` — The resulting user message.
+
+Throws — {*} Propagates a thrown value from text conversion or metadata getters/spread.
+
+### `Agent.Context.messageValid(msg)`
+
+Test whether a value has the core message shape: a non-array object with
+a numeric `type` and an array `content`.
+
+- `msg` (*) — Value to test.
+
+Returns `boolean` — True when `msg` has the core message shape.
+
+### `Agent.Context.messageValidate(msg, at = "message")`
+
+Validate a message's CORE SHAPE, throwing on a violation.
+Returns the SAME object reference — metadata is never copied,
+stripped, or reordered. Emptiness is deliberately NOT part of the
+shape: appendMessage WARNS and drops an empty incoming message,
+and IO DROPS empty messages from every provider-bound context
+(no dialect can carry one), while a merge that consumed an
+incoming message's whole payload into the previous message may
+legitimately leave it empty inside the live array.
+
+- `msg` (*) — Value to validate.
+- `[at="message"]` (string) — Address hint for error messages (e.g. "context[2]").
+
+Returns `object` — The same `msg` reference, unchanged.
+
+Throws — {TypeError} If `msg` is not a non-array object with a numeric `type` and array `content`; the error includes the address hint.
+
+### `Agent.Context.messagesParse(input)`
 
 Parse buffered CLI input into a context array using the shared grammar.
 First, the entire input is parsed as JSON; if that is an array, it is
@@ -3543,7 +2568,11 @@ values become user text messages containing the original line.
 
 Returns `Array<object>` — The resulting context array. This is synchronous and returns no Promise.
 
-### `Context.messagesValid(ctx)`
+Throws — {TypeError} If input is not a string and line processing attempts to call `split` on it.
+
+Effects — Pure parser: does not read stdin or otherwise perform I/O. JSON parse errors are caught and treated as non-JSON input.
+
+### `Agent.Context.messagesValid(ctx)`
 
 Test whether a value is a context array containing only core-shaped
 messages and/or metadata records.
@@ -3552,7 +2581,7 @@ messages and/or metadata records.
 
 Returns `boolean` — True when `ctx` is such an array; an empty array passes.
 
-### `Context.messagesValidate(ctx)`
+### `Agent.Context.messagesValidate(ctx)`
 
 Validate a context array, allowing metadata records and validating every
 other entry as a message. Returns the same array reference without mutation.
@@ -3561,57 +2590,17 @@ other entry as a message. Returns the same array reference without mutation.
 
 Returns `Array` — The same `ctx` array, unchanged.
 
-### `Context.messageSystem(text)`
+Throws — {TypeError} If `ctx` is not an array or any non-record entry fails message validation; entry errors identify their context index.
 
-Create a system message containing one text block made from the given value.
-
-- `text` (*) — Value converted to a string for the text block.
-
-Returns `Message` — A system message with one text content block.
-
-### `Context.messageUser(text, metadata = undefined)`
-
-Create a user message from plain text or an existing ordered block array.
-Non-array input is converted to a text block; array input is used as-is.
-If supplied, metadata is spread over the message and can override its fields.
-
-- `text` (string|Content[]|*) — Plain-text value to convert, or an array of content blocks to preserve.
-- `[metadata=undefined]` (*) — Optional value whose enumerable own properties are spread last onto the message.
-
-Returns `Message` — The resulting user message.
-
-### `Context.messageValid(msg)`
-
-Test whether a value has the core message shape: a non-array object with
-a numeric `type` and an array `content`.
-
-- `msg` (*) — Value to test.
-
-Returns `boolean` — True when `msg` has the core message shape.
-
-### `Context.messageValidate(msg, at = "message")`
-
-Validate a message's CORE SHAPE, throwing on a violation.
-Returns the SAME object reference — metadata is never copied,
-stripped, or reordered. Emptiness is deliberately NOT part of the
-shape: appendMessage REFUSES (drops) an empty incoming message,
-and IO DROPS empty messages from every provider-bound context
-(no dialect can carry one), while a merge that consumed an
-incoming message's whole payload into the previous message may
-legitimately leave it empty inside the live array.
-
-- `msg` (*) — Value to validate.
-- `[at="message"]` (string) — Address hint for error messages (e.g. "context[2]").
-
-Returns `object` — The same `msg` reference, unchanged.
-
-### `Context.mimeDetect({ path, buffer } = {…})`
+### `Agent.Context.mimeDetect({ path, buffer } = {…})`
 
 Determine a media type from a filename extension, then recognized leading bytes.
 
 Returns `string` — The matching media type, or `application/octet-stream` when neither input identifies a supported type.
 
-### `Context.mimeOf(block)`
+Throws — {TypeError} If options is `null` and therefore cannot be destructured.
+
+### `Agent.Context.mimeOf(block)`
 
 Return a content block's media type, preferring its non-empty `mimetype`
 field and then its non-empty `mime` field.
@@ -3620,7 +2609,9 @@ field and then its non-empty `mime` field.
 
 Returns `string|undefined` — The selected media type, or `undefined` when neither field is a non-empty string.
 
-### `Context.tokensEstimate(text)`
+Throws — {*} Propagates a thrown value from a getter for `mimetype` or `mime`; accessors may be read more than once.
+
+### `Agent.Context.tokensEstimate(text)`
 
 Estimate a token count for text, rounding the heuristic up to a whole token.
 Non-string inputs produce zero.
@@ -3629,20 +2620,47 @@ Non-string inputs produce zero.
 
 Returns `number` — estimated whole-token count
 
-### `Context.tokensEstimateMessages(context = [])`
+### `Agent.Context.tokensEstimateMessages(context = [])`
 
 Estimated token count of a whole context (the input side of a
 request — also the live "window consumption" readout when no
 provider-reported count exists yet). Counts words per block: the
 historical one-giant-string + word-array version allocated several
-full copies of the context per call, per frame. Updates the internal
-per-message memo cache as needed.
+full copies of the context per call, per frame. Reuses per-block scans only
+while the current text/argument string values are unchanged; live in-place
+field and content-array edits are observed on the next call.
 
 - `[context=[]` (Array) — ] - context messages; each message's supported content-block text and arguments are counted
 
 Returns `number` — estimated input tokens, rounded up to a whole token
 
-### `Context.usageEstimate(context = [], message)`
+Throws — {TypeError} if `context` is not iterable
+
+### `Agent.Context.usageAdd(total, reported)`
+
+Add one request report to lifetime usage. Sum only schema counters; recompute
+totalTokens; replace (and clear absent) metadata/details with the latest report.
+
+- `total` (object) — Previous totals; neither mutated nor retained.
+- `reported` (*) — Request usage, normalized or wire-shaped; never retained.
+
+Returns `object` — New independent totals. Non-idempotent: call once per billed attempt.
+
+Effects — None. Invalid reports are ignored; no failures for JSON input.
+
+### `Agent.Context.usageDetails(value)`
+
+Copy bounded JSON-safe usage/plan extensions, omitting invalid values, cycles,
+attribution and prototype keys. Limits: 256 nodes, depth 6, 16 array entries,
+1024 characters/string, 128/key and 16K total text. Truncation adds no counters.
+
+- `value` (*) — Untrusted details; neither mutated nor retained.
+
+Returns `*` — Independent bounded JSON value, or undefined for unsupported input.
+
+Effects — None. Idempotent; no failures for JSON data. Work is bounded by these limits.
+
+### `Agent.Context.usageEstimate(context = [], message)`
 
 Estimate usage from the request context and the assembled response.
 
@@ -3651,29 +2669,50 @@ Estimate usage from the request context and the assembled response.
 
 Returns `{inputTokens:number, outputTokens:number, source:"estimate"}` — estimated usage
 
-### `Context.usageFinalize(reported, context, message)`
+Throws — {TypeError} if `context` is not iterable
+
+### `Agent.Context.usageFinalize(reported, context, message)`
 
 Normalize provider-reported usage, or fall back to estimation.
-Provider numbers win per-field only as a whole: a partial/invalid
-report is treated as absent (honest fallback, no mixed sources).
+Provider token counts win only as a complete pair: partial/invalid
+counts use estimation (no mixed token sources), retaining normalized counters,
+finite reported cost and bounded extensions. Input is neither mutated nor retained.
+Repeated calls with the same report/context/message are idempotent; no side effects.
 
-- `reported` (*) — connector-extracted usage; accepted only when both inputTokens and outputTokens are finite numbers, with finite cost copied through when present
+- `reported` (*) — connector-extracted usage; accepted only when both inputTokens and outputTokens (or known aliases) are nonnegative finite numbers. Known aliases are consumed; unknown fields become bounded latest-report details
 - `[context=undefined]` (Array) — request context for fallback input estimation; when omitted, the estimator's empty-array default applies
 - `[message=undefined]` (object) — assembled message for fallback output estimation
 
-Returns `{inputTokens:number, outputTokens:number, source:string, cost?:number}` — provider usage or estimated fallback
+Returns `{inputTokens:number, outputTokens:number, totalTokens:number, source:string, cost?:number, [key: string]: *}` — independent canonical snapshot with reported or estimated token counts
 
-### `Context.usageSummary(usage)`
+Throws — {TypeError} if fallback estimation is needed and `context` is not iterable
 
-Format usage as a one-line human-readable summary for host diagnostics.
-Missing/falsy usage returns `usage: unknown`; a finite cost is included to
-four decimal places. Does not mutate the supplied usage object.
+### `Agent.Context.usageHeaders(headers, { exclude = [] } = {…})`
 
-- `usage` (object) — usage envelope with inputTokens, outputTokens, source, and optional cost
+Capture bounded unrepresented rate-limit header extensions, excluding unrelated headers.
 
-Returns `string` — formatted usage summary
+- `headers` (Headers|object) — Response headers exposing forEach; neither retained nor mutated; absent input returns an empty map.
+- `[options={}]` (object) — Header filtering options.
+- `[options.exclude=[]` (string[]) — ] Header names already represented as quotas, case-insensitive.
 
-### `Context.wordCount(text)`
+Returns `Object<string, string>` — Independent bounded header map. Idempotent, no side effects.
+
+Throws — {TypeError} If exclude is not an array of strings; correct options before retrying.
+
+### `Agent.Context.usageNormalize(reported)`
+
+Normalize a request's usage without estimating tokens. Canonical fields outrank
+aliases; cache/reasoning detail fields outrank legacy root fields, reasoning
+outranks thinking. All token counts include cached/reasoning subsets, not extras.
+Unknown extensions become bounded latest-report `details`; consumed aliases disappear.
+
+- `reported` (*) — Provider data; neither mutated nor retained. Invalid fields are omitted.
+
+Returns `object` — Independent snapshot with nonnegative counters, finite reported cost, derived totalTokens, optional serviceTier/inferenceGeo and bounded details. Idempotent.
+
+Effects — None. No failures for JSON input; detail processing is bounded.
+
+### `Agent.Context.wordCount(text)`
 
 Count runs of non-whitespace characters without allocating a split array.
 Non-string and empty inputs produce zero.
@@ -3682,73 +2721,81 @@ Non-string and empty inputs produce zero.
 
 Returns `number` — number of whitespace-separated words
 
-## Env
+## Agent.Env
 
 ### `class Env`
 
 The sole global environment object: settings, auth, providers,
 tools, and the titled folder surface.
 
-### `Env._attachHooks(agent)`
+### `Agent.Env.EVENT`
 
-Attach the loaded hooks to an Agent. @param {object} agent @returns {void}
+The Env event vocabulary: Symbol constants for onEvent/offEvent.
+Env events report what EXISTS in this environment: the native
+MODELS_CHANGED (models() answers differently — re-read it) and the
+membership events plugins install (Agent's AGENT_ADDED/AGENT_REMOVED);
+what an object does is that object's own events.
+SETTINGS_CHANGED announces changed settings values (once per storage or
+poll round). SETTINGS_LOADED announces a finished poll round that read
+files, including equal versions. Reads never emit either.
 
-### `Env._detachHooks(agent)`
+### `Agent.Env.SettingsStore`
 
-Remove hook registrations on Agent close. @param {object} agent @returns {void}
+The settings aggregator Env builds its settings from (lib/env/settings-store.js):
+an ordered list of file, folder/glob and memory sources, last wins, with an
+optional parent store; immediate reads and writes, grouped asynchronous
+`loaded`/`saved`/`updated` notices. Usable on its own for any JSON settings.
+Read the [SettingsStore contract and standalone examples](/api/contracts/#settings%20store)
+for constructor/source specs, precedence, node handles, methods and errors.
 
-### `Env._hooksRefresh()`
-
-Load/reload trusted hook observers for this environment. @returns {Promise<void>}
-
-### `Env.agentAdd(agent)`
-
-Register an active Agent (Agent construction owns this call); it
-stays until `Agent.close()` removes it.
-
-- `agent` (object)
-
-Returns `object` — the registered agent
-
-### `Env.agentCreate(options = {…})`
+### `Agent.Env.async agentCreate(options = {…})`
 
 Create an Agent over this env (`env` is always this env).
 
 - `[options]` (object) — Agent constructor options
 
-Returns `object` — the new, registered Agent
+Returns `Promise<Agent>` — the new, registered Agent
 
-### `Env.agentRemove(agent)`
+Throws — {Error} when this env is closed (env.closed)
 
-Remove an active Agent (`Agent.close()` owns normal use).
+### `Agent.Env.agents()`
 
-- `agent` (object)
-
-Returns `boolean` — whether the agent was registered
-
-### `Env.agents()`
-
-Snapshot the active Agents in registration order. Closing an Agent
-removes it synchronously; inactivity and garbage collection never
-change this lifecycle registry.
+Snapshot registered Agents in registration order. Awaiting Agent.close()
+ensures its owned teardown and removal; close-marked Agents remain
+registered until releases settle. Inactivity and garbage collection
+never change this lifecycle registry.
 
 Returns `object[]`
 
-### `Env.close()`
+### `Agent.Env.close()`
+
+Release only the static global settings facade, awaiting pending I/O. Does
+not close registered project Envs. Repeated/concurrent calls are idempotent;
+the next static settings/ready access after completion acquires fresh state.
+
+Returns `Promise<void>` — Resolves after release or rejects on persistence failure.
+
+### `Agent.Env.close()`
 
 Release what this Env runs in the background: pending model-list
-retries stop, every MCP server it started is killed, and held
-settings writes reach disk. Idempotent; never throws. A closed Env
-leaves Env.envs (env.closed) but stays readable (and an MCP
-call reconnects); it creates no new agents.
+retries stop, every MCP server it started is killed, and its settings
+subscription and source graph close. Idempotent; rejects after cleanup if an owned release fails. A closed Env
+leaves Env.envs (env.closed) but stays readable; it does not start
+new MCP connections or create new agents.
 
-### `Env.get closed()`
+Returns `Promise<void>` — Resolves after owned teardown and pending settings persistence; concurrent/repeated calls await the same outcome.
+
+Throws — {Error|AggregateError} One or more release failures, after all releases have been attempted.
+
+### `Agent.Env.closed`
+
+**Read** — `get closed()`
 
 whether close() has run (the Env left Env.envs).
 
 Returns `boolean` — whether close() has run (the Env left Env.envs).
 
-### `Env.connection(selector, { remember = true } = {…})`
+### `Agent.Env.connection(selector, { remember = true } = {…})`
 
 IO's handle on one pair: {endpoint, model, Protocol, url, settings,
 authSet(data), authReload(current)} (lib/env/models.js). An unknown
@@ -3758,65 +2805,41 @@ endpoint, or a model its non-empty catalog lacks, throws.
 
 Returns `object`
 
-### `Env.constructor({ dir = PACKAGE_DIR, settingsDir, cwd = process.cwd(), settings, sessionsDir, providers, toolDirs, skillDirs, promptDirs, themes = false, auth = true } = {…})`
+### `Agent.Env.constructor(options = {…}, acquisition)`
 
-Build the environment: scan and merge the layered settings (the
+Internal construction; public consumers acquire a ready Env with Env.open(path, options).
+Build the environment: assemble layered source nodes (the
 package folder, user settings folder, and namespaced project
-files — see lib/env/load.js), seed the titled folder surface,
+files — see lib/env/source-graph.js), seed the titled folder surface,
 register the built-in tools. Providers and tools load afterwards
 (loadProviders/loadTools).
 
 - `[options]` (Object)
 - `[options.dir]` (string) — package folder to scan (default: this package's root)
 - `[options.settingsDir]` (string|null) — the USER SETTINGS folder (default: the namespace setting or namespace home folder, created when missing) — scanned after the package folder and the target of every dynamic settings write; null disables the layer (embedded/test hosts)
-- `[options.cwd]` (string) — the PROJECT folder (default: process.cwd()) — separate from `dir` so a test (or an embedding host) can isolate both independently; consumed by the folder surface below and by the system prompt's project-local AGENTS.md layer (env.systemPrompt())
+- `[options.cwd]` (string) — the PROJECT folder (default: process.cwd()); constructor-internal, not the Env.folder property — separate from `dir` so a test (or an embedding host) can isolate both independently; consumed by the folder surface below and by the system prompt's project-local AGENTS.md layer (env.systemPrompt())
 - `[options.settings]` (Object) — explicit settings, merged LAST (override)
 - `[options.sessionsDir]` (string) — ephemeral session log folder for this Env only; relative to cwd, overrides configured sessions without writing settings. Must be a non-empty path.
 - `[options.providers]` (Object<string, Function>) — extra provider classes by name (embedders, tests); they take precedence over a scanned class of the same name
-- `[options.toolDirs]` (string[]) — the tool roots Env.create scans instead of the default ones (embedders, tests)
+- `[options.toolDirs]` (string[]) — the tool roots initialization scans instead of the default ones (embedders, tests)
 - `[options.skillDirs]` (string[]) — the skill roots read instead of the accumulated default layers (embedders, tests)
 - `[options.promptDirs]` (string[]) — the prompt roots, likewise
-- `[options.themes=false]` (boolean) — scan trusted theme roots; application hosts opt in without mutating shared constructor state
+- `[options.themes=true]` (boolean) — load theme files under settings.themes from package, extension, user, and project roots; false opts out
 - `[options.auth=true]` (boolean) — retain credentials from settings layers; false strips all nested auth fields for reduced tool-worker environments (not filesystem read confinement)
 
-### `Env.create(options, initOptions = {…})`
+Throws — {TypeError} Invalid options container or unknown own top-level keys (including symbols) before registration or settings work; settings/provider payload keys remain open.
 
-Create a ready-to-use environment. Construction loads synchronous
-settings first; this factory then loads the asynchronous provider and
-tool registries, so callers never receive a half-initialized Env, and
-starts the BACKGROUND model collection (context windows, live model
-lists): models() answers grow as data arrives, each change emits
-Env.EVENT.MODELS_CHANGED, and env.modelsReady settles after the first
-pass. Short-lived hosts that never read models pass `models: false`.
+### `Agent.Env.envs`
 
-- `[options]` (ConstructorParameters<typeof Env>[0])
+**Read** — `static get envs()`
 
-Returns `Promise<Env>`
-
-### `Env.get cwd()`
-
-The project folder: the absolute path this Env is registered under in Env.envs (fixed for its lifetime).
-
-Returns `string` — The project folder: the absolute path this Env is registered under in Env.envs (fixed for its lifetime).
-
-### `Env.get envs()`
-
-The open Envs of this process by project folder — at most one per
-absolute path (`Env.envs[path]`): the constructor registers an Env
-(a second open Env for the same folder throws), close() deregisters
-it. A fresh frozen snapshot per read, in creation order.
+The registered project Envs by project folder — at most one per canonical
+folder. Non-default embedding Envs from Env.open(path, options) never enter
+this registry. close() deregisters project Envs. A frozen snapshot per read.
 
 Returns `Readonly<Object<string, Env>>` — absolute folder -> Env
 
-### `Env.EVENT`
-
-The Env event vocabulary: Symbol constants for onEvent/offEvent.
-Env events report what EXISTS in this environment: the native
-MODELS_CHANGED (models() answers differently — re-read it) and the
-membership events plugins install (Agent's AGENT_ADDED/AGENT_REMOVED);
-what an object does is that object's own events.
-
-### `Env.extend(plugin)`
+### `Agent.Env.extend(plugin)`
 
 Install a higher layer's Env members after the fact (a plugin):
 `methods`/`getters` land on Env.prototype and run on the env they
@@ -3827,16 +2850,26 @@ never override it (lib/env/extend.js).
 
 Returns `{EVENT: Object<string, symbol>, emit: (env: object, event: symbol, payload: object) => void}` — the plugin's own event symbols and its (sole) way to emit them
 
-### `Env.get folders()`
+### `Agent.Env.folder`
+
+**Read** — `get folder()`
+
+The absolute project folder used by this Env (fixed for its lifetime).
+
+Returns `string` — The absolute project folder used by this Env (fixed for its lifetime).
+
+### `Agent.Env.folders`
+
+**Read** — `get folders()`
 
 The folders that matter to a session, computed from current state
-(the project folder follows `cwd`): exactly one `project` and one
+(the project folder follows `folder`): exactly one `project` and one
 `harness` (the package folder in use), the user `settings` folder
 unless disabled, then each tool root.
 
 Returns `ReadonlyArray<{kind: "project"|"harness"|"settings"|"tools", title: string, path: string}>`
 
-### `Env.login(name, config, options)`
+### `Agent.Env.login(name, config, options)`
 
 Log an endpoint in — one transaction (lib/env/login.js): credentials
 (`auth`, else the provider shapes `token`), then with a `scope` the
@@ -3850,14 +2883,14 @@ its models arrive in the background.
 
 Returns `Promise<{name: string, endpoint: object, auth: object|undefined, scope: string|undefined, verified: *}>`
 
-### `Env.loginPresets()`
+### `Agent.Env.loginPresets()`
 
 The login presets every non-secret provider publishes ({name, label,
 url, provider, oauth?, note?, ...}).
 
 Returns `object[]`
 
-### `Env.logout(name)`
+### `Agent.Env.logout(name)`
 
 Remove an endpoint (the /logout contract): its configuration and auth
 files go with every in-memory trace; an environment-detected endpoint
@@ -3867,7 +2900,7 @@ clears in memory only.
 
 Returns `{name: string, dynamic: boolean}`
 
-### `Env.mcpLogin(name, options)`
+### `Agent.Env.mcpLogin(name, options)`
 
 Start explicit browser OAuth for a configured HTTP MCP server; never invoked by a tool call.
 
@@ -3875,7 +2908,7 @@ Start explicit browser OAuth for a configured HTTP MCP server; never invoked by 
 
 Returns `Promise<{name: string}>` — Signed-in server identity; rejects on discovery, registration, callback or token error.
 
-### `Env.mcpPaste(input)`
+### `Agent.Env.mcpPaste(input)`
 
 Supply a complete loopback redirect URL to a pending MCP OAuth flow.
 
@@ -3883,13 +2916,13 @@ Supply a complete loopback redirect URL to a pending MCP OAuth flow.
 
 Returns `boolean` — Whether a sign-in flow accepted the callback input.
 
-### `Env.mcpStatus()`
+### `Agent.Env.mcpStatus()`
 
 List configured MCP server connection and sign-in states; exposes no credentials.
 
 Returns `Array<{name: string, state: string}>` — Live per-server state.
 
-### `Env.models(secret = false)`
+### `Agent.Env.models(secret = false)`
 
 The model catalog: every known endpoint/model pair with its state
 already computed (lib/env/models.js ModelInfo — caps, secret,
@@ -3902,7 +2935,9 @@ deep copy. Re-read on Env.EVENT.MODELS_CHANGED.
 
 Returns `Map<string, object>` — `endpoint/model` -> ModelInfo
 
-### `Env.get modelsReady()`
+### `Agent.Env.modelsReady`
+
+**Read** — `get modelsReady()`
 
 Settles when the background collection's first pass has answered
 (one-shot hosts: list models, resolve an endpoint-only selector) —
@@ -3911,15 +2946,19 @@ Resolved at once when no collection runs.
 
 Returns `Promise<void>`
 
-### `Env.get name()`
+### `Agent.Env.name`
 
-The project name: the shortest suffix of `cwd` no other open Env's
-folder shares (conflicts resolve on the first differing parent
-folders: `fiz/bar/foo`, `faz/bar/foo`); the root folder is `/`.
+**Read** — `get name()`
+
+The project name. A pinned project answers its pin record's derived
+`settings.projects[folder].name` (the shortest suffix no other pin shares);
+an unpinned one the shortest suffix no pinned or other open Env's folder
+shares (conflicts resolve on the first differing parent folders:
+`fiz/bar/foo`, `faz/bar/foo`); the root folder is `/`.
 
 Returns `string`
 
-### `Env.offEvent(handle)`
+### `Agent.Env.offEvent(handle)`
 
 Remove the listener registered with {@link onEvent}.
 
@@ -3927,38 +2966,135 @@ Remove the listener registered with {@link onEvent}.
 
 Returns `boolean` — true if a listener was removed; otherwise false
 
-### `Env.onEvent(event, callback)`
+### `Agent.Env.onEvent(event, callback)`
 
-Subscribe to an Env event (distinct from Agent.onEvent's numeric
-events — these are Symbols). Env events report MEMBERSHIP only; each
-is an Env.EVENT key a plugin installed (Env.extend) — Agent's
-AGENT_ADDED/AGENT_REMOVED ({agent}).
+Subscribe to an Env Symbol event. Env reports settings/model changes
+and plugin membership changes; Agent reports its own request/tool events.
+Membership plugins add Env.EVENT constants such as AGENT_ADDED and
+AGENT_REMOVED, whose payload is {agent}.
 
 - `event` (symbol) — one Env.EVENT constant
 - `callback` ((payload: object) => void)
 
 Returns `number` — opaque handle (offEvent removes it)
 
-### `Env.prompts()`
+### `Agent.Env.open(path, options)`
+
+Acquire a fully initialized Env for a project folder. With no options, concurrent
+callers share the canonical folder's registered Env; each caller owns a close()
+obligation. Options that retain constructor/startup defaults (including {})
+also reuse the canonical Env. Meaningful overrides create an isolated Env,
+never registered or returned by a path-only lookup. `path` is
+authoritative; options.cwd is not accepted. `options.init` controls startup
+(providers/tools/detect/models default true); models collection begins in the
+background and modelsReady awaits its first pass. Explicit options.settings
+overlay persisted configuration in a per-Env memory node: writes to owned
+override keys remain ephemeral; writes to other keys follow normal settings
+ownership and may persist. Inputs are not mutated; constructor settings are
+copied into the store, while provider/root references follow constructor rules.
+
+- `path` (string) — Project folder, relative or absolute; aliases share filesystem identity.
+- `[options]` (object) — Constructor options other than cwd, plus optional init settings.
+
+Returns `Promise<Env>` — Ready Env; caller must await close() when finished.
+
+Throws — {TypeError|Error} Invalid path/options or startup failure. Failed new Envs close before rejection; after fixing input or disk state, retry is safe.
+
+### `Agent.Env.promptCatalog(options = {…})`
+
+Format this environment's current prompt catalog as Markdown.
+
+Returns `string` — Detached catalog text; reads entries without retaining or mutating them.
+
+Effects — Reads prompt files; repeated calls reflect current catalog contents.
+
+### `Agent.Env.prompts()`
 
 The merged prompts (same layers; a later same-named prompt
 replaces an earlier one), read fresh from disk — same entry shape.
 
 Returns `Map<string, {name: string, description: string, file: string, source: string, body: string}>`
 
-### `Env.get settings()`
+### `Agent.Env.ready()`
+
+Await complete initial global settings discovery, without starting providers,
+models, tools or a project Env. Safe before or after loading; use this barrier
+rather than waiting for a possibly already-fired SETTINGS_LOADED event.
+
+Returns `Promise<Object>` — The same live view as static Env.settings.
+
+Throws — {Error} Startup/discovery failure; repair sources, await static close(), and retry.
+
+### `Agent.Env.ready()`
+
+Complete asynchronous folder discovery and graph startup once. The constructor
+exposes cached, possibly incomplete settings immediately; await this for
+complete startup settings. SETTINGS_CHANGED announces changed values;
+SETTINGS_LOADED announces completed discovery/reload batches after all
+detected files and their effective settings views finish loading.
+
+Returns `Promise<Env>` — This environment after its source graph is ready.
+
+### `Agent.Env.settings`
+
+**Read** — `static get settings()`
+
+Live process-global settings from package, extensions and user sources only.
+`settings.projects` contains pinned records keyed by absolute folder. Each
+record reads with derived `name` (shortest unique folder suffix) and `folder`;
+neither derived field nor any name alias is persisted. Pins can be edited
+here or through an instance's reachable-project settings view. Unlike
+instance writes, a global write of a new folder pin does not add groups.
+No project Env is opened or registered. Reads may be partial before static
+ready(); writes follow the same authorization/defaults/persistence rules as
+instance settings. Nested views are stable; arrays are detached snapshots.
+The process owns this facade until static close(); existing project Envs
+retain their shared sources independently. Configure the settings directory
+through the namespace environment variable before first access.
+
+Returns `Object` — Global live settings, including defaults and unknown keys.
+
+### `Agent.Env.settings`
+
+**Read** — `get settings()`
 
 The LIVE settings view (lib/env/settings-view.js): reads apply the
 defaults schema and derived values (`settings.sessions` is the
 resolved sessions folder); assigning or deleting a key persists
-only that change, coalesced per tick, to the layer file that owns it
-(never the package folder). Nested data is live shared state. Arrays must
-currently be replaced to trigger persistence/events; their in-place
-mutation semantics remain under consideration.
+only that change to the writable owner in memory immediately; file-backed
+updates coalesce and persist asynchronously. Await settingsFlush() for
+durability or write errors. Nested objects are path-stable live views;
+arrays are detached snapshots: replace the whole array to persist and emit events;
+in-place edits of a returned array do not change the Env.
+`settings.projects` reads as a live view of reachable project records,
+keyed by absolute folder and by name aliases pointing to the SAME records.
+It includes this Env's own folder even when unpinned, plus pinned projects
+sharing a group. `projects.this` aliases this Env's own folder record.
+Writes through folder keys or name aliases edit global pins, including new
+folder pins; the reachable filter restricts reads, not writes. Assigning
+`settings.projects[folder]` for a new pin inherits every true group from
+this Env's own current global pin, making the new entry reachable. Global
+`Env.settings.projects` writes do not auto-add groups. Each returned record
+has derived `name` and `folder`; aliases and derived fields are never
+persisted. `Env.settings.projects` also permits global pin edits.
 
 Returns `Object`
 
-### `Env.settingsSchema()`
+### `Agent.Env.settingsFlush()`
+
+Persist pending global settings edits; reads/writes are already immediate.
+
+Returns `Promise<void>` — Resolves after persistence; rejects on write failure (retry safe).
+
+### `Agent.Env.settingsFlush()`
+
+Wait for queued settings writes in this Env's shared and project file nodes.
+Assignments update the live view immediately; this explicit barrier makes
+their latest values durable or rejects on a file write error.
+
+Returns `Promise<void>` — Settles after outstanding writes complete.
+
+### `Agent.Env.settingsSchema()`
 
 The DEFAULTS SCHEMA: every top-level settings key Env (or a
 loaded tool — see the tools.js module contract's `settingsSchema()`)
@@ -3968,31 +3104,49 @@ rejected either way.
 
 Returns `Object} key -> {default, description`
 
-### `Env.skillResource(name, path)`
+### `Agent.Env.skillCatalog(options = {…})`
 
-List available skill-relative identifiers when path is omitted, or read
-an existing resource (last existing layer wins). Metadata listings are not
-required for reads. No activation, writes, or execution. Listings exclude
-SKILL.md, observed symlinks, and installation paths. The caller owns returned
-bytes. Reads are fresh, bounded to 16 MiB, O(catalog scan + layers + file bytes),
-and retry-safe.
+Format this environment's current skill catalog as Markdown.
 
-- `name` (string) — Skill name; surrounding whitespace is trimmed.
-- `[path]` (string) — Forward-slash relative resource filename; omit to list.
+Returns `string` — Detached catalog text; reads entries without retaining or mutating them.
 
-Returns `Promise<Buffer|string[]>` — Exact file bytes or sorted identifiers.
+Effects — Reads skill files; repeated calls reflect current catalog contents.
 
-### `Env.skills()`
+### `Agent.Env.skillLoad(names, { active = new Set() } = {…})`
+
+Validate named skills and return their instruction payload without injecting it.
+
+- `[names]` (string|string[]) — Names to load; omitted lists the catalog.
+
+Returns `string|{result: string, system: string[]}` — Detached catalog text or a complete activation payload.
+
+Throws — {TypeError|Error} Invalid names or unknown skills; correct the complete request before retrying. No partial payload is returned.
+
+Effects — Reads the current skill catalog; performs no context or file mutation.
+
+### `Agent.Env.skillSection(skill)`
+
+Format a skill entry for injection into a Context.
+
+Returns `string` — Detached skill section; input is neither mutated nor retained.
+
+Throws — {TypeError} If the entry lacks a string name; pass a catalog entry before retrying.
+
+Effects — None; repeated calls with the same entry return the same text.
+
+### `Agent.Env.skills()`
 
 Effective skills, read fresh from package/settings/configured/environment/
 project layers. Later bodies override; {{name}} and {{name[L1-L2]}}
 explicitly compose bodies (self references use the previous definition).
 Line ranges are 1-based/inclusive over expanded bodies, excluding metadata.
 Unknown placeholders remain literal; cycles/invalid known ranges throw.
+`directories` lists the skill's resource folders in layer order (later
+layers override earlier ones); tools must not show them to models.
 
-Returns `Map<string, {name: string, description: string, file: string, source: string, body: string}>`
+Returns `Map<string, {name: string, description: string, file: string, source: string, body: string, directories: string[]}>`
 
-### `Env.systemPrompt()`
+### `Agent.Env.systemPrompt()`
 
 The system-prompt text(s) seeded into a FRESH context, read from
 disk on every call (package, user settings, then project
@@ -4000,7 +3154,7 @@ AGENTS.md — or `settings.system`), with `{{skill}}` prefill.
 
 Returns `string[]` — zero to three texts, in layering order
 
-### `Env.toolAdd(name, fn, schema, { builtin = false, file } = {…})`
+### `Agent.Env.toolAdd(name, fn, schema, { builtin = false, file } = {…})`
 
 Register a tool into the flattened callable lookup
 (lib/env/tool-registry.js — the safe/interactive schema metadata
@@ -4012,14 +3166,16 @@ contract lives there).
 
 Returns `Function` — fn
 
-### `Env.toolCall(name, args, context)`
+### `Agent.Env.toolCall(name, args, context)`
 
 Invoke one tool (lib/env/tool-registry.js). The context is handed to
 the tool as its second argument; Env reads: `safe` (refuse a tool
 that is not read-only), `selector` + `io` (the pair's provider tool
 serves first; undefined falls through to the global tool), `signal`
 and `deadline`, and adds `statusSet(info)` — the tool's own live
-status. Missing names are ordinary errors, never a crash.
+status. When context.agent is supplied, the optional Agent plugin's
+private _toolContextCreate hook supplies missing tool capabilities.
+Missing names are ordinary errors, never a crash.
 
 - `name` (string)
 - `args` (object)
@@ -4027,7 +3183,7 @@ status. Missing names are ordinary errors, never a crash.
 
 Returns `Promise<*>` — the tool's return value
 
-### `Env.tools(safe = false, selector)`
+### `Agent.Env.tools(safe = false, selector)`
 
 The tool catalog: name -> ToolInfo ({name, schema, safe, trusted,
 sandbox, secret, interactive, builtin, file?, storage?, status?,
@@ -4043,631 +3199,19 @@ global tool of the same name.
 
 Returns `Promise<Map<string, object>>`
 
-### `Env.use(cwd, fn)`
-
-Run `fn` with the open Env of `cwd`, creating one when the folder has
-none; a created Env closes when `fn` settles unless agents joined it.
-
-- `cwd` (string) — The project folder.
-- `fn` ((env: Env) => T|Promise<T>)
-
-Returns `Promise<T>`
-
-## GTUI
-
-### `GTUI.effect = freeze({…})`
-
-Immutable constructors for host, task, timer, theme, and lifecycle effects.
-
-### `GTUI.effect.after(ms, message)`
-
-Describe delayed message delivery.
-
-- `ms` (number) — delay in milliseconds
-- `message` (object) — message to dispatch
-
-Returns `object` — frozen timer effect
-
-### `GTUI.effect.cancel(key)`
-
-Describe cancellation of a keyed task.
-
-- `key` (*) — task identity
-
-Returns `object` — frozen cancellation effect
-
-### `GTUI.effect.copy(text, id)`
-
-Request host-mediated text copying.
-
-- `text` (string) — text to copy
-- `[id]` (*) — optional correlation identifier
-
-Returns `object` — frozen copy effect
-
-### `GTUI.effect.notify(text)`
-
-Request a host notification.
-
-- `text` (string) — notification text
-
-Returns `object` — frozen notification effect
-
-### `GTUI.effect.open(url)`
-
-Request host-mediated URL opening.
-
-- `url` (string) — URL to open
-
-Returns `object` — frozen open effect
-
-### `GTUI.effect.quit(code = 0)`
-
-Request application shutdown.
-
-- `[code=0]` (number) — completion status code
-
-Returns `object` — frozen quit effect
-
-### `GTUI.effect.refresh()`
-
-Request a render without changing the model.
-
-Returns `object` — frozen refresh effect
-
-### `GTUI.effect.task(key, run)`
-
-Describe an abortable asynchronous task.
-
-- `key` (*) — task identity
-- `run` (Function) — async task receiving signal and send
-
-Returns `object` — frozen task effect
-
-### `GTUI.effect.theme(tokens)`
-
-Replace theme tokens at runtime.
-
-- `tokens` (object) — theme token mapping
-
-Returns `object` — frozen theme effect
-
-### `GTUI.event = freeze({…})`
-
-Immutable constructors for messages delivered to an application update function.
-
-### `GTUI.event.copyDone(payload)`
-
-Create a completed-copy event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen copy-done event
-
-### `GTUI.event.focus(payload)`
-
-Create a focus event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen focus event
-
-### `GTUI.event.inputChange(payload)`
-
-Create an input-change event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen input-change event
-
-### `GTUI.event.inputSubmit(payload)`
-
-Create an input-submit event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen input-submit event
-
-### `GTUI.event.key(payload)`
-
-Create a key event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen key event
-
-### `GTUI.event.linkOpen(payload)`
-
-Create a link-open event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen link-open event
-
-### `GTUI.event.menuCancel(payload = {…})`
-
-Create a menu-cancel event.
-
-- `[payload={}]` (object) — event fields
-
-Returns `object` — frozen menu-cancel event
-
-### `GTUI.event.menuSelect(payload)`
-
-Create a menu-selection event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen menu-selection event
-
-### `GTUI.event.paste(payload)`
-
-Create a paste event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen paste event
-
-### `GTUI.event.pointer(payload)`
-
-Create a pointer event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen pointer event
-
-### `GTUI.event.resize(payload)`
-
-Create a resize event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen resize event
-
-### `GTUI.event.selectionCopy(payload)`
-
-Create a selection-copy event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen selection-copy event
-
-### `GTUI.event.taskDone(payload)`
-
-Create a completed-task event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen task-done event
-
-### `GTUI.event.taskFailed(payload)`
-
-Create a failed-task event.
-
-- `payload` (object) — event fields
-
-Returns `object` — frozen task-failed event
-
-### `class GTUI`
-
-Run a synchronous application against a GTUI host.
-The application supplies init, update, view, and optional bindings/dispose;
-update transitions may return effects. GTUI applies messages, renders views,
-and manages host/task/timer cleanup.
-
-### `GTUI.constructor({ host, theme = {…} } = {…})`
-
-Create a runtime for a host.
-
-Returns `GTUI` — configured runtime
-
-### `GTUI.dispatch(message)`
-
-Deliver one message immediately to the running application.
-
-- `message` (object) — application message
-
-Returns `void`
-
-### `GTUI.run(app)`
-
-Start an application and return its eventual completion result.
-
-Returns `Promise<{reason: string, code: number}>` — completion promise; rejects on runtime failure
-
-### `GTUI.stop(reason = "stop", code = 0)`
-
-Stop the application, canceling tasks and timers and restoring the host.
-
-- `[reason="stop"]` (string) — completion reason
-- `[code=0]` (number) — completion code
-
-Returns `void`
-
-### `GTUI.host = freeze({…})`
-
-Host constructors for tests and terminal execution.
-
-### `GTUI.host.memory(...)`
-
-Create a memory host for deterministic application tests.
-
-### `GTUI.host.terminal(...)`
-
-Create a terminal host for interactive execution.
-
-### `GTUI.view = freeze({…})`
-
-Immutable constructors for renderable view nodes.
-
-### `GTUI.view.button(props = {…}, label = "")`
-
-Create a button node; activation emits `action.select {id, action}`.
-`pressed` styles an on toggle and `tone` adds a role.
-
-- `[props={}]` (object) — button properties
-- `[label=""]` (*) — label converted to a string
-
-Returns `object` — frozen button node
-
-### `GTUI.view.column(...)`
-
-Create an immutable vertical container.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen column node
-
-### `GTUI.view.feed(props = {…})`
-
-Create an immutable feed control.
-
-- `[props={}]` (object) — feed properties
-
-Returns `object` — frozen feed node
-
-### `GTUI.view.footer(props = {…}, items = [])`
-
-Build a one-line footer of app-pushed notification items, aligned start/end;
-tight rows drop lowest priority first. Empty items yield null.
-
-- `[props={}]` (object) — row properties
-- `[items=[]` (Array<object>) — ] items with text and optional role, priority, align, action
-
-Returns `object|null` — frozen footer row, or null when empty
-
-### `GTUI.view.grid(...)`
-
-Create an immutable grid container.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen grid node
-
-### `GTUI.view.input(props = {…})`
-
-Create an immutable text input control.
-
-- `[props={}]` (object) — input properties
-
-Returns `object` — frozen input node
-
-### `GTUI.view.menu(props = {…})`
-
-Create an immutable menu control.
-
-- `[props={}]` (object) — menu properties
-
-Returns `object` — frozen menu node
-
-### `GTUI.view.overlay(...)`
-
-Create an immutable overlay container.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen overlay node
-
-### `GTUI.view.panel(...)`
-
-Create an immutable bordered panel.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen panel node
-
-### `GTUI.view.row(...)`
-
-Create an immutable horizontal container.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen row node
-
-### `GTUI.view.scroll(...)`
-
-Create an immutable scroll container.
-
-- `[props={}]` (object) — node properties
-- `[children=[]` (Array|*) — ] child nodes
-
-Returns `object` — frozen scroll node
-
-### `GTUI.view.table(props = {…}, rows = [])`
-
-Create an immutable table with frozen rows and cells.
-
-- `[props={}]` (object) — table properties
-- `[rows=[]` (object[]) — ] rows; each row's cells are copied and frozen
-
-Returns `object` — frozen table node
-
-### `GTUI.view.text(props = {…}, content = "")`
-
-Create immutable text content.
-
-- `[props={}]` (object) — text-node properties
-- `[content=""]` (*) — text content
-
-Returns `object` — frozen text node
-
-### `GTUI.view.toolbar(...)`
-
-Create a horizontal toolbar container with host-owned roving focus.
-Children use `{id, focus, gap?, align?: "end"}`; while focused, navigation
-keys move focus and Enter/Space activate; other keys bubble.
-
-- `[props={}]` (object) — toolbar properties
-- `[children=[]` (Array|*) — ] button children
-
-Returns `object` — frozen toolbar node
-
-### `GTUI.memory({ width = 80, height = 24, scrollBar } = {…})`
-
-Create an in-memory host for application tests. It records rendered
-semantics and effects; it never emits terminal bytes.
-
-Returns `object` — in-memory host implementing the GTUI host protocol
-
-### `GTUI.memory._effect(value, send)`
-
-Record an effect and acknowledge copy effects asynchronously.
-
-- `value` (object) — effect descriptor
-- `[send]` (Function) — callback receiving the copy acknowledgement
-
-Returns `void`
-
-### `GTUI.memory._render(next)`
-
-Render a view through the in-memory layout engine.
-
-- `next` (object) — view tree
-
-Returns `void`
-
-### `GTUI.memory._restore()`
-
-Clear runtime callbacks and record host restoration.
-
-Returns `void`
-
-### `GTUI.memory._setTheme(theme)`
-
-Install the resolved theme for subsequent layouts.
-
-- `theme` (object) — resolved theme
-
-Returns `void`
-
-### `GTUI.memory._start(listener, binding)`
-
-Start the runtime-to-host message protocol.
-
-- `listener` (Function) — callback for incoming messages
-- `binding` (Function) — predicate for bound key messages
-
-Returns `void`
-
-### `GTUI.memory.get effects()`
-
-Recorded effects, copied so callers cannot mutate host state.
-
-Returns `object[]` — shallow copy of recorded effects
-
-### `GTUI.memory.flush()`
-
-Finish pending host output; memory hosts have nothing to flush.
-
-Returns `void`
-
-### `GTUI.memory.get restoreCount()`
-
-Number of completed host restoration cycles.
-
-Returns `number` — restoration count
-
-### `GTUI.memory.send(message)`
-
-Send a host input message to the mounted application.
-
-- `message` (object) — input message
-
-Returns `void`
-
-### `GTUI.memory.snapshot()`
-
-Return the current rendered scene in semantic, testable form.
-
-Returns `object` — scene snapshot with current dimensions
-
-### `GTUI.scrollGlyph(value, fallback)`
-
-Validate a one-cell grapheme for use as a scroll indicator.
-
-- `value` (*) — candidate glyph
-- `fallback` (*) — result when candidate is invalid
-
-Returns `*` — candidate when it is a one-cell grapheme, otherwise fallback
-
-### `GTUI.terminal(options = {…})`
-
-Construct a terminal host that owns input decoding and terminal rendering,
-or return `options.host` unchanged.
-
-- `[options={}]` (object) — terminal streams, mode, dimensions, and policies
-
-Returns `object` — supplied or newly-created GTUI host
-
-## index
-
-### `default namespace`
-
-Primary headless library namespace. Exports are explicit so private Agent
-statics and future implementation details cannot leak through the barrel.
-
-### `default.Agent`
-
-Public Agent namespace member; see its owning module for the contract.
-
-### `default.Context`
-
-Public Context namespace member; see its owning module for the contract.
-
-### `default.Env`
-
-Public Env namespace member; see its owning module for the contract.
-
-### `default.EVENT`
-
-Public EVENT namespace member; see its owning module for the contract.
-
-### `default.EVENT_CALLBACKS`
-
-Public EVENT_CALLBACKS namespace member; see its owning module for the contract.
-
-### `default.finishAdd`
-
-Public finishAdd namespace member; see its owning module for the contract.
-
-### `default.finishRun`
-
-Public finishRun namespace member; see its owning module for the contract.
-
-### `default.finishSignalsArm`
-
-Public finishSignalsArm namespace member; see its owning module for the contract.
-
-### `default.IO`
-
-Public IO namespace member; see its owning module for the contract.
-
-### `default.Jobs`
-
-Public Jobs namespace member; see its owning module for the contract.
-
-### `default.NAMES`
-
-Public NAMES namespace member; see its owning module for the contract.
-
-### `default.reseat`
-
-Public reseat namespace member; see its owning module for the contract.
-
-### `default.TOOL_TIMEOUT_DEFAULT`
-
-Public TOOL_TIMEOUT_DEFAULT namespace member; see its owning module for the contract.
-
-## index_app
-
-### `default namespace`
-
-Full application entry point. The Agent module owns the headless core tree
-(`{ Context, Env, IO, Agent }`). This opt-in layer adds presentation and
-application concerns: CLI and App (App.Markdown, App.TUI, App.Web, App.GTUI).
-Jobs remains in the primary library entry because tools and
-non-application hosts use it.
-
-### `default.Agent`
-
-Public Agent namespace member; see its owning module for the contract.
-
-### `default.App`
-
-Public App namespace member; see its owning module for the contract.
-
-### `default.CLI`
-
-Public CLI namespace member; see its owning module for the contract.
-
-### `default.Context`
-
-Public Context namespace member; see its owning module for the contract.
-
-### `default.Env`
-
-Public Env namespace member; see its owning module for the contract.
-
-### `default.EVENT`
-
-Public EVENT namespace member; see its owning module for the contract.
-
-### `default.EVENT_CALLBACKS`
-
-Public EVENT_CALLBACKS namespace member; see its owning module for the contract.
-
-### `default.finishAdd`
-
-Public finishAdd namespace member; see its owning module for the contract.
-
-### `default.finishRun`
-
-Public finishRun namespace member; see its owning module for the contract.
-
-### `default.finishSignalsArm`
-
-Public finishSignalsArm namespace member; see its owning module for the contract.
-
-### `default.IO`
-
-Public IO namespace member; see its owning module for the contract.
-
-### `default.Jobs`
-
-Public Jobs namespace member; see its owning module for the contract.
-
-### `default.NAMES`
-
-Public NAMES namespace member; see its owning module for the contract.
-
-### `default.reseat`
-
-Public reseat namespace member; see its owning module for the contract.
-
-### `default.TOOL_TIMEOUT_DEFAULT`
-
-Public TOOL_TIMEOUT_DEFAULT namespace member; see its owning module for the contract.
-
-## IO
-
-### `IO.Context`
-
-The Context namespace for validating every provider-bound request.
-
-### `IO.Env`
-
-The global environment constructor used by IO and provider authors.
+## Agent.IO
 
 ### `class IO`
 
 One provider IO session: context in, normalized response events out.
 
-### `IO.authSet(auth, options)`
+### `Agent.IO.Provider`
+
+Wire-completed provider constructor for trusted host/provider code.
+
+Returns `Function` — Wire-completed provider constructor for trusted host/provider code.
+
+### `Agent.IO.authSet(auth, options)`
 
 Route auth persistence to the endpoint's namespace and refresh the
 live settings view.
@@ -4676,14 +3220,37 @@ live settings view.
 
 Returns `object` — The persisted endpoint section returned by the Env connection.
 
-### `IO.close()`
+Throws — {Error} Propagates persistence or Env connection errors.
 
-Cancel the active request (terminal partial emitted by the in-flight
-write), close the connection, permanently disconnect the instance.
+Effects — Persists endpoint authentication and updates the underlying live settings view.
 
-Returns `Promise<void>` — Resolves after request finalization and connection teardown; repeated calls after closure resolve immediately.
+### `Agent.IO.cancel()`
 
-### `IO.connectionCreate({ signal, onBytes } = {…})`
+Interrupt the active request, emitting a terminal partial; IO remains reusable.
+
+Returns `Promise<void>` — Resolves after the in-flight request settles; no-op when idle/closed.
+
+Effects — Aborts the owned connection signal, awaits teardown, and returns to idle. Repeated calls are safe.
+
+### `Agent.IO.close()`
+
+Permanently disconnect after interrupting any active request.
+
+Returns `Promise<void>` — Resolves when the request settles and its connection closes; concurrent/repeated calls await the same outcome.
+
+Throws — {Error|AggregateError} Request finalization or connection teardown failures, after the instance enters closed. Repeated close reports the same failure; construct a new IO to reconnect.
+
+Effects — Aborts the owned connection signal and transitions irreversibly to closed.
+
+### `Agent.IO.connectTimeout`
+
+**Read** — `get connectTimeout()`
+
+Current default connection watchdog in milliseconds.
+
+Returns `number` — Current default connection watchdog in milliseconds.
+
+### `Agent.IO.connectionCreate({ signal, onBytes } = {…})`
 
 A fresh provider connection over this endpoint/model for a
 provider tool's one-off request (context2msg/send/read/close);
@@ -4695,26 +3262,19 @@ the caller closes it.
 
 Returns `object` — A newly constructed provider connection; caller owns and must close it.
 
-### `IO.connectTimeout`
+Throws — {Error} If the provider constructor fails.
 
-Connection watchdog in milliseconds.
+Effects — Creates a new provider connection and optionally attaches the signal and byte callback.
 
-Returns `number` — Connection watchdog in milliseconds.
-
-### `IO.constructor({ env, model, url, timeout, connectTimeout, stuckTimeout, settings, tools, safe = false, onData, onLog, remember = true, ...options } = {…})`
+### `Agent.IO.constructor(options = {…})`
 
 Configure one provider IO session. Resolves the registered endpoint and
-provider, then selects URL and timeouts from explicit options, live
-provider settings, provider metadata, and defaults, in that order.
+provider; URL, credentials and timeout defaults read Env's live
+provider configuration, including after this IO is cached.
 
 - `[options={}]` (Object) — Constructor options.
 - `options.env` (object) — Env registry; required.
 - `options.model` (string) — Registered `<endpoint>/<model>` selector.
-- `[options.url]` (string) — URL override; otherwise use the resolved endpoint URL.
-- `[options.timeout]` (number|string) — Overall request cap; otherwise settings/metadata or 1048575 ms.
-- `[options.connectTimeout]` (number|string) — Connection timeout; otherwise settings/metadata or 30000 ms.
-- `[options.stuckTimeout]` (number|string) — Reading watchdog; otherwise settings/metadata or 120000 ms.
-- `[options.settings={}]` (object) — Per-invocation settings merged over the live provider namespace; not persisted.
 - `[options.tools]` (string[]) — Tool selection: omitted or ["*"] means all, [] none, otherwise the named subset.
 - `[options.safe=false]` (boolean) — Whether to publish read-only tools only.
 - `[options.onData]` ((event:object)=>void) — Optional default data callback.
@@ -4723,42 +3283,25 @@ provider settings, provider metadata, and defaults, in that order.
 
 Returns `IO` — The initialized provider IO session.
 
-### `IO.Context`
+Throws — {TypeError} Invalid options container, unknown own top-level keys (including symbols), missing `env`, a separate endpoint option, or invalid qualified model. Key validation precedes provider lookup; settings payload keys remain open.
 
-The Context namespace for validating every provider-bound request.
+Throws — {ProviderError} If endpoint resolution reports a provider-classified failure; other resolution errors propagate.
 
-### `IO.get contextUsage()`
+Effects — Resolves and retains the provider link and initializes this instance in the idle state.
 
-The provider-reported context readout of the CURRENT/last request:
-`{used, total}` in tokens, each undefined when the provider hasn't
-reported it. Providers update it during a request via
-contextUsage() (e.g. from a usage frame or model metadata);
-IO itself fills `used` from the terminal usage envelope when the
-provider left it unset. Consumers (Agent) read it after write()
-resolves; missing data is their cue to approximate.
+### `Agent.IO.context`
 
-Returns `{used: number|undefined, total: number|undefined}` — A defensive copy of the current/last request report.
+The Context of the request in flight (null while idle); providers read its `dirty` and may edit replay data in it.
 
-### `IO.set contextUsage({ used, total } = {…})`
+Returns `?Context` — The Context of the request in flight (null while idle); providers read its `dirty` and may edit replay data in it.
 
-Report actual context consumption and/or the model's available
-context window (provider → IO channel; connectors call this from
-their translators/metadata surfaces). Finite numbers merge over the
-current report; anything else is ignored.
-
-Returns `void` — Read contextUsage after assignment for the merged report.
-
-### `IO.env`
+### `Agent.IO.env`
 
 The shared live environment.
 
 Returns `Env` — The shared live environment.
 
-### `IO.Env`
-
-The global environment constructor used by IO and provider authors.
-
-### `IO.fetch(url, init = {…}, { deadline, connectTimeout } = {…})`
+### `Agent.IO.fetch(url, init = {…}, { deadline, connectTimeout } = {…})`
 
 fetch bounded by a wall-clock deadline and a fast connect fail-fast
 (provider tools' plain HTTP requests).
@@ -4768,157 +3311,127 @@ fetch bounded by a wall-clock deadline and a fast connect fail-fast
 
 Returns `Promise<Response>` — Resolves to the fetch response.
 
-### `IO.get model()`
+Throws — {TypeError} May reject for invalid fetch arguments; transport and deadline failures reject the promise.
+
+Effects — Starts a bounded HTTP request using the global `fetch` implementation.
+
+### `Agent.IO.model`
+
+**Read** — `get model()`
 
 Qualified endpoint/model selector; assignment changes the model only while idle and on this connection's endpoint.
 
 Returns `string` — Qualified endpoint/model selector; assignment changes the model only while idle and on this connection's endpoint.
 
-### `IO.set model(selector)`
+**Write** — `set model(selector)`
 
 Select a model on the same endpoint. Validation precedes mutation; busy/closed IO refuses selection. @param {string} selector Qualified model. @throws {TypeError|ProviderError} Invalid, cross-endpoint, busy, or closed selection.
 
-### `IO.get modelCurrent()`
-
-Get the effective model, preferring the current request override.
-
-Returns `string` — Qualified request model override, or the qualified instance model.
-
-### `IO.name`
+### `Agent.IO.name`
 
 Connection endpoint name.
 
 Returns `string` — Connection endpoint name.
 
-### `IO.get planUsage()`
-
-The provider-reported PLAN/QUOTA readout (rate limits, subscription
-allowances): `{label?, quotas}` where each quota entry is
-`{total?, remaining?, used?, reset?}` — whatever the provider
-publishes, nothing invented. null until the provider reports.
-Unlike contextUsage it is LAST-KNOWN (never reset per request — a
-quota snapshot stays meaningful between requests).
-
-Returns `{label?: string, quotas: Object}|null` — A defensive copy of the last complete report, or null before any report.
-
-### `IO.set planUsage({ label, quotas } = {…})`
-
-Report plan/quota usage (provider → IO channel; connectors call
-this from their reportPlanUsage hook or metadata surfaces). Each
-call is ONE COMPLETE SNAPSHOT of what one response publishes: the
-last-known report is REPLACED, never merged — a quota a response
-stops publishing is gone (merged leftovers would keep showing a
-previous endpoint's plan after an endpoint switch — see
-lib/agent/run.js, which hands the report straight to the agent).
-Tolerant reader: only finite numbers and non-empty strings are
-kept.
-
-Returns `void` — Read planUsage after assignment for the stored report.
-
-### `IO.protocol`
+### `Agent.IO.protocol`
 
 Provider protocol registry name.
 
 Returns `string` — Provider protocol registry name.
 
-### `IO.Provider`
-
-Wire-completed provider constructor for trusted host/provider code.
-
-Returns `Function` — Wire-completed provider constructor for trusted host/provider code.
-
-### `IO.provider`
+### `Agent.IO.provider`
 
 Live provider metadata; never serialize wholesale to a model.
 
 Returns `object` — Live provider metadata; never serialize wholesale to a model.
 
-### `IO.ProviderError`
+### `Agent.IO.settings`
 
-The stable provider failure class (auth/network/provider/malformed).
-
-### `IO.get requestSignal()`
-
-Get the active request's abort signal for the HTTP backend.
-
-Returns `AbortSignal|undefined` — The signal, or undefined when no controller exists.
-
-### `IO.get settings()`
+**Read** — `get settings()`
 
 Build the live provider-namespaced settings view with per-instance
-overrides applied. The returned `think` is the model's native mode,
+agent-local thinking applied. The returned `think` is the model's native mode,
 mapped from the library level and narrowed by model/provider capabilities.
 
 Returns `object` — A fresh merged settings object; undefined native thinking means provider default.
 
-### `IO.settingsSet(key, value)`
+Effects — None; does not mutate the Env settings.
 
-Set/clear a per-invocation settings override AFTER construction
-(e.g. Agent's /agent-thinking toggling `think` on a live connection).
+### `Agent.IO.settingsSet(key, value)`
+
+Set/clear the Agent's thinking selection AFTER construction.
+Provider configuration changes must go through Env.
 
 - `key` (string)
-- `value` (*) — Value to override; `undefined` clears the override.
+- `value` (*) — Thinking level; `undefined` restores the Env default.
 
 Returns `void`
 
-### `IO.get state()`
+Effects — Changes this IO instance's non-persisted thinking selection.
+
+### `Agent.IO.state`
+
+**Read** — `get state()`
 
 Read the request state machine's current state.
 
-Returns `"idle"|"sending"|"reading"|"closed"` — Current lifecycle state.
+Returns `"idle"|"sending"|"reading"|"cancelling"|"closing"|"closed"` — Current lifecycle state.
 
-### `IO.stuckTimeout`
+Effects — None; this is a read-only view.
 
-Reading watchdog in milliseconds.
+### `Agent.IO.stuckTimeout`
 
-Returns `number` — Reading watchdog in milliseconds.
+**Read** — `get stuckTimeout()`
 
-### `IO.THINKING_LEVELS`
+Current default reading watchdog in milliseconds.
 
-Selectable thinking levels, weakest -> strongest (IO maps them to native modes).
+Returns `number` — Current default reading watchdog in milliseconds.
 
-### `IO.timeout`
+### `Agent.IO.timeout`
 
-Overall request timeout in milliseconds.
+**Read** — `get timeout()`
 
-Returns `number` — Overall request timeout in milliseconds.
+Current default overall request timeout in milliseconds.
 
-### `IO.timeoutsResolve({ env, model, timeout, settings } = {…})`
+Returns `number` — Current default overall request timeout in milliseconds.
 
-Resolve effective per-request timeout values using IO's precedence and defaults.
-
-### `IO.tools()`
+### `Agent.IO.tools()`
 
 Return this request's publishable tool catalog, filtered by availability,
 safe mode, configured selection, and the endpoint's provider tools.
 
 Returns `Array<{name: string, ...Object}>` — Fresh tool descriptors; secret tools are excluded.
 
-### `IO.url`
+Effects — None; reads the request's tool catalog snapshot.
 
-Effective request URL.
+### `Agent.IO.url`
 
-Returns `string` — Effective request URL.
+**Read** — `get url()`
 
-### `IO.write(context, callbacks = {…}, options = {…})`
+Effective URL from the current Env provider configuration.
+
+Returns `string` — Effective URL from the current Env provider configuration.
+
+### `Agent.IO.write(context, callbacks = {…}, options = {…})`
 
 Run one provider request over a complete context.
 
-- `context` (Array) — Complete context; metadata records and empty messages are filtered before validation/provider conversion.
+- `context` (Context) — The conversation; metadata records and empty messages are filtered before validation/provider conversion, and IO updates its root record during the request.
 - `[callbacks={}]` (Object) — CamelCase response callbacks for this request.
 - `[options={}]` (Object) — Per-request overrides.
-- `[options.model]` (string) — Qualified `<endpoint>/<model>` override on the same endpoint. Construct another IO to switch endpoints.
 - `[options.timeout]` (number|string) — Overall request cap override.
 - `[options.connectTimeout]` (number|string) — Connection timeout override.
 - `[options.stuckTimeout]` (number|string) — Reading watchdog override.
 
-Returns `Promise<object>` — Resolves with the terminal done/error event. Rejects TypeError for split, invalid, or cross-endpoint model overrides without reserving the instance; rejects ProviderError for a closed/busy instance or malformed context.
+Returns `Promise<object>` — Resolves with the terminal done/error event. Rejects TypeError for a non-Context argument or any model/endpoint write override without reserving the instance; rejects ProviderError for a closed/busy instance or malformed context.
+
+Effects — Reserves the instance synchronously, may refresh OAuth, starts one request, and returns the instance to idle after request finalization unless closed.
 
 ### `class ProviderError extends Error`
 
 The stable provider failure class (auth/network/provider/malformed).
 
-### `IO.ProviderError.constructor(kind, message, detail = {…})`
+### `Agent.IO.ProviderError.constructor(kind, message, detail = {…})`
 
 Build a classified error, assigning the supplied detail fields onto it.
 
@@ -4928,15 +3441,25 @@ Build a classified error, assigning the supplied detail fields onto it.
 
 Returns `ProviderError` — The constructed error instance.
 
-### `IO.THINKING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"]`
+Throws — Propagates errors raised while copying enumerable detail properties.
+
+### `Agent.IO.Context`
+
+The Context namespace for validating every provider-bound request.
+
+### `Agent.IO.Env`
+
+The global environment constructor used by IO and provider authors.
+
+### `Agent.IO.THINKING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"]`
 
 Selectable thinking levels, weakest -> strongest (IO maps them to native modes).
 
-### `IO.timeoutsResolve({ env, model, timeout, settings } = {…})`
+### `Agent.IO.timeoutsResolve(options = {…})`
 
-Resolve effective per-request timeout values using IO's precedence and defaults.
+Resolve a request timeout using the Env's provider settings and an optional per-request override. @param {{env: Env, model: string, timeout?: number|string}} options Request inputs; no provider settings override. @returns {number} Milliseconds. @throws {TypeError|Error} Missing Env, unsupported settings override, or invalid model.
 
-## Jobs
+## Agent.Jobs
 
 ### `class Jobs`
 
@@ -4947,82 +3470,11 @@ module. Instances have no API; use the static methods/properties instead.
 
 Returns `Jobs` — A Jobs namespace instance (normally unused; use static members).
 
-### `Jobs.daemonRun(projectRoot, options = {…})`
-
-Run a foreground best-effort daemon bound to the project root.
-
-- `projectRoot` (string) — Project root directory.
-- `[options={}]` (object) — Daemon options; supports `signal`, `state`, `execution`, `scan`, and `delay`.
-
-Returns `Promise<void>` — Resolves when stopped or Jobs becomes unusable; rejects on initial validation or daemon errors.
-
-### `Jobs.disable(projectRoot, options = {…})`
-
-Initialize or restore folder-only Jobs.
-
-- `projectRoot` (string) — Project root directory.
-- `[settings={}]` (object) — Settings argument retained by the lifecycle API.
-- `[options={}]` (object) — Options; `fs` may inject filesystem operations.
-
-Returns `Promise<{enabled: boolean}>` — Enabled status.
-
-### `Jobs.init(projectRoot, settings = {…}, options = {…})`
-
-Initialize or restore folder-only Jobs.
-
-- `projectRoot` (string) — Project root directory.
-- `[settings={}]` (object) — Settings argument retained by the lifecycle API.
-- `[options={}]` (object) — Options; `fs` may inject filesystem operations.
-
-Returns `Promise<{enabled: boolean}>` — Enabled status.
-
-### `Jobs.JobsError`
-
-Error type used for actionable Jobs failures.
-
-### `Jobs.run(projectRoot, options = {…})`
-
-Dispatch one best-effort serial scan of due Jobs.
-
-- `projectRoot` (string) — Project root directory.
-- `[options={}]` (object) — Scan options, including injected clock, filesystem, validation, executor, and execution settings.
-
-Returns `Promise<object>` — Frozen scan result containing outcomes, errors, warnings, and optional error-log path.
-
-### `Jobs.schedule(root, command, options = {…})`
-
-Apply a task list/read/create/update/remove command.
-
-- `root` (string) — Project root directory.
-- `command` (object) — Command with action; non-list actions require a filename, and create/update require Markdown `source`.
-- `[options={}]` (object) — Options including `readOnly`, folder validation context, and settings.
-
-Returns `Promise<object>` — Task listing, task source/read result, or mutation result.
-
-### `Jobs.status(projectRoot, options = {…})`
-
-Read a non-mutating projection of Jobs eligibility, tasks, schedule, attempts, and last scan.
-
-- `projectRoot` (string) — Project root directory.
-- `[options={}]` (object) — Options such as clock, defaults, and validation context.
-
-Returns `Promise<object>` — Status projection with diagnostics; does not create folders or start a daemon.
-
-### `Jobs.validate(root, options = {…})`
-
-Apply a task list/read/create/update/remove command.
-
-- `root` (string) — Project root directory.
-- `command` (object) — Command with action; non-list actions require a filename, and create/update require Markdown `source`.
-- `[options={}]` (object) — Options including `readOnly`, folder validation context, and settings.
-
-Returns `Promise<object>` — Task listing, task source/read result, or mutation result.
-
 ### `class JobsError extends Error`
 
 Error type used for actionable Jobs failures.
 
-### `Jobs.JobsError.constructor(code, message, details = {…})`
+### `Agent.Jobs.JobsError.constructor(code, message, details = {…})`
 
 Create a coded jobs-domain error.
 
@@ -5032,7 +3484,11 @@ Create a coded jobs-domain error.
 
 Returns `JobsError` — The initialized error instance.
 
-### `async Jobs.daemonRun(projectRoot, options = {…})`
+Throws — Any exception raised while the native `Error` constructor converts the supplied message.
+
+Effects — Initializes the native error state and sets `name`, `code`, and `details` on the instance.
+
+### `async Agent.Jobs.daemonRun(projectRoot, options = {…})`
 
 Run a foreground best-effort daemon bound to the project root.
 
@@ -5041,7 +3497,9 @@ Run a foreground best-effort daemon bound to the project root.
 
 Returns `Promise<void>` — Resolves when stopped or Jobs becomes unusable; rejects on initial validation or daemon errors.
 
-### `async Jobs.disable(projectRoot, options = {…})`
+Throws — {JobsError} If the project is not operational when starting.
+
+### `async Agent.Jobs.disable(projectRoot, options = {…})`
 
 Initialize or restore folder-only Jobs.
 
@@ -5051,7 +3509,9 @@ Initialize or restore folder-only Jobs.
 
 Returns `Promise<{enabled: boolean}>` — Enabled status.
 
-### `async Jobs.init(projectRoot, settings = {…}, options = {…})`
+Throws — {JobsError} If layout is invalid or active and disabled roots collide.
+
+### `async Agent.Jobs.init(projectRoot, settings = {…}, options = {…})`
 
 Initialize or restore folder-only Jobs.
 
@@ -5061,7 +3521,9 @@ Initialize or restore folder-only Jobs.
 
 Returns `Promise<{enabled: boolean}>` — Enabled status.
 
-### `async Jobs.run(projectRoot, options = {…})`
+Throws — {JobsError} If layout is invalid or active and disabled roots collide.
+
+### `async Agent.Jobs.run(projectRoot, options = {…})`
 
 Dispatch one best-effort serial scan of due Jobs.
 
@@ -5070,7 +3532,9 @@ Dispatch one best-effort serial scan of due Jobs.
 
 Returns `Promise<object>` — Frozen scan result containing outcomes, errors, warnings, and optional error-log path.
 
-### `async Jobs.schedule(root, command, options = {…})`
+Throws — {JobsError} For invalid clock values; scan and persistence failures are generally returned as errors.
+
+### `async Agent.Jobs.schedule(root, command, options = {…})`
 
 Apply a task list/read/create/update/remove command.
 
@@ -5080,7 +3544,9 @@ Apply a task list/read/create/update/remove command.
 
 Returns `Promise<object>` — Task listing, task source/read result, or mutation result.
 
-### `async Jobs.status(projectRoot, options = {…})`
+Throws — {JobsError} For invalid commands, read-only mutation, ineligible Jobs, or invalid task metadata; filesystem errors may also reject.
+
+### `async Agent.Jobs.status(projectRoot, options = {…})`
 
 Read a non-mutating projection of Jobs eligibility, tasks, schedule, attempts, and last scan.
 
@@ -5089,7 +3555,7 @@ Read a non-mutating projection of Jobs eligibility, tasks, schedule, attempts, a
 
 Returns `Promise<object>` — Status projection with diagnostics; does not create folders or start a daemon.
 
-### `async Jobs.validate(root, options = {…})`
+### `async Agent.Jobs.validate(root, options = {…})`
 
 Apply a task list/read/create/update/remove command.
 
@@ -5099,7 +3565,669 @@ Apply a task list/read/create/update/remove command.
 
 Returns `Promise<object>` — Task listing, task source/read result, or mutation result.
 
-## Markdown
+Throws — {JobsError} For invalid commands, read-only mutation, ineligible Jobs, or invalid task metadata; filesystem errors may also reject.
+
+## App
+
+### `class App`
+
+Application presentation namespace. Importing it loads CLI, GTUI, TUI,
+Markdown and Web. Its static references are borrowed, not copied or owned;
+neither import nor construction starts a server or opens a terminal.
+
+### `App.CLI`
+
+Constructor namespace; see [App.CLI](#appcli) for its full contract.
+
+Returns `typeof App.CLI` — The shared constructor namespace.
+
+### `App.GTUI`
+
+Constructor namespace; see [App.GTUI](#appgtui) for its full contract.
+
+Returns `typeof App.GTUI` — The shared constructor namespace.
+
+### `App.Markdown`
+
+Constructor namespace; see [App.Markdown](#appmarkdown) for its full contract.
+
+Returns `typeof App.Markdown` — The shared constructor namespace.
+
+### `App.TUI`
+
+Constructor namespace; see [App.TUI](#apptui) for its full contract.
+
+Returns `typeof App.TUI` — The shared constructor namespace.
+
+### `App.Web`
+
+Constructor namespace; see [App.Web](#appweb) for its full contract.
+
+Returns `typeof App.Web` — The shared constructor namespace.
+
+## App.CLI
+
+### `class CLI`
+
+Static namespace exposing every named CLI operation.
+
+### `App.CLI.EXIT = Object.freeze({…})`
+
+Exit codes shared by the command-line tools.
+
+### `async App.CLI.adoptResumeOrigin({ resume, anonymous = false, dir } = {…})`
+
+Move the process to the recorded origin folder for an explicit session resume.
+Skips cwd changes for anonymous, absent, `"true"`, and `"latest"` resume values.
+Resolves the session origin (using `dir` or the configured sessions folder),
+verifies that folder exists, then changes `process.cwd()` before environment setup.
+
+- `[options={}]` (Object) — Resume selection and session lookup options.
+- `[options.resume]` (string) — The `--resume` value; values other than `"true"` and `"latest"` are treated as explicit session IDs.
+- `[options.anonymous=false]` (boolean) — Whether this is an anonymous session.
+- `[options.dir]` (string) — Session directory passed to origin lookup; defaults to the configured sessions folder when omitted or nullish.
+
+Returns `Promise<string|null>` — The origin folder after changing cwd, or `null` when no explicit origin should be adopted.
+
+Throws — {Error} If the session has no recorded origin or its origin folder no longer exists. `process.chdir()` errors also propagate.
+
+### `App.CLI.armCancelSignals({ onCancel, process: proc = process })`
+
+Arm SIGINT/SIGTERM cancellation for a CLI binding.
+
+- `options` (Object) — configuration object
+- `options.onCancel` ((signal: string) => void) — invoked once, with "SIGINT" or "SIGTERM", on the first caught signal
+- `[options.process=process]` (NodeJS.Process) — process-like signal emitter; defaults to the global Node.js `process` and can be injected for tests
+
+Returns `() => void` — disarm function; removes both listeners, and is safe to call repeatedly
+
+Throws — {TypeError} if `onCancel` is not a function
+
+Throws — {*} if registering either signal listener throws; the error propagates, and a SIGINT listener already registered is not rolled back if SIGTERM registration fails
+
+Effects — Registers SIGINT and SIGTERM listeners on the selected process. The first signal invokes `onCancel` once; any exception from it propagates from the signal handler and does not allow a later retry. Calling the returned function removes both listeners; if removal throws, the error propagates and the disarm function remains marked as used.
+
+### `async App.CLI.close({ env, agent } = {…})`
+
+Close a command-line library runtime. This is the sole public housekeeping
+boundary: agents are cancelled, sessions are flushed/closed, and tool-owned
+background resources are released. Repeated calls are safe.
+
+Returns `Promise<{agent?: object, session: {id: string, file?: string}|null}>` — The explicit agent and its context's id/file when present, otherwise a null session. Resolves after owned teardown; rejects after all releases when cleanup fails.
+
+### `App.CLI.exitCodeFor(terminal)`
+
+Map a terminal done/error event (or an error-shaped `{kind}`) to the
+process exit code.
+
+Returns `number` — The mapped process exit code; this function is synchronous and has no side effects.
+
+### `App.CLI.finishSignalsArm({ process: proc = process, signals = ["SIGINT", "SIGTERM", "SIGHUP"], } = {…})`
+
+Arm process termination signals to run Agent's synchronous finish hooks,
+then re-raise the received signal so the process retains signal exit semantics.
+Repeated arming returns the existing disarm function without changing options.
+This is an opt-in CLI binding; it is not suitable for asynchronous cancellation.
+
+- `[options]` (Object) — Signal-arming options.
+- `[options.process=process]` (NodeJS.Process) — Process on which to install handlers and call `kill`.
+- `[options.signals=["SIGINT", "SIGTERM", "SIGHUP"]` (string[]) — ] Signals to handle.
+
+Returns `() => void` — Idempotent function that removes these signal handlers and permits rearming.
+
+Effects — Registers a process exit listener (once per process) and handlers for the selected signals. On a signal, runs Agent.finishRun(), removes the signal handlers, then calls process.kill(process.pid, signal). Finish callbacks may run again on exit and must be synchronous and idempotent.
+
+### `App.CLI.parseFlags(argv, { flags, bools = [], durations = ["timeout"], numbers = [] })`
+
+Parse command-line arguments into a flat options object. Value-taking flags
+use `--name value`; boolean flags use `--name`. `--help` and `-h` return
+`{help: true}` immediately. Repeated flags overwrite earlier values.
+Configured duration values are converted with `durationParse`; configured
+numeric values are converted with `Number` and must be finite and positive.
+Flag relationships and value-specific transformations remain caller policy.
+
+- `argv` (string[]) — Arguments to parse, typically `process.argv.slice(2)`.
+- `spec` (Object) — Flag-name configuration.
+- `spec.flags` (string[]) — Names of value-taking flags (required).
+- `[spec.bools=[]` (string[]) — ] - Names of valueless boolean flags.
+- `[spec.durations=["timeout"]` (string[]) — ] - Value-taking flag names converted by `durationParse` when present.
+- `[spec.numbers=[]` (string[]) — ] - Value-taking flag names converted to finite, positive numbers when present.
+
+Returns `Object` — Parsed options; values are strings except converted duration/number values, boolean flags (`true`), or `{help: true}`.
+
+Throws — {Error} For positional arguments, unknown flags, missing values, invalid duration values, or configured numbers that are not finite and positive. Duration errors are prefixed with the flag name.
+
+### `async App.CLI.readContextFromStdin()`
+
+Read standard input through EOF and parse its UTF-8 contents as messages.
+
+Returns `Promise<Array<object>>` — The parsed context/message array.
+
+Throws — {Error} Rejects if reading stdin fails or message parsing throws.
+
+### `async App.CLI.readStdin()`
+
+Read and buffer all bytes from standard input until the stream reaches EOF,
+then decode the concatenated bytes as UTF-8.
+
+Returns `Promise<string>` — The complete stdin contents as a UTF-8 string.
+
+Throws — {Error} Rejects if reading the stdin stream fails.
+
+### `async App.CLI.runLoginWizard(env, { input = process.stdin, output = process.stderr, } = {…})`
+
+Run the cooked-terminal wizard used by `--login`. Lists known endpoints
+from `Env.loginPresets` alongside a manual URL option, then prompts for
+endpoint details and credentials or browser OAuth where available. Closes
+its readline interface on completion or failure.
+
+- `env` (object) — Environment providing presets and endpoint login.
+- `[options={}]` (object) — I/O options; defaults to `{}`.
+- `[options.input=process.stdin]` (import("node:stream").Readable) — Prompt input stream.
+- `[options.output=process.stderr]` (import("node:stream").Writable) — Wizard and OAuth output stream.
+
+Returns `Promise<*>` — Resolves with the result of the selected endpoint login.
+
+Throws — {Error} If no protocols are loaded, a choice is invalid, the URL is missing, or OAuth/login fails; propagates errors from the login operation.
+
+### `async App.CLI.runMcpLogin(env, name, { input = process.stdin, output = process.stderr } = {…})`
+
+Start explicit MCP browser sign-in. Loopback callback wins without waiting
+for Enter; in a terminal, a full pasted redirect URL is a fallback.
+
+- `env` (object) — Environment with mcpLogin/mcpPaste methods.
+- `name` (string) — Configured MCP server name.
+
+Returns `Promise<{name: string}>` — Signed-in server identity.
+
+### `async App.CLI.selectEndpointModel(env, args, { lastUsed = false, log = () => {} } = {…})`
+
+Select a qualified model from CLI input or the last-used published model.
+
+- `env` (object) — Environment providing model resolution and login.
+- `args` (object) — CLI arguments: model selector and optional invocation-only URL.
+- `[options={}]` (object) — Selection options.
+- `[options.lastUsed=false]` (boolean) — Consider the newest available last-used model when no explicit model is supplied.
+- `[options.log=()=>{}]` (Function) — Log the selected last-used qualified model.
+
+Returns `Promise<string|undefined>` — Qualified `<endpoint>/<model>`, or undefined if unresolved.
+
+Throws — {Error} Invalid input or catalog failures; explicit URL login failures leave the model unresolved.
+
+Effects — May register an invocation-only endpoint; never persists the URL here.
+
+### `App.CLI.usageSummary(usage)`
+
+Format one terminal usage envelope for CLI diagnostics without mutating it.
+
+Returns `string` — One-line token summary with finite provider cost when supplied.
+
+### `App.CLI.writeSettingsTemplate(env, { force = false } = {…})`
+
+Write a namespaced settings template to the project settings path under `env.folder`.
+Refuses to replace an existing file unless `options.force` is true.
+
+Returns `string` — Path of the written settings file.
+
+Throws — {Error} If the file already exists and force is false, or if rendering or writing the template fails. An existing file is not overwritten on the refusal path.
+
+## App.GTUI
+
+### `class GTUI`
+
+Run a synchronous application against a GTUI host.
+The application supplies init, update, view, and optional bindings/dispose;
+update transitions may return effects. GTUI applies messages, renders views,
+and manages host/task/timer cleanup.
+
+### `App.GTUI.constructor({ host, theme = {…} } = {…})`
+
+Create a runtime for a host.
+
+Returns `GTUI` — configured runtime
+
+Throws — {TypeError} if host is missing
+
+### `App.GTUI.dispatch(message)`
+
+Deliver one message immediately to the running application.
+
+- `message` (object) — application message
+
+Returns `void`
+
+### `App.GTUI.run(app)`
+
+Start an application and return its eventual completion result.
+
+Returns `Promise<{reason: string, code: number}>` — completion promise; rejects on runtime failure
+
+Throws — {Error} if already running; TypeError if required callbacks are absent
+
+### `App.GTUI.stop(reason = "stop", code = 0)`
+
+Stop the application, canceling tasks and timers and restoring the host.
+
+- `[reason="stop"]` (string) — completion reason
+- `[code=0]` (number) — completion code
+
+Returns `void`
+
+### `App.GTUI.effect = freeze({…})`
+
+Immutable constructors for host, task, timer, theme, and lifecycle effects.
+
+### `App.GTUI.effect.after(ms, message)`
+
+Describe delayed message delivery.
+
+- `ms` (number) — delay in milliseconds
+- `message` (object) — message to dispatch
+
+Returns `object` — frozen timer effect
+
+### `App.GTUI.effect.cancel(key)`
+
+Describe cancellation of a keyed task.
+
+- `key` (*) — task identity
+
+Returns `object` — frozen cancellation effect
+
+### `App.GTUI.effect.copy(text, id)`
+
+Request host-mediated text copying.
+
+- `text` (string) — text to copy
+- `[id]` (*) — optional correlation identifier
+
+Returns `object` — frozen copy effect
+
+### `App.GTUI.effect.notify(text)`
+
+Request a host notification.
+
+- `text` (string) — notification text
+
+Returns `object` — frozen notification effect
+
+### `App.GTUI.effect.open(url)`
+
+Request host-mediated URL opening.
+
+- `url` (string) — URL to open
+
+Returns `object` — frozen open effect
+
+### `App.GTUI.effect.quit(code = 0)`
+
+Request application shutdown.
+
+- `[code=0]` (number) — completion status code
+
+Returns `object` — frozen quit effect
+
+### `App.GTUI.effect.refresh()`
+
+Request a render without changing the model.
+
+Returns `object` — frozen refresh effect
+
+### `App.GTUI.effect.task(key, run)`
+
+Describe an abortable asynchronous task.
+
+- `key` (*) — task identity
+- `run` (Function) — async task receiving signal and send
+
+Returns `object` — frozen task effect
+
+### `App.GTUI.effect.theme(tokens)`
+
+Replace theme tokens at runtime.
+
+- `tokens` (object) — theme token mapping
+
+Returns `object` — frozen theme effect
+
+### `App.GTUI.event = freeze({…})`
+
+Immutable constructors for messages delivered to an application update function.
+
+### `App.GTUI.event.copyDone(payload)`
+
+Create a completed-copy event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen copy-done event
+
+### `App.GTUI.event.focus(payload)`
+
+Create a focus event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen focus event
+
+### `App.GTUI.event.inputChange(payload)`
+
+Create an input-change event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen input-change event
+
+### `App.GTUI.event.inputSubmit(payload)`
+
+Create an input-submit event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen input-submit event
+
+### `App.GTUI.event.key(payload)`
+
+Create a key event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen key event
+
+### `App.GTUI.event.linkOpen(payload)`
+
+Create a link-open event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen link-open event
+
+### `App.GTUI.event.menuCancel(payload = {…})`
+
+Create a menu-cancel event.
+
+- `[payload={}]` (object) — event fields
+
+Returns `object` — frozen menu-cancel event
+
+### `App.GTUI.event.menuSelect(payload)`
+
+Create a menu-selection event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen menu-selection event
+
+### `App.GTUI.event.paste(payload)`
+
+Create a paste event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen paste event
+
+### `App.GTUI.event.pointer(payload)`
+
+Create a pointer event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen pointer event
+
+### `App.GTUI.event.resize(payload)`
+
+Create a resize event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen resize event
+
+### `App.GTUI.event.selectionCopy(payload)`
+
+Create a selection-copy event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen selection-copy event
+
+### `App.GTUI.event.taskDone(payload)`
+
+Create a completed-task event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen task-done event
+
+### `App.GTUI.event.taskFailed(payload)`
+
+Create a failed-task event.
+
+- `payload` (object) — event fields
+
+Returns `object` — frozen task-failed event
+
+### `App.GTUI.host = freeze({…})`
+
+Host constructors for tests and terminal execution.
+
+### `App.GTUI.host.memory(...)`
+
+Create a memory host for deterministic application tests.
+
+### `App.GTUI.host.terminal(...)`
+
+Create a terminal host for interactive execution.
+
+### `App.GTUI.memory({ width = 80, height = 24, scrollBar } = {…})`
+
+Create an in-memory host for application tests. It records rendered
+semantics and effects; it never emits terminal bytes.
+
+Returns `object` — in-memory host implementing the GTUI host protocol
+
+### `App.GTUI.memory.effects`
+
+**Read** — `get effects()`
+
+Recorded effects, copied so callers cannot mutate host state.
+
+Returns `object[]` — shallow copy of recorded effects
+
+### `App.GTUI.memory.flush()`
+
+Finish pending host output; memory hosts have nothing to flush.
+
+Returns `void`
+
+### `App.GTUI.memory.restoreCount`
+
+**Read** — `get restoreCount()`
+
+Number of completed host restoration cycles.
+
+Returns `number` — restoration count
+
+### `App.GTUI.memory.send(message)`
+
+Send a host input message to the mounted application.
+
+- `message` (object) — input message
+
+Returns `void`
+
+### `App.GTUI.memory.snapshot()`
+
+Return the current rendered scene in semantic, testable form.
+
+Returns `object` — scene snapshot with current dimensions
+
+### `App.GTUI.scrollGlyph(value, fallback)`
+
+Validate a one-cell grapheme for use as a scroll indicator.
+
+- `value` (*) — candidate glyph
+- `fallback` (*) — result when candidate is invalid
+
+Returns `*` — candidate when it is a one-cell grapheme, otherwise fallback
+
+### `App.GTUI.terminal(options = {…})`
+
+Construct a terminal host that owns input decoding and terminal rendering,
+or return `options.host` unchanged.
+
+- `[options={}]` (object) — terminal streams, mode, dimensions, and policies
+
+Returns `object` — supplied or newly-created GTUI host
+
+### `App.GTUI.view = freeze({…})`
+
+Immutable constructors for renderable view nodes.
+
+### `App.GTUI.view.button(props = {…}, label = "")`
+
+Create a button node; activation emits `action.select {id, action}`.
+`pressed` styles an on toggle and `tone` adds a role.
+
+- `[props={}]` (object) — button properties
+- `[label=""]` (*) — label converted to a string
+
+Returns `object` — frozen button node
+
+### `App.GTUI.view.column(...)`
+
+Create an immutable vertical container.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen column node
+
+### `App.GTUI.view.feed(props = {…})`
+
+Create an immutable feed control.
+
+- `[props={}]` (object) — feed properties
+
+Returns `object` — frozen feed node
+
+### `App.GTUI.view.footer(props = {…}, items = [])`
+
+Build a one-line footer of app-pushed notification items, aligned start/end;
+tight rows drop lowest priority first. Empty items yield null.
+
+- `[props={}]` (object) — row properties
+- `[items=[]` (Array<object>) — ] items with text and optional role, priority, align, action
+
+Returns `object|null` — frozen footer row, or null when empty
+
+### `App.GTUI.view.grid(...)`
+
+Create an immutable grid container.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen grid node
+
+### `App.GTUI.view.input(props = {…})`
+
+Create an immutable controlled text input. The value remains application-owned.
+`mask: true` displays one bullet per codepoint; a non-empty string requests
+a one-cell mask glyph (invalid glyphs use a bullet). Masking preserves the
+actual value and UTF-16 caret/selection offsets, hides completions, disables
+Copy, and omits the actual value from JSON and ordinary debug inspection.
+Masking is presentation, not encryption: direct node.value access still
+returns the actual value; input.change/input.submit carry it to the owner.
+
+- `[props={}]` (object) — Input properties including optional value, mask, caret, selection, focus, and placeholder. Properties are shallow-copied; referenced objects are retained, not mutated.
+
+Returns `object` — Frozen input node; construction has no side effects and is retry-safe.
+
+Throws — {Error} Propagates property-access or mask string processing errors.
+
+### `App.GTUI.view.menu(props = {…})`
+
+Create an immutable menu control. `searchItems` optionally supplies a
+broader item list used only while the type-to-filter query is nonempty;
+the empty query displays `items`. Filtering does not mutate either list.
+Action items with `alwaysVisible:true` remain during filtering. Set
+`labelOverflow:"clip-middle"` for single-row labels preserving both ends,
+`"clip-end"` for single-row labels clipped at the tail; the default wraps. menu.change reports {id,item,query,reason}, with reason
+"filter" for query edits and "navigation" for arrow moves.
+
+- `[props={}]` (object) — menu properties
+
+Returns `object` — frozen menu node
+
+### `App.GTUI.view.overlay(...)`
+
+Create an immutable overlay container. `passive: true` draws its last
+child above `anchorAction` in the first child's canvas without reserving
+layout rows or capturing input; `position: "above-right"` aligns its right edge.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen overlay node
+
+### `App.GTUI.view.panel(...)`
+
+Create an immutable bordered panel.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen panel node
+
+### `App.GTUI.view.row(...)`
+
+Create an immutable horizontal container.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen row node
+
+### `App.GTUI.view.scroll(...)`
+
+Create an immutable scroll container. Keyboard scroll.change events carry
+source:"keyboard" and repaint immediately; wheel paints remain coalesced.
+
+- `[props={}]` (object) — node properties
+- `[children=[]` (Array|*) — ] child nodes
+
+Returns `object` — frozen scroll node
+
+### `App.GTUI.view.table(props = {…}, rows = [])`
+
+Create an immutable table with frozen rows and cells.
+
+- `[props={}]` (object) — table properties
+- `[rows=[]` (object[]) — ] rows; each row's cells are copied and frozen
+
+Returns `object` — frozen table node
+
+### `App.GTUI.view.text(props = {…}, content = "")`
+
+Create immutable text content.
+
+- `[props={}]` (object) — text-node properties
+- `[content=""]` (*) — text content
+
+Returns `object` — frozen text node
+
+### `App.GTUI.view.toolbar(...)`
+
+Create a horizontal toolbar container with host-owned roving focus.
+Children use `{id, focus, gap?, align?: "end"}`; while focused, navigation
+keys move focus and Enter/Space activate; other keys bubble.
+
+- `[props={}]` (object) — toolbar properties
+- `[children=[]` (Array|*) — ] button children
+
+Returns `object` — frozen toolbar node
+
+## App.Markdown
 
 ### `class BashSanitizer`
 
@@ -5107,20 +4235,22 @@ Streaming sanitizer — one instance PER LIVE TOOL CALL (typically one
 bash command). Holds the look-back buffer that catches escape sequences
 split across chunks, so concurrent calls must never share an instance.
 
-### `Markdown.BashSanitizer.constructor({ markdown = false } = {…})`
+### `App.Markdown.BashSanitizer.constructor({ markdown = false } = {…})`
 
 Create one sanitizer for one live tool call.
 
 Returns `BashSanitizer` — A new streaming sanitizer instance.
 
-### `Markdown.BashSanitizer.end()`
+Throws — {TypeError} If `options` is `null` and cannot be destructured.
+
+### `App.Markdown.BashSanitizer.end()`
 
 Flush held bytes when the call ends, dropping any unfinished escape and balancing streamed emphasis.
 Resets the pending buffer and emphasis state for this instance.
 
 Returns `string` — Sanitized text remaining in the buffer, plus any needed closing Markdown markers.
 
-### `Markdown.BashSanitizer.push(chunk)`
+### `App.Markdown.BashSanitizer.push(chunk)`
 
 Sanitize the next raw chunk. A trailing INCOMPLETE escape is held
 back (not emitted) until the following chunk completes it — or end().
@@ -5133,13 +4263,7 @@ Returns `string` — Display-safe portion of the stream; any incomplete trailing
 
 Canonical markdown module namespace. Static-only by design.
 
-### `Markdown.BashSanitizer`
-
-Streaming sanitizer — one instance PER LIVE TOOL CALL (typically one
-bash command). Holds the look-back buffer that catches escape sequences
-split across chunks, so concurrent calls must never share an instance.
-
-### `Markdown.classifyLine(line, state = {…})`
+### `App.Markdown.classifyLine(line, state = {…})`
 
 Classify one complete Markdown source line into its block kind.
 Fence markers are recognized against and update the supplied fence
@@ -5151,7 +4275,9 @@ list, and quote order; unmatched lines are plain text.
 
 Returns `{kind: "fence", lang: string, raw: string` — | {kind: "code", raw: string} | {kind: "hr", width: number, raw: string} | {kind: "heading", depth: number, text: string, raw: string} | {kind: "list", indent: string, marker: string, ordered: boolean, text: string, raw: string} | {kind: "quote", text: string, raw: string} | {kind: "text", text: string, raw: string}} Classification object. `raw` is always the source line; where present, `text` is content with the block marker stripped. List `marker` preserves the source marker (for example, `-`, `*`, or `2.`); normalization is left to the renderer.
 
-### `Markdown.lexMarkdown(text)`
+Throws — {TypeError} If `line` is not a string or `state` is null/undefined when explicitly supplied; regular-expression matching and state access require valid inputs.
+
+### `async App.Markdown.lexMarkdown(text)`
 
 Tokenize complete markdown text. A unified Git diff is detected first
 and returned as its own single token (see parseGitDiff); otherwise
@@ -5162,13 +4288,15 @@ delimiters; otherwise the builtin lexer handles math. Same token shapes for walk
 
 Returns `Promise<Array<object>>` — Resolves to marked-shaped block tokens; recognized unified Git diffs are returned as a single token.
 
-### `Markdown.markdownEngine()`
+Throws — {Error} Rejects if engine loading or tokenization fails.
+
+### `async App.Markdown.markdownEngine()`
 
 Determine which engine whole-text rendering routes through, lazily loading and caching optional-engine availability.
 
 Returns `Promise<"marked"|"builtin">` — Resolves to `"marked"` when the optional package is available, or `"builtin"` otherwise; import failure selects `"builtin"`.
 
-### `Markdown.mathBlockAt(lines, start)`
+### `App.Markdown.mathBlockAt(lines, start)`
 
 Find a complete, line-delimited display-math block; an unclosed block is not consumed.
 
@@ -5177,7 +4305,7 @@ Find a complete, line-delimited display-math block; an unclosed block is not con
 
 Returns `{end: number, text: string, source: string, tree: object}|null` — Block data and parsed AST, or null.
 
-### `Markdown.mathText(node)`
+### `App.Markdown.mathText(node)`
 
 Convert a math AST node to a plain-text fallback representation.
 
@@ -5185,7 +4313,7 @@ Convert a math AST node to a plain-text fallback representation.
 
 Returns `string` — Plain-text rendering; recursively visits child nodes.
 
-### `Markdown.parseGitDiff(text)`
+### `App.Markdown.parseGitDiff(text)`
 
 Parse one complete unified Git diff synchronously, with exact source-line spans.
 
@@ -5193,7 +4321,9 @@ Parse one complete unified Git diff synchronously, with exact source-line spans.
 
 Returns `object|null` — The Git-diff token, or `null` when the text is not a complete recognized diff.
 
-### `Markdown.parseInline(text)`
+Throws — {TypeError} If converting `text` to a string fails.
+
+### `App.Markdown.parseInline(text)`
 
 Tokenize inline markdown into flat, non-nested spans, choosing the earliest recognized markup.
 Code spans, links, math, strong, and emphasis are recognized; unrecognized content remains text.
@@ -5202,7 +4332,9 @@ Code spans, links, math, strong, and emphasis are recognized; unrecognized conte
 
 Returns `Array<{type: string, text: string, href?: string, source?: string, tree?: object}>` — Ordered spans; math spans also contain source and parsed tree
 
-### `Markdown.parseMath(source)`
+Throws — {Error} May propagate errors raised by inline-math parsing
+
+### `App.Markdown.parseMath(source)`
 
 Parse a bounded TeX subset into presentation-independent nodes; unknown commands remain literal.
 
@@ -5210,7 +4342,9 @@ Parse a bounded TeX subset into presentation-independent nodes; unknown commands
 
 Returns `{type: string, [key: string]: any}` — AST node; over-limit input is returned as one literal symbol.
 
-### `Markdown.renderInline(text, renderer = {…})`
+Throws — String conversion may throw for hostile values.
+
+### `App.Markdown.renderInline(text, renderer = {…})`
 
 Render one fragment of inline markdown through a renderer's inline
 callbacks, synchronously, via the builtin tokenizer (engine routing
@@ -5222,7 +4356,9 @@ primitive incremental renderers style complete lines with.
 
 Returns `string` — The synchronously rendered inline fragment.
 
-### `Markdown.renderMarkdown(text, renderer = {…})`
+Throws — {Error} Propagates errors thrown during parsing or by renderer callbacks.
+
+### `async App.Markdown.renderMarkdown(text, renderer = {…})`
 
 Render complete markdown text through a renderer's callbacks,
 engine-routed (see lexMarkdown). Rendered tokens join with one
@@ -5234,7 +4370,9 @@ one blank line in the output.
 
 Returns `Promise<string>` — Resolves to rendered output with tokens joined by newlines.
 
-### `Markdown.sanitizeText(text, { markdown = false, state = null, open = false } = {…})`
+Throws — {Error} Rejects if tokenization or rendering fails.
+
+### `App.Markdown.sanitizeText(text, { markdown = false, state = null, open = false } = {…})`
 
 Sanitize a COMPLETE untrusted string for display.
  - \r\n and lone \r (progress-bar carriage returns) become \n
@@ -5250,7 +4388,11 @@ A trailing INCOMPLETE escape is removed — this string is finished.
 
 Returns `string` — Sanitized display text, with optional balanced Markdown emphasis markers.
 
-### `Markdown.walkTokens(tokens, renderer = {…})`
+Throws — {TypeError} If `options` is `null` and cannot be destructured.
+
+Throws — {Error} If input coercion throws an error.
+
+### `App.Markdown.walkTokens(tokens, renderer = {…})`
 
 Render marked-shaped block tokens, completing missing renderer callbacks
 with plain-text defaults. Nested block and inline content is rendered
@@ -5263,239 +4405,52 @@ callbacks receive per-line classifications before the enclosing callback.
 
 Returns `string` — rendered block output
 
-### `Markdown.classifyLine(line, state = {…})`
+Throws — {TypeError} if tokens is not an array, a token is nullish, or a renderer callback throws
 
-Classify one complete Markdown source line into its block kind.
-Fence markers are recognized against and update the supplied fence
-state; while inside a fence, non-closing lines are classified as code.
-Outside fences, block markers are checked in horizontal-rule, heading,
-list, and quote order; unmatched lines are plain text.
-
-- `line` (string) — One source line, without a trailing `\n`.
-
-Returns `{kind: "fence", lang: string, raw: string` — | {kind: "code", raw: string} | {kind: "hr", width: number, raw: string} | {kind: "heading", depth: number, text: string, raw: string} | {kind: "list", indent: string, marker: string, ordered: boolean, text: string, raw: string} | {kind: "quote", text: string, raw: string} | {kind: "text", text: string, raw: string}} Classification object. `raw` is always the source line; where present, `text` is content with the block marker stripped. List `marker` preserves the source marker (for example, `-`, `*`, or `2.`); normalization is left to the renderer.
-
-### `async Markdown.lexMarkdown(text)`
-
-Tokenize complete markdown text. A unified Git diff is detected first
-and returned as its own single token (see parseGitDiff); otherwise
-`marked`'s lexer (gfm, breaks) runs when available without math
-delimiters; otherwise the builtin lexer handles math. Same token shapes for walkTokens.
-
-- `text` (string) — Complete markdown source; nullish values are coerced to an empty string at runtime.
-
-Returns `Promise<Array<object>>` — Resolves to marked-shaped block tokens; recognized unified Git diffs are returned as a single token.
-
-### `async Markdown.markdownEngine()`
-
-Determine which engine whole-text rendering routes through, lazily loading and caching optional-engine availability.
-
-Returns `Promise<"marked"|"builtin">` — Resolves to `"marked"` when the optional package is available, or `"builtin"` otherwise; import failure selects `"builtin"`.
-
-### `Markdown.mathBlockAt(lines, start)`
-
-Find a complete, line-delimited display-math block; an unclosed block is not consumed.
-
-- `lines` (string[]) — Source lines.
-- `start` (number) — Candidate opening-line index.
-
-Returns `{end: number, text: string, source: string, tree: object}|null` — Block data and parsed AST, or null.
-
-### `Markdown.mathText(node)`
-
-Convert a math AST node to a plain-text fallback representation.
-
-- `node` (object|null|undefined) — Math AST node; nullish input produces an empty string.
-
-Returns `string` — Plain-text rendering; recursively visits child nodes.
-
-### `Markdown.parseGitDiff(text)`
-
-Parse one complete unified Git diff synchronously, with exact source-line spans.
-
-- `text` (string) — Source text; coerced to a string by the parser.
-
-Returns `object|null` — The Git-diff token, or `null` when the text is not a complete recognized diff.
-
-### `Markdown.parseInline(text)`
-
-Tokenize inline markdown into flat, non-nested spans, choosing the earliest recognized markup.
-Code spans, links, math, strong, and emphasis are recognized; unrecognized content remains text.
-
-- `text` (string|null|undefined) — one line/fragment; nullish values are treated as empty, otherwise converted with String
-
-Returns `Array<{type: string, text: string, href?: string, source?: string, tree?: object}>` — Ordered spans; math spans also contain source and parsed tree
-
-### `Markdown.parseMath(source)`
-
-Parse a bounded TeX subset into presentation-independent nodes; unknown commands remain literal.
-
-- `source` (*) — Input converted to a string (nullish values become empty).
-
-Returns `{type: string, [key: string]: any}` — AST node; over-limit input is returned as one literal symbol.
-
-### `Markdown.renderInline(text, renderer = {…})`
-
-Render one fragment of inline markdown through a renderer's inline
-callbacks, synchronously, via the builtin tokenizer (engine routing
-needs whole text — inline fragments don't have it). This is the
-primitive incremental renderers style complete lines with.
-
-- `text` (string) — Inline markdown (no block structure).
-- `[renderer={}]` (object) — Inline callbacks; missing callbacks default to plain text.
-
-Returns `string` — The synchronously rendered inline fragment.
-
-### `async Markdown.renderMarkdown(text, renderer = {…})`
-
-Render complete markdown text through a renderer's callbacks,
-engine-routed (see lexMarkdown). Rendered tokens join with one
-"\n"; source blank lines are space tokens, so one blank line remains
-one blank line in the output.
-
-- `text` (string) — Complete markdown source passed to {@link lexMarkdown}.
-- `[renderer={}]` (object) — Marked-style callbacks; missing callbacks default to plain text.
-
-Returns `Promise<string>` — Resolves to rendered output with tokens joined by newlines.
-
-### `Markdown.sanitizeText(text, { markdown = false, state = null, open = false } = {…})`
-
-Sanitize a COMPLETE untrusted string for display.
- - \r\n and lone \r (progress-bar carriage returns) become \n
- - ANSI escape sequences are removed: CSI, OSC (BEL- or ST-terminated),
-   DCS/SOS/PM/APC (ST-terminated), charset/designate/short ESC forms
- - SGR bold/italic/underline become Markdown markers when markdown=true
-   (balanced across style changes; nothing left open at the end)
- - C0 controls (except \t, \n), DEL, and C1 controls are dropped
-A trailing INCOMPLETE escape is removed — this string is finished.
-
-- `text` (string)
-- `text` (string) — Input value, coerced with `String(text ?? "")`.
-
-Returns `string` — Sanitized display text, with optional balanced Markdown emphasis markers.
-
-### `Markdown.walkTokens(tokens, renderer = {…})`
-
-Render marked-shaped block tokens, completing missing renderer callbacks
-with plain-text defaults. Nested block and inline content is rendered
-recursively; top-level block results are joined with one newline.
-List and table callbacks receive normalized item/cell metadata, and gitdiff
-callbacks receive per-line classifications before the enclosing callback.
-
-- `tokens` (Array<object>|null|undefined) — block tokens; nullish input is treated as empty
-- `[renderer={}]` (object) — renderer callbacks; missing callbacks use plain-text defaults
-
-Returns `string` — rendered block output
-
-## Sandbox
-
-### `class Sandbox`
-
-Sandbox façade for scoped child processes; dispatch owns teardown.
-
-### `Sandbox.backgroundList(agent)`
-
-List an Agent's retained commands.
-
-### `Sandbox.backgroundOutput(agent, id, from)`
-
-Read an Agent's command output.
-
-### `Sandbox.backgroundStart(agent, options)`
-
-Start a retained Agent-owned command.
-
-### `Sandbox.backgroundStop(agent, id)`
-
-Stop one command group.
-
-### `Sandbox.backgroundStopAll(agent)`
-
-Stop every retained command of one Agent.
-
-### `Sandbox.osAvailable()`
-
-Is OS write-sandbox enforcement in effect (own mechanism or a
-detected outer jail)? Probed once per process; no opt-out.
-
-Returns `boolean` — Whether this process or an enclosing jail enforces write restrictions.
-
-### `Sandbox.osKind()`
-
-The OS write-sandbox mechanism in effect: "seatbelt", "bwrap",
-"delegated" (an outer jail already confines this process; the wrap
-is a passthrough), or null (no enforcement; Agent forces safe mode).
-
-Returns `"seatbelt"|"bwrap"|"delegated"|null` — The active mechanism, or null if unavailable.
-
-### `Sandbox.osWrap(file, args, cwd, workingDirectory)`
-
-Wrap a program invocation in the OS write sandbox: the [file, argv]
-to spawn (unchanged when no mechanism applies).
-
-- `file` (string) — Program executable to run.
-- `[args=[]` (string[]) — ] - Arguments passed to the program.
-- `[cwd=process.cwd()]` (string) — Agent folder whose writes are permitted.
-- `[workingDirectory=cwd]` (string) — Working directory for the wrapped process.
-
-Returns `[string, string[]]` — Executable and argument vector to pass to spawn.
-
-### `Sandbox.processStop(child, options)`
-
-Stop a child process or its owned process group and wait for it to close.
-Repeated calls are safe and share the same completion promise. Sends
-SIGKILL; if group termination fails, it falls back to killing the child.
-
-- `child` (import("node:child_process").ChildProcess) — Process to stop.
-
-Returns `Promise<void>` — Resolves when the child closes or emits an error.
-
-### `Sandbox.scope()`
-
-Create a process scope owned and closed by one tool dispatch.
-
-Returns `ProcessScope` — A scope for spawning, tracking, and stopping child processes.
-
-### `Sandbox.spawn(file, args, options)`
-
-Spawn a child process using the sandbox's process-group ownership policy.
-On non-Windows hosts outside a tool-worker process, the child is detached
-so its process group can be stopped together. Spawn errors are reported on
-the returned child process using Node.js child-process events.
-
-- `file` (string) — Executable to run.
-- `args` (string[]) — Arguments passed to the executable.
-- `[options={}]` (import("node:child_process").SpawnOptions) — Node.js spawn options.
-
-Returns `import("node:child_process").ChildProcess` — The spawned child process.
-
-## TUI
+## App.TUI
 
 ### `class TUI`
 
 Empty namespace class for the TUI module, published as `App.TUI` by
 `lib/app.js`; static API members are assigned below.
 
-### `TUI.close(runtime)`
+### `App.TUI.createApp(agent, { env = agent?.env, cwd = "", sources, completionIO, log, open, columns, rows } = {…})`
+
+App lifecycle and presentation. Call dispose to detach UI bridges, then await closeWorkspace to release App-created agents and acquired project Envs; borrowed unrelated resources remain open.
+
+- `agent` (object) — the Agent this app starts on ("main")
+- `[options]` (object)
+- `[options.env=agent.env]` (object) — Env, for status/menu facts
+- `[options.cwd]` (string) — the process working folder
+- `[options.sources]` (object) — lib/tui-app/completion.js sources
+- `[options.completionIO]` (object) — completion filesystem hooks ({listDir}); defaults to real directory reads resolved under cwd
+- `[options.open]` ((url: string) => void) — browser opener handed to the OAuth flow; undefined uses the flow's system-browser default
+- `[options.log]` ((line: string) => void) — an external diagnostics mirror (piped `--input` runs: stdout IS the terminal byte stream, not human-parseable, so the caller may want every notice ALSO written somewhere plain — parity with the legacy engines' `log` option)
+
+Returns `{init: Function, update: Function, view: Function, bindings: Function, currentAgent: Function, closeWorkspace: Function, dispose: Function, abandonPending: Function, theme: object}` — App lifecycle and presentation. Call dispose to detach UI bridges, then await closeWorkspace to release App-created agents and acquired project Envs; borrowed unrelated resources remain open.
+
+### `App.TUI.TUI_ENGINES = TUI_MODES`
+
+The rendering modes accepted by {@link createRepl} (currently `inline` and `alt`).
+
+### `App.TUI.close(runtime)`
 
 Close TUI-owned agents, sessions, and background resources by delegating to
 the CLI cleanup routine. Controllers returned by `createRepl` and
 `createLineRepl` also expose an idempotent `close()` method.
 
-Returns `{agent?: object, session?: {id: string, file?: string}|null}` — Cleanup result returned by the CLI routine.
+Returns `Promise<{agent?: object, session?: {id: string, file?: string}|null}>` — Cleanup result returned by the CLI routine.
 
-### `TUI.createApp`
+Effects — Delegates cleanup of the supplied runtime's TUI-owned resources.
 
-Public createApp namespace member; see its owning module for the contract.
-
-### `TUI.createLineRepl({ agent, input, writeOut, log, ansi = true, signals = true, onExit })`
+### `App.TUI.createLineRepl({ agent, input, writeOut, log, ansi = true, signals = true, onExit })`
 
 Create the piped, cooked-mode front end, which reads one input message per
 line. Re-exported from `./line-repl.js`; this module does not wrap it.
 
 Returns `object` — The line-oriented REPL controller.
 
-### `TUI.createRepl({ agent, env, engine, input, write, output, resizeEmitter, log, onExit, cwd, signals, columns, rows })`
+### `App.TUI.createRepl({ agent, env, engine, input, write, output, resizeEmitter, log, onExit, cwd, signals, columns, rows })`
 
 The interactive REPL. `options.engine` picks the rendering mode:
 "inline" (native scrollback) or "alt" (default alternate screen).
@@ -5519,7 +4474,11 @@ and delegates controller creation to the interactive REPL implementation.
 
 Returns `{start: () => Promise<void>, close: () => void}` — Controller with asynchronous `start` and synchronous `close` methods.
 
-### `TUI.run(state)`
+Throws — {Error} If `engine` is neither `inline` nor `alt`; the error lists available engines.
+
+Effects — Creates/delegates creation of an interactive terminal controller using the supplied streams and callbacks.
+
+### `App.TUI.run(state)`
 
 Run the complete TUI application from normalized declarative state.
 Executables own argument parsing and process-exit policy; the runner
@@ -5529,85 +4488,14 @@ creates the environment and Agent, selects the mode, and performs cleanup.
 
 Returns `Promise<{code: number, agent: object, session: object|null}>` — Promise resolving to the application exit code, Agent, and session result.
 
-### `TUI.TUI_ENGINES`
+Effects — Runs the application and its cleanup lifecycle through `runApplication`.
 
-The rendering modes accepted by {@link createRepl} (currently `inline` and `alt`).
-
-### `TUI.TUI_ENGINES = TUI_MODES`
-
-The rendering modes accepted by {@link createRepl} (currently `inline` and `alt`).
-
-### `TUI.close(runtime)`
-
-Close TUI-owned agents, sessions, and background resources by delegating to
-the CLI cleanup routine. Controllers returned by `createRepl` and
-`createLineRepl` also expose an idempotent `close()` method.
-
-Returns `{agent?: object, session?: {id: string, file?: string}|null}` — Cleanup result returned by the CLI routine.
-
-### `TUI.createLineRepl({ agent, input, writeOut, log, ansi = true, signals = true, onExit })`
-
-Create the piped, cooked-mode front end, which reads one input message per
-line. Re-exported from `./line-repl.js`; this module does not wrap it.
-
-Returns `object` — The line-oriented REPL controller.
-
-### `TUI.createRepl({ agent, env, engine, input, write, output, resizeEmitter, log, onExit, cwd, signals, columns, rows })`
-
-The interactive REPL. `options.engine` picks the rendering mode:
-"inline" (native scrollback) or "alt" (default alternate screen).
-Both modes use the same option contract. The function validates the mode
-and delegates controller creation to the interactive REPL implementation.
-
-- `options` (Object) — REPL configuration; required, with no default.
-- `options.agent` (object) — Agent that owns conversation state and turns.
-- `[options.env]` (object) — Environment supplied to the REPL; omitted by default.
-- `[options.engine="alt"]` ("inline"|"alt") — Rendering mode; nullish or omitted selects `alt`.
-- `options.input` (NodeJS.ReadableStream) — Required stdin-like input stream.
-- `[options.write]` ((chunk: string) => void) — Terminal output sink; omitted by default.
-- `[options.output]` (NodeJS.WritableStream) — Terminal output/resize source; omitted by default.
-- `[options.resizeEmitter]` (NodeJS.EventEmitter) — Explicit resize source; omitted by default.
-- `[options.log]` ((line: string) => void) — Diagnostics mirror; omitted by default.
-- `[options.onExit]` (() => void) — Callback after terminal restoration; omitted by default.
-- `[options.cwd]` (string) — Working folder used for the title; omitted by default.
-- `[options.signals]` (NodeJS.EventEmitter) — Signal source; omitted by default.
-- `[options.columns]` ((() => number)|number) — Viewport width override; omitted by default.
-- `[options.rows]` ((() => number)|number) — Viewport height override; omitted by default.
-
-Returns `{start: () => Promise<void>, close: () => void}` — Controller with asynchronous `start` and synchronous `close` methods.
-
-### `TUI.run(state)`
-
-Run the complete TUI application from normalized declarative state.
-Executables own argument parsing and process-exit policy; the runner
-creates the environment and Agent, selects the mode, and performs cleanup.
-
-- `[state]` (object) — Normalized application state; optional and forwarded unchanged, with no default applied here.
-
-Returns `Promise<{code: number, agent: object, session: object|null}>` — Promise resolving to the application exit code, Agent, and session result.
-
-## Web
+## App.Web
 
 ### `class Web`
 
-Static namespace for the Web front end (published as App.Web by lib/app.js).
+Static Web facade: serve(state) starts a host and returns its awaited stop/done lifecycle.
 
-### `Web.AgentSession`
+### `App.Web.serve(state = {…})`
 
-Public AgentSession namespace member; see its owning module for the contract.
-
-### `Web.createWebServer`
-
-Public createWebServer namespace member; see its owning module for the contract.
-
-### `Web.MAX_WS_PAYLOAD_LENGTH`
-
-Public MAX_WS_PAYLOAD_LENGTH namespace member; see its owning module for the contract.
-
-### `Web.parseClientMessage`
-
-Public parseClientMessage namespace member; see its owning module for the contract.
-
-### `Web.serve`
-
-Public serve namespace member; see its owning module for the contract.
+Start the initial workspace, the project registry, and every pinned project (user projects.json).

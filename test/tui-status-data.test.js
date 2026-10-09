@@ -12,7 +12,7 @@ test("modelParts: splits the first slash only and leaves missing selection empty
 
 test("statusData: model setting chips display native model id, without changing qualified Agent.model", async () => {
   const { statusData } = await import("../lib/app/tui/status-data.js");
-  const agent = { model: "endpoint/team/model", context: { save: false } };
+  const agent = { model: "endpoint/team/model", can: { write: true }, context: { save: false } };
   const [endpoint, model] = statusData({ agent }).chips;
   expect(endpoint.label).toBe("endpoint");
   expect(model.label).toBe("team/model");
@@ -20,7 +20,7 @@ test("statusData: model setting chips display native model id, without changing 
 });
 
 function agentStub({ contextUsage = null, planUsage = null } = {}) {
-  return { contextUsage, planUsage };
+  return { contextUsage, can: { write: true }, context: { planUsage } };
 }
 
 test("turnReadoutParts: context only — no in/out, no plan segment (no quotas, no line, no noise)", () => {
@@ -188,7 +188,7 @@ test("statusView: the plan (label, usage, reset) shows once — in the readout b
 
 test("statusData: global state — one working agent outranks another's stale disconnect", async () => {
   const { statusData } = await import("../lib/app/tui/status-data.js");
-  const down = { ioState: "disconnected", busy: false };
+  const down = { ioState: "disconnected", busy: false, can: { write: true } };
   const env = (...agents) => ({ agents: () => agents });
   expect(statusData({ agent: down, env: env(down, { ioState: "working", busy: true }) }).state).toBe("working");
   expect(statusData({ agent: down, env: env(down, { ioState: "idle", busy: false }) }).state).toBe("disconnected");

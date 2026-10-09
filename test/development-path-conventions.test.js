@@ -16,7 +16,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 
 function setup() {
   mkdirSync(ROOT, { recursive: true });
-  return { env: { cwd: resolve(ROOT), settings: {} } };
+  return { env: { folder: resolve(ROOT), settings: {} } };
 }
 
 async function expectConvention(path, cwd) {
@@ -30,8 +30,8 @@ describe("development path conventions", () => {
   test("temporary roots and children pass content and command trip-wires", async () => {
     const context = setup();
     for (const root of temporaryRoots) {
-      await expectConvention(root, context.env.cwd);
-      await expectConvention(`${root}/omoya-development-probe/file.txt`, context.env.cwd);
+      await expectConvention(root, context.env.folder);
+      await expectConvention(`${root}/omoya-development-probe/file.txt`, context.env.folder);
     }
     const fixture = `import { join } from 'node:path';\nconst probe = join(process.env.HOME ?? ${JSON.stringify(temporaryRoots[0])}, '.probe');\n`;
     await write({ path: "jailed.js", content: fixture }, context);
@@ -49,7 +49,7 @@ describe("development path conventions", () => {
   test("device and process descriptor conventions pass without rewriting scripts", async () => {
     const context = setup();
     for (const path of [...devices, systemPath("dev", "fd", "1"), systemPath("proc", "self", "fd", "2")]) {
-      await expectConvention(path, context.env.cwd);
+      await expectConvention(path, context.env.folder);
     }
     const script = `printf '\\n' >${devices[0]}\nprintf '%s' '${temporaryRoots[0]}'\n`;
     await write({ path: "script.sh", content: script }, context);
@@ -62,9 +62,9 @@ describe("development path conventions", () => {
     const outside = systemPath("etc", "passwd");
     for (const path of [outside, `${temporaryRoots[0]}/../etc/passwd`, `${devices[0]}/../../etc/passwd`]) {
       const text = `cat ${path}`;
-      expect(findTraversal(text, { cwd: context.env.cwd })).not.toEqual([]);
-      expect(await findWriteTraversal(text, { cwd: context.env.cwd })).not.toEqual([]);
-      expect(await findCommandTraversal(text, { cwd: context.env.cwd })).not.toEqual([]);
+      expect(findTraversal(text, { cwd: context.env.folder })).not.toEqual([]);
+      expect(await findWriteTraversal(text, { cwd: context.env.folder })).not.toEqual([]);
+      expect(await findCommandTraversal(text, { cwd: context.env.folder })).not.toEqual([]);
     }
     await expect(write({ path: `${temporaryRoots[0]}/omoya-destination-probe`, content: "x" }, context)).rejects.toThrow(/boundary/);
     const sibling = resolve(ROOT, "outside-existing.txt");
@@ -77,6 +77,6 @@ describe("development path conventions", () => {
     const local = resolve(ROOT, "existing.txt");
     writeFileSync(local, "x");
     await expect(write({ path: "reference.js", content: `const path = ${JSON.stringify(local)};` }, context)).rejects.toThrow(/relative reference/);
-    expect(await findWriteTraversal(`const path = ${JSON.stringify(resolve(ROOT, "missing.txt"))};`, { cwd: context.env.cwd })).toEqual([]);
+    expect(await findWriteTraversal(`const path = ${JSON.stringify(resolve(ROOT, "missing.txt"))};`, { cwd: context.env.folder })).toEqual([]);
   });
 });

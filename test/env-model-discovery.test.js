@@ -2,30 +2,32 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
-import { listEndpointModels } from "../lib/cli.js";
+import { listEndpointModels } from "../lib/app/shared/catalog.js";
 import OpenAIProvider from "../providers/openai.js";
 import { detect, providerAdd, refresh, settingsOf } from "./env-internals.js";
 
 const dirs = [];
 const originalFetch = globalThis.fetch;
-afterEach(() => {
+afterEach(async () => {
+  const results = await Promise.allSettled(Object.values(Env.envs).filter((env) => dirs.includes(env.folder)).map((env) => env.close()));
   globalThis.fetch = originalFetch;
   while (dirs.length) rmSync(dirs.pop(), { recursive: true, force: true });
+  const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+  if (errors.length) throw errors.length === 1 ? errors[0] : new AggregateError(errors, "Model Envs failed to close");
 });
 
-function openaiEnv() {
+async function openaiEnv() {
   const dir = mkdtempSync("./ai-tmp/model-discovery-");
   dirs.push(dir);
-  const env = new Env({ dir, cwd: dir, settingsDir: dir, settings: {
+  const env = await Env.open(dir, { dir, settingsDir: dir, providers: { openai: OpenAIProvider }, settings: {
     providers: { openai: { provider: "openai", url: "https://api.openai.com/v1" } },
-  } });
-  providerAdd(env, "openai", OpenAIProvider);
+  }, init: { providers: false, tools: false, detect: false, models: false } });
   return env;
 }
 
 describe("OpenAI model discovery after startup", () => {
   test("a transient startup timeout does not permanently leave the live endpoint model-less", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let calls = 0;
     globalThis.fetch = async (_url, { signal }) => {
       calls++;
@@ -46,7 +48,7 @@ describe("OpenAI model discovery after startup", () => {
   });
 
   test("a provider ignoring AbortSignal cannot hold the startup refresh hostage", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let resolveFirst;
     let calls = 0;
     globalThis.fetch = async () => {
@@ -68,7 +70,7 @@ describe("OpenAI model discovery after startup", () => {
   });
 
   test("a failed refresh after earlier discovery does not erase live models", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -82,9 +84,10 @@ describe("OpenAI model discovery after startup", () => {
   });
 
   test("a hung retry is bounded before the next late-discovery attempt", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let calls = 0;
-    globalThis.fetch = async (_url, { signal }) => {
+    globalThis.fetch = async (url, { signal }) => {
+      if (!String(url).startsWith("https://api.openai.com/v1/models")) return originalFetch(url, { signal });
       calls++;
       if (calls === 1) {
         return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("timeout")), { once: true }));
@@ -101,7 +104,7 @@ describe("OpenAI model discovery after startup", () => {
   test("late discovery refreshes an environment-detected endpoint in memory only", async () => {
     const dir = mkdtempSync("./ai-tmp/model-discovery-");
     dirs.push(dir);
-    const env = new Env({ dir, cwd: dir, settingsDir: dir });
+    const env = await Env.open(dir, { dir, settingsDir: dir });
     let calls = 0;
     class Wire {
       static provider = {};
@@ -124,7 +127,7 @@ describe("OpenAI model discovery after startup", () => {
   });
 
   test("an endpoint removed and re-added during a hung probe rejects obsolete publication", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let finishOld;
     let calls = 0;
     globalThis.fetch = async () => {
@@ -142,7 +145,7 @@ describe("OpenAI model discovery after startup", () => {
   });
 
   test("a dropped endpoint cannot be refreshed by its pending discovery", async () => {
-    const env = openaiEnv();
+    const env = await openaiEnv();
     let calls = 0;
     globalThis.fetch = async () => { calls++; throw new Error("offline"); };
     await refresh(env);

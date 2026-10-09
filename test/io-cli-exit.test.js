@@ -24,7 +24,7 @@ function startServer(handler) {
   return `http://127.0.0.1:${server.port}`;
 }
 
-async function runCli({ input = "", args = [], signal } = {}) {
+async function runCli({ input = "", args = [], signal, requestStarted } = {}) {
   // ABSOLUTE + FRESH per spawn: a relative path would miss the child's own
   // cwd, and a shared dir would let one CLI's startup refreshModels() cache a
   // LIVE local server's model list (a dev machine's ollama) that the next
@@ -40,7 +40,8 @@ async function runCli({ input = "", args = [], signal } = {}) {
   proc.stdin.write(input);
   proc.stdin.end();
   if (signal) {
-    setTimeout(() => proc.kill(signal), 150);
+    if (requestStarted) void requestStarted.then(() => proc.kill(signal));
+    else setTimeout(() => proc.kill(signal), 150);
   }
   const [stdout, stderr, exit] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -87,15 +88,18 @@ describe("io CLI exit codes", () => {
   });
 
   test("130 on SIGINT cancellation of an in-flight request", async () => {
-    const url = startServer(() => new Promise((resolve) => pending.push(resolve))); // responds only in afterEach
+    let notifyRequest;
+    const requestStarted = new Promise((resolve) => { notifyRequest = resolve; });
+    const url = startServer(() => { notifyRequest(); return new Promise((resolve) => pending.push(resolve)); }); // responds only in afterEach
     const { exit, stderr } = await runCli({
       input: "hi",
       args: ["--model", "ollama/m", "--url", url, "--timeout", "10000"],
       signal: "SIGINT",
+      requestStarted,
     });
     expect(exit).toBe(130);
     expect(stderr).toContain("SIGINT");
-  }, 15000); // generous: SIGINT timer + process spawn stretch under parallel load
+  }, 15000); // generous: process startup + cancellation under parallel load
 
   test("1 on usage errors (unknown flag, missing value, bad timeout)", async () => {
     for (const args of [["--nope"], ["--model"], ["--timeout", "abc"]]) {

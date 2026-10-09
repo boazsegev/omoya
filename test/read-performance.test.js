@@ -34,7 +34,7 @@ afterEach(() => rmSync(ROOT, { recursive: true, force: true }));
 function setup(files) {
   mkdirSync(ROOT, { recursive: true });
   for (const [path, text] of Object.entries(files)) writeFileSync(`${ROOT}/${path}`, text);
-  return { env: { cwd: ROOT, settings: {} } };
+  return { env: { folder: ROOT, settings: {} } };
 }
 
 describe("read bulk matching regressions", () => {

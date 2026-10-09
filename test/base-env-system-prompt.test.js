@@ -22,88 +22,89 @@ beforeEach(() => {
   originalCwd = process.cwd();
   process.chdir(cwd);
 });
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(Object.values(Env.envs).filter((env) => env.folder === cwd).map((env) => env.close()));
   process.chdir(originalCwd);
   rmSync(dir, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
 });
 
 describe("env.systemPrompt", () => {
-  test("no settings.system and no AGENTS.md anywhere: nothing to prefill", () => {
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: {} });
+  test("no settings.system and no AGENTS.md anywhere: nothing to prefill", async () => {
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: {} });
     expect(env.systemPrompt()).toEqual([]);
   });
 
-  test("settings.system as inline text is used verbatim", () => {
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "be terse" } });
+  test("settings.system as inline text is used verbatim", async () => {
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "be terse" } });
     expect(env.systemPrompt()).toEqual(["be terse"]);
   });
 
-  test("settings.system naming an existing file reads its content", () => {
+  test("settings.system naming an existing file reads its content", async () => {
     const promptFile = join(dir, "prompt.md");
     writeFileSync(promptFile, "from a file\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: promptFile } });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: promptFile } });
     expect(env.systemPrompt()).toEqual(["from a file\n"]);
   });
 
-  test("with no settings.system, falls back to the harness folder's AGENTS.md", () => {
+  test("with no settings.system, falls back to the harness folder's AGENTS.md", async () => {
     writeFileSync(join(dir, "AGENTS.md"), "harness rules\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: {} });
     expect(env.systemPrompt()).toEqual(["harness rules\n"]);
   });
 
-  test("the project folder's own AGENTS.md always layers in, after the base", () => {
+  test("the project folder's own AGENTS.md always layers in, after the base", async () => {
     writeFileSync(join(dir, "AGENTS.md"), "harness rules\n");
     writeFileSync(join(cwd, "AGENTS.md"), "project rules\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: {} });
     expect(env.systemPrompt()).toEqual(["harness rules\n", "project rules\n"]);
   });
 
-  test("the USER SETTINGS folder's AGENTS.md layers between package and project (scan order)", () => {
+  test("the USER SETTINGS folder's AGENTS.md layers between package and project (scan order)", async () => {
     const settingsHome = realpathSync(resolve(mkdtempSync(join(dir, "env-sd-")))); // dir is absolute (the suite chdirs)
     try {
       writeFileSync(join(dir, "AGENTS.md"), "harness rules\n");
       writeFileSync(join(settingsHome, "AGENTS.md"), "user rules\n");
       writeFileSync(join(cwd, "AGENTS.md"), "project rules\n");
-      const env = new Env({ cwd, dir, settingsDir: settingsHome, settings: {} });
+      const env = await Env.open(cwd, { dir, settingsDir: settingsHome, settings: {} });
       expect(env.systemPrompt()).toEqual(["harness rules\n", "user rules\n", "project rules\n"]);
       // settingsDir: null disables the layer
-      env.close();
-      const noLayer = new Env({ cwd, dir, settingsDir: null, settings: {} });
+      await env.close();
+      const noLayer = await Env.open(cwd, { dir, settingsDir: null, settings: {} });
       expect(noLayer.systemPrompt()).toEqual(["harness rules\n", "project rules\n"]);
       // a settings.system override still replaces only the PACKAGE layer
-      noLayer.close();
-      const configured = new Env({ cwd, dir, settingsDir: settingsHome, settings: { system: "be terse" } });
+      await noLayer.close();
+      const configured = await Env.open(cwd, { dir, settingsDir: settingsHome, settings: { system: "be terse" } });
       expect(configured.systemPrompt()).toEqual(["be terse", "user rules\n", "project rules\n"]);
     } finally {
       rmSync(settingsHome, { recursive: true, force: true });
     }
   });
 
-  test("project AGENTS.md layers in even with settings.system set", () => {
+  test("project AGENTS.md layers in even with settings.system set", async () => {
     writeFileSync(join(cwd, "AGENTS.md"), "project rules\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "be terse" } });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "be terse" } });
     expect(env.systemPrompt()).toEqual(["be terse", "project rules\n"]);
   });
 
-  test("harness folder AND project folder being the SAME directory reads it only once", () => {
+  test("harness folder AND project folder being the SAME directory reads it only once", async () => {
     process.chdir(dir); // dir IS the cwd for this test
     writeFileSync(join(dir, "AGENTS.md"), "shared rules\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: {} });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: {} });
     expect(env.systemPrompt()).toEqual(["shared rules\n"]);
   });
 
-  test("never cached: editing the source between calls is picked up immediately", () => {
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "first" } });
+  test("never cached: editing the source between calls is picked up immediately", async () => {
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "first" } });
     expect(env.systemPrompt()).toEqual(["first"]);
     env.settings.system = "second"; // live settings mutation, no reload
     expect(env.systemPrompt()).toEqual(["second"]);
   });
 
-  test("a settings.system file edited on disk is re-read every call, not cached", () => {
+  test("a settings.system file edited on disk is re-read every call, not cached", async () => {
     const promptFile = join(dir, "prompt.md");
     writeFileSync(promptFile, "v1");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: promptFile } });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: promptFile } });
     expect(env.systemPrompt()).toEqual(["v1"]);
     writeFileSync(promptFile, "v2");
     expect(env.systemPrompt()).toEqual(["v2"]);
@@ -119,23 +120,23 @@ describe("env.systemPrompt — {{skill}} prefill", () => {
     return root;
   };
 
-  test("a {{name}} handlebars reference is replaced with the skill's content", () => {
+  test("a {{name}} handlebars reference is replaced with the skill's content", async () => {
     const root = skillRoot("demo", "DEMO RULES");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "before\n{{demo}}\nafter", skills: [root] } });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "before\n{{demo}}\nafter", skills: { [root]: true } } });
     const [text] = env.systemPrompt();
     expect(text).toContain("before\n<skill name=\"demo\">\nDEMO RULES\n</skill>\nafter");
     rmSync(root, { recursive: true, force: true });
   });
 
-  test("an unknown skill name stays verbatim (never a silent rewrite)", () => {
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "keep {{no-such-skill}} here" } });
+  test("an unknown skill name stays verbatim (never a silent rewrite)", async () => {
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "keep {{no-such-skill}} here" } });
     expect(env.systemPrompt()).toEqual(["keep {{no-such-skill}} here"]);
   });
 
-  test("the project AGENTS.md layer expands too; multiple references expand", () => {
+  test("the project AGENTS.md layer expands too; multiple references expand", async () => {
     const root = skillRoot("one", "ONE");
     writeFileSync(join(cwd, "AGENTS.md"), "rules: {{one}} and {{one}} and {{unknown}}\n");
-    const env = new Env({ cwd, dir, settingsDir: dir, settings: { system: "base", skills: [root] } });
+    const env = await Env.open(cwd, { dir, settingsDir: dir, settings: { system: "base", skills: { [root]: true } } });
     const [, local] = env.systemPrompt();
     expect(local).toBe("rules: <skill name=\"one\">\nONE\n</skill> and <skill name=\"one\">\nONE\n</skill> and {{unknown}}\n");
     rmSync(root, { recursive: true, force: true });

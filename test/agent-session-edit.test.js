@@ -99,7 +99,7 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
   test("agent.context edits rewrite a logged file; a memory-only context just changes", async () => {
     const env = await testEnv({ sessions: resolve(ROOT) });
     const io = scriptedIO([[...TEXT(0, "answer"), { type: "done" }]]);
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", contextId: "agent-edit", context: [USER("hi")], createIO: () => io,
     });
     await agent.run();
@@ -110,7 +110,7 @@ describe("session edit/rollback/pop (rewrite-on-flush)", () => {
     expect(records.every((m) => m.op === undefined)).toBe(true); // no change log
     expect(agent.context.at(0)).toEqual(USER("hi-edited"));
 
-    const plain = new Agent({ env, model: "p/m", context: [USER("x")] });
+    const plain = await Agent.create({ env, model: "p/m", context: [USER("x")] });
     plain.context.edit(0, USER("x-edited"));
     expect(plain.context.at(0)).toEqual(USER("x-edited")); // no crash, no file
   });

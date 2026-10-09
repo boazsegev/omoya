@@ -8,7 +8,7 @@ const { relativeCwdPath } = await import(`../guard/resolve.js?now=${revision}`);
 const { createReadState, selectReadBoundary, guardedPath, openReadFile, readChunk, directoryEntries, charge, checkReadState, relativeReadPath, readError, ReadBudgetError } = await import(`./fs.js?revision=${revision}`);
 const { matchesGlob } = await import(`./glob.js?revision=${revision}`);
 const { ancestorIgnores, loadIgnore, isIgnored, isSystemFile } = await import(`./ignore.js?revision=${revision}`);
-const { loadText, selectText, sourceLines, rangeBounds } = await import(`./text.js?revision=${revision}`);
+const { loadText, selectText, sourceLines, rangeBounds, BinaryFileError } = await import(`./text.js?revision=${revision}`);
 const { matchSearch, closeSearch } = await import(`./search.js?revision=${revision}`);
 const { mimeDetect } = await import(`./mime-detection.js?revision=${revision}`);
 
@@ -99,10 +99,16 @@ async function executeQuery(query, state) {
     if (result.kind === "folder") await folderQuery(result, state);
     else await fileQuery(result, state);
   } catch (error) {
-    if (!(error instanceof ReadBudgetError)) throw error;
-    result.complete = false;
-    result.selectionComplete = false;
-    result.status.push(error.message);
+    if (error instanceof BinaryFileError && result.kind === "file" && !query.binary) {
+      result.binarySkipped = true;
+      result.selectionComplete = false;
+      result.status.push(error.message);
+    } else {
+      if (!(error instanceof ReadBudgetError)) throw error;
+      result.complete = false;
+      result.selectionComplete = false;
+      result.status.push(error.message);
+    }
   }
   result.scannedBytes = state.scanned;
   result.outputLimit = state.outputLimit;
@@ -195,7 +201,7 @@ async function folderSearchFile(result, entry, state) {
     await searchFile(result, { path: entry.path, text: loaded.text, lineOffset: 1 }, state);
   } catch (error) {
     if (error instanceof ReadBudgetError || state.signal?.aborted) throw error;
-    if (error.message.includes("Search applies only")) result.skips.binary++;
+    if (error instanceof BinaryFileError && !result.query.binary) result.skips.binary++;
     else if (error.code === "EACCES" || error.code === "EPERM" || error.code === "ENOENT") result.skips.unreadable++;
     else throw error;
   } finally { await opened?.handle.close(); }

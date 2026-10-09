@@ -20,18 +20,21 @@ beforeEach(() => __resetWebRateForTests());
 
 /** An Env with the bundled web providers registered and the two endpoints
  *  the provider-tool tests select (their catalogs list the tested models). */
-function env(settings = {}) {
+async function env(settings = {}) {
   const dir = mkdtempSync("./ai-tmp/web-dispatch-");
   const endpoints = {
     "kimi-coding": { provider: "kimi", url: "https://api.kimi.com/coding/v1" },
     test: { provider: "anthropic", url: "https://api.anthropic.com/v1" },
     codex: { provider: "openai", url: "https://chatgpt.com/backend-api/codex" },
   };
-  // each endpoint section's catalog, merged under the test's own section
-  const section = (name, model) => ({ ...(settings[name] ?? {}), models: { [model]: {}, ...(settings[name]?.models ?? {}) } });
-  return new Env({ cwd: dir, dir, settingsDir: dir, providers: { kimi: KimiProvider, anthropic: AnthropicProvider, openai: OpenAIProvider },
-    settings: { ...settings, providers: { ...endpoints, ...(settings.providers ?? {}) },
-      "kimi-coding": section("kimi-coding", "kimi-for-coding"), test: section("test", "m"), codex: section("codex", "gpt-6-sol") } });
+  // a test passes endpoint sections by name; they live under providers.<name>, over each endpoint's catalog
+  const { "kimi-coding": kimi, test, codex, ...rest } = settings;
+  const sections = { "kimi-coding": [kimi, "kimi-for-coding"], test: [test, "m"], codex: [codex, "gpt-6-sol"] };
+  const providers = { ...(settings.providers ?? {}) };
+  for (const [name, [own = {}, model]] of Object.entries(sections)) {
+    providers[name] = { ...endpoints[name], ...providers[name], ...own, models: { [model]: {}, ...(own.models ?? {}) } };
+  }
+  return await Env.open(dir, { dir, settingsDir: dir, init: { providers: false, tools: false, detect: false, models: false }, providers: { kimi: KimiProvider, anthropic: AnthropicProvider, openai: OpenAIProvider }, settings: { ...rest, providers } });
 }
 
 const SEARCH = { safe: true, description: "search", inputSchema: { type: "object" } };
@@ -39,8 +42,8 @@ const FETCH = { safe: true, description: "fetch", inputSchema: { type: "object" 
 
 /** An Env with the package web tools registered as the global tools a
  *  pair's provider tools shadow. */
-function webEnv(settings) {
-  const e = env(settings);
+async function webEnv(settings) {
+  const e = await env(settings);
   e.toolAdd("web-search", webSearch, SEARCH);
   e.toolAdd("web-fetch", webFetch, FETCH);
   return e;
@@ -48,9 +51,9 @@ function webEnv(settings) {
 
 /** An IO-shaped fake: the surface provider tools read, with IO's own
  *  fetch/connectionCreate (a wire-completed OpenAI connection by default). */
-function fakeAiio({ url, auth, settings = {}, env: fakeEnv, Provider = OpenAI, modelCurrent = "test-model" } = {}) {
+async function fakeAiio({ url, auth, settings = {}, env: fakeEnv, Provider = OpenAI, model = "test-model" } = {}) {
   return {
-    url, modelCurrent, settings: { auth, ...settings }, env: fakeEnv ?? env(),
+    url, model, settings: { auth, ...settings }, env: fakeEnv ?? await Env.open(mkdtempSync("./ai-tmp/web-dispatch-fake-"), { init: { providers: false, tools: false, detect: false, models: false }, settingsDir: null }),
     Provider, provider: Provider.provider,
     fetch(...args) { return IO.prototype.fetch.call(this, ...args); },
     connectionCreate(options) { return IO.prototype.connectionCreate.call(this, options); },
@@ -59,7 +62,7 @@ function fakeAiio({ url, auth, settings = {}, env: fakeEnv, Provider = OpenAI, m
 
 describe("conventional web dispatch", () => {
   test("publishes conventional web tools through the package scanner; a pair's provider tools shadow them", async () => {
-    const e = env({ web: { readability: false } });
+    const e = await env({ web: { readability: false } });
     await toolsLoad(e, { dirs: ["./tools"] });
     const all = await e.tools();
     const safe = await e.tools(true);
@@ -92,9 +95,8 @@ describe("conventional web dispatch", () => {
     class WebProvider {}
     WebProvider.provider = { capabilities: { tools: { "web-search": { function: async ({ args }) => `provider answered ${args.query}` } } } };
     const dir = mkdtempSync("./ai-tmp/web-dispatch-");
-    const e = new Env({ cwd: dir, dir, settingsDir: dir, providers: { web: WebProvider },
-      settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://local.test/" }], engines: [], cacheSeconds: 0 } },
-        providers: { w: { provider: "web", url: "https://w.test/" } }, w: { models: { m: {} } } } });
+    const e = await Env.open(dir, { dir, settingsDir: dir, init: { providers: false, tools: false, detect: false, models: false }, providers: { web: WebProvider }, settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://local.test/" }], engines: [], cacheSeconds: 0 } },
+        providers: { w: { provider: "web", url: "https://w.test/", models: { m: {} } } } } });
     e.toolAdd("web-search", webSearch, SEARCH);
     expect(await e.toolCall("web-search", { query: "provider path" }, { env: e, selector: "w/m", io: {} })).toBe("provider answered provider path");
     const originalFetch = globalThis.fetch;
@@ -110,6 +112,7 @@ describe("conventional web dispatch", () => {
     const calls = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (...args) => {
+      if (!String(args[0]).startsWith("http://fallback.test/search")) return originalFetch(...args);
       calls.push(args);
       return new Response(JSON.stringify({ results: [{ title: "Fallback", url: "https://fallback.test/", content: "found" }] }), { headers: { "content-type": "application/json" } });
     };
@@ -118,9 +121,8 @@ describe("conventional web dispatch", () => {
         class WebProvider {}
         WebProvider.provider = { capabilities: { tools: { "web-search": { function: fn } } } };
         const dir = mkdtempSync("./ai-tmp/web-dispatch-");
-        const e = new Env({ cwd: dir, dir, settingsDir: dir, providers: { web: WebProvider },
-          settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://fallback.test/search" }], engines: [], cacheSeconds: 0 } },
-            providers: { w: { provider: "web", url: "https://w.test/" } }, w: { models: { m: {} } } } });
+        const e = await Env.open(dir, { dir, settingsDir: dir, init: { providers: false, tools: false, detect: false, models: false }, providers: { web: WebProvider }, settings: { web: { debug: true, search: { backends: [{ type: "searxng", url: "http://fallback.test/search" }], engines: [], cacheSeconds: 0 } },
+            providers: { w: { provider: "web", url: "https://w.test/", models: { m: {} } } } } });
         e.toolAdd("web-search", webSearch, SEARCH);
         const result = await e.toolCall("web-search", { query: "missing" }, { env: e, selector: "w/m", io: {} });
         expect(result).toContain("URL: https://fallback.test/");
@@ -131,9 +133,34 @@ describe("conventional web dispatch", () => {
     }
   });
 
+  test("a stalled MCP web tool leaves budget for the local fallback", async () => {
+    const e = await env({ web: { debug: true, mcp: { server: "slow", searchTool: "search", shadow: true },
+      search: { backends: [{ type: "searxng", url: "http://fallback.test/search" }], engines: [], cacheSeconds: 0 } } });
+    const originalCall = e.toolCall.bind(e);
+    const originalFetch = globalThis.fetch;
+    let remoteAborted = false;
+    e.toolCall = async (name, args, ctx) => {
+      if (name !== "mcp") return originalCall(name, args, ctx);
+      return new Promise((_, reject) => {
+        const abort = () => { remoteAborted = true; reject(ctx.signal.reason); };
+        if (ctx.signal.aborted) abort();
+        else ctx.signal.addEventListener("abort", abort, { once: true });
+      });
+    };
+    globalThis.fetch = async () => Response.json({ results: [{ title: "Local fallback", url: "https://fallback.test/" }] });
+    try {
+      const result = await webSearch({ query: "recover", limit: 2 }, { env: e, deadline: Date.now() + 500 });
+      expect(remoteAborted).toBe(true);
+      expect(result).toContain("Local fallback");
+    } finally {
+      e.toolCall = originalCall;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("web-fetch debug names the local access point", async () => {
     // Distinct URL so the package-fetch cache (keyed by URL) cannot collide with other tests.
-    const e = env({ web: { debug: true, readability: false } });
+    const e = await env({ web: { debug: true, readability: false } });
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response("<html><body><article><h1>Local Page</h1><p>local body content here</p></article></body></html>", { status: 200, headers: { "content-type": "text/html" } });
     try {
@@ -146,34 +173,35 @@ describe("conventional web dispatch", () => {
   test("provider tools opt out per model -> endpoint -> global (each tool by name)", async () => {
     // The opt-out is the pair's catalog entry: caps.tools lists the provider
     // tools left after <ep>.models.<m>.tools.<name>, <ep>.tools.<name>,
-    // providerTools.<name>; only those shadow the global tools.
+    // providers.tools.<name>; only those shadow the global tools.
     const SELECTOR = "kimi-coding/kimi-for-coding";
-    const caps = (settings) => env(settings).models(true).get(SELECTOR).caps.tools;
-    expect(caps({})).toEqual(expect.arrayContaining(["web-search", "web-fetch"]));
+    const caps = async (settings) => (await env(settings)).models(true).get(SELECTOR).caps.tools;
+    expect(await caps({})).toEqual(expect.arrayContaining(["web-search", "web-fetch"]));
     // global search off; fetch still allowed
-    expect(caps({ providerTools: { "web-search": false } })).toEqual(["web-fetch"]);
+    expect(await caps({ providers: { tools: { "web-search": false } } })).toEqual(["web-fetch"]);
+    expect(await caps({ providerTools: { "web-search": false } })).toContain("web-search"); // removed key has no alias
     // endpoint re-enables what global disabled
-    expect(caps({ providerTools: { "web-search": false }, "kimi-coding": { tools: { "web-search": true } } })).toContain("web-search");
+    expect(await caps({ providers: { tools: { "web-search": false } }, "kimi-coding": { tools: { "web-search": true } } })).toContain("web-search");
     // endpoint disables fetch independently of search
-    expect(caps({ "kimi-coding": { tools: { "web-fetch": false } } })).toEqual(["web-search"]);
+    expect(await caps({ "kimi-coding": { tools: { "web-fetch": false } } })).toEqual(["web-search"]);
     // model beats endpoint and global
-    expect(caps({
-      providerTools: { "web-fetch": true },
+    expect(await caps({
+      providers: { tools: { "web-fetch": true } },
       "kimi-coding": { tools: { "web-fetch": true }, models: { "kimi-for-coding": { tools: { "web-fetch": false } } } },
     })).not.toContain("web-fetch");
     // model re-enables what endpoint disabled
-    expect(caps({
+    expect(await caps({
       "kimi-coding": { tools: { "web-search": false }, models: { "kimi-for-coding": { tools: { "web-search": true } } } },
     })).toContain("web-search");
     // the published catalog follows caps.tools
-    const off = env({ providerTools: { "web-search": false } });
+    const off = await env({ providers: { tools: { "web-search": false } } });
     const catalog = await off.tools(false, SELECTOR);
     expect(catalog.has("web-search")).toBe(false); // no global web-search registered, provider opted out
     expect(catalog.get("web-fetch")?.provider).toBe(true);
 
     // default: the provider serves (a real /search call is made)
-    const e = env({});
-    const io = fakeAiio({ url: "https://api.kimi.com/coding/v1", modelCurrent: "kimi-for-coding", auth: { type: "api_key", token: "relay" }, env: e, Provider: KimiProvider });
+    const e = await env({});
+    const io = await fakeAiio({ url: "https://api.kimi.com/coding/v1", model: "kimi-for-coding", auth: { type: "api_key", token: "relay" }, env: e, Provider: KimiProvider });
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response(JSON.stringify({ search_results: [{ title: "R", url: "https://r.test/", snippet: "s" }] }), { headers: { "content-type": "application/json" } });
     try {
@@ -184,7 +212,7 @@ describe("conventional web dispatch", () => {
   });
 
   test("an opted-out provider tool falls to the local package backend", async () => {
-    const e = webEnv({
+    const e = await webEnv({
       web: { debug: true, search: { backends: [{ type: "searxng", url: "http://local.test/" }], engines: [], cacheSeconds: 0 } },
       "kimi-coding": { tools: { "web-search": false } }, // endpoint opts out of the provider search tool
     });
@@ -195,7 +223,7 @@ describe("conventional web dispatch", () => {
       return new Response(JSON.stringify({ results: [{ title: "Local", url: "https://local.test/", content: "local" }] }), { headers: { "content-type": "application/json" } });
     };
     try {
-      const io = fakeAiio({ url: "https://api.kimi.com/coding/v1", modelCurrent: "kimi-for-coding", auth: { type: "api_key", token: "relay" }, env: e, Provider: KimiProvider });
+      const io = await fakeAiio({ url: "https://api.kimi.com/coding/v1", model: "kimi-for-coding", auth: { type: "api_key", token: "relay" }, env: e, Provider: KimiProvider });
       const result = await e.toolCall("web-search", { query: "x", limit: 2 }, { env: e, selector: "kimi-coding/kimi-for-coding", io });
       // provider search path (/search) must NOT be hit; only the local SearXNG fallback ran
       expect(providerCalls.some((u) => u.includes("/search"))).toBe(false);
@@ -212,7 +240,7 @@ describe("conventional web dispatch", () => {
     try {
       const { packageSearch } = await import("../tools/web/search/index.js");
       const markdown = await packageSearch({ query: "x", limit: 1 }, {
-        env: env({ web: { debug: true, search: { engines: [] } } }),
+        env: await env({ web: { debug: true, search: { engines: [] } } }),
       }, { fetchImpl: async (url) => new Response(JSON.stringify({ results: [{ title: "Local", url: "https://local.test/", content: "Snippet" }] }), { headers: { "content-type": "application/json" } }) });
       expect(markdown).toStartWith("HTTP: SearXNG (searxng-env)");
       expect(markdown).toContain("Snippet");
@@ -223,15 +251,15 @@ describe("conventional web dispatch", () => {
   });
 
   test("rejects malformed input before dispatch", async () => {
-    await expect(webSearch({ query: " ", limit: 2 }, { env: env() })).rejects.toThrow(/non-empty/);
-    await expect(webSearch({ query: "x", limit: 1.5 }, { env: env() })).rejects.toThrow(/finite integer/);
+    await expect(webSearch({ query: " ", limit: 2 }, { env: await env() })).rejects.toThrow(/non-empty/);
+    await expect(webSearch({ query: "x", limit: 1.5 }, { env: await env() })).rejects.toThrow(/finite integer/);
   });
 
   test("Agent tool authorization preserves explicit allow-lists", async () => {
-    const e = env();
+    const e = await env();
     e.toolAdd("mcp-webfetch", async () => "ok", { safe: true, description: "x", inputSchema: { type: "object" } });
-    const allowed = new Agent({ env: e, tools: ["web-search", "mcp-webfetch"] });
-    const denied = new Agent({ env: e, tools: ["web-search"] });
+    const allowed = await Agent.create({ env: e, tools: ["web-search", "mcp-webfetch"] });
+    const denied = await Agent.create({ env: e, tools: ["web-search"] });
     expect((await allowed.tools).has("mcp-webfetch")).toBe(true);
     expect((await denied.tools).has("mcp-webfetch")).toBe(false);
     await allowed.close();
@@ -256,7 +284,7 @@ describe("provider web backends", () => {
       ],
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://api.anthropic.com/v1",
         auth: { type: "api_key", token: "sk-test" },
       });
@@ -285,7 +313,7 @@ describe("provider web backends", () => {
       content: [{ type: "web_fetch_tool_result", content: [] }, { type: "text", text: "# Fetched" }],
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://api.anthropic.com/v1",
         auth: { type: "api_key", token: "sk-test" },
       });
@@ -306,7 +334,7 @@ describe("provider web backends", () => {
       type: "error", error: { type: "invalid_request_error", message: "tool not allowed" },
     }), { status: 400, statusText: "Bad Request", headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://api.anthropic.com/v1",
         auth: { type: "api_key", token: "sk-test" },
       });
@@ -327,7 +355,7 @@ describe("provider web backends", () => {
   });
 
   test("Anthropic capability is unsupported on third-party /messages routes", async () => {
-    const aiio = fakeAiio({
+    const aiio = await fakeAiio({
       url: "https://api.deepseek.com/anthropic",
       auth: { type: "api_key", token: "sk-test" },
     });
@@ -349,7 +377,7 @@ describe("provider web backends", () => {
       ],
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
+      const aiio = await fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
       const handler = KimiProvider.provider.capabilities.tools["web-search"].function;
       const result = await handler({ aiio, args: { query: "kimi k3" } });
       expect(result).toBe("- [Direct One](https://one.test/) — snippet one\n- [Direct Two](https://two.test/)");
@@ -375,7 +403,7 @@ describe("provider web backends", () => {
       markdown: "# Example Page\n\nBody **content** here.",
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
+      const aiio = await fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
       const handler = KimiProvider.provider.capabilities.tools["web-fetch"].function;
       expect(typeof handler).toBe("function");
       const result = await handler({ aiio, args: { url: "https://example.test/page" } });
@@ -402,7 +430,7 @@ describe("provider web backends", () => {
       markdown: "# Relay Page\n\nRelay fetched body.",
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({ url: "https://api.kimi.com/coding/v1", auth: { type: "api_key", token: "relay-test" } });
+      const aiio = await fakeAiio({ url: "https://api.kimi.com/coding/v1", auth: { type: "api_key", token: "relay-test" } });
       const handler = KimiProvider.provider.capabilities.tools["web-fetch"].function;
       const result = await handler({ aiio, args: { url: "https://example.com/" } });
       expect(result).toContain("Relay Page");
@@ -421,7 +449,7 @@ describe("provider web backends", () => {
     const calls = [];
     const restore = stubFetch(calls, async () => new Response(JSON.stringify({ url: "https://x.test/", title: "", markdown: "  " }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
+      const aiio = await fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
       const handler = KimiProvider.provider.capabilities.tools["web-fetch"].function;
       await expect(handler({ aiio, args: { url: "https://x.test/" } })).rejects.toThrow(/no usable|no content|empty/i);
     } finally {
@@ -433,7 +461,7 @@ describe("provider web backends", () => {
     const calls = [];
     const restore = stubFetch(calls, async () => new Promise(() => {})); // never settles
     try {
-      const aiio = fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
+      const aiio = await fakeAiio({ url: "https://api.moonshot.ai/v1", auth: { type: "api_key", token: "kimi-test" } });
       const handler = KimiProvider.provider.capabilities.tools["web-search"].function;
       const start = Date.now();
       await expect(handler({ aiio, args: { query: "x" }, deadline: start + 2_500 }))
@@ -454,7 +482,7 @@ describe("provider web backends", () => {
       ],
     }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://api.kimi.com/coding/v1",
         auth: { type: "api_key", token: "kimi-coding-test" },
       });
@@ -479,7 +507,7 @@ describe("provider web backends", () => {
     ), { headers: { "content-type": "application/json" } }));
     try {
       for (const url of ["https://api.moonshot.ai/v1", "https://api.kimi.com/coding/v1"]) {
-        await expect(handler({ aiio: fakeAiio({ url, auth: { token: "test" } }), args: { query: "x" } }))
+        await expect(handler({ aiio: await fakeAiio({ url, auth: { token: "test" } }), args: { query: "x" } }))
           .rejects.toThrow(/no (usable )?search results/i);
       }
     } finally {
@@ -490,7 +518,7 @@ describe("provider web backends", () => {
   test("Kimi capability is unsupported on arbitrary endpoints", async () => {
     const handler = KimiProvider.provider.capabilities.tools["web-search"].function;
     for (const url of ["https://example.com/v1", "https://api.deepseek.com/v1"]) {
-      const aiio = fakeAiio({ url, auth: { type: "api_key", token: "k" } });
+      const aiio = await fakeAiio({ url, auth: { type: "api_key", token: "k" } });
       expect(await handler({ aiio, args: { query: "x" } })).toBeUndefined();
     }
   });
@@ -511,7 +539,7 @@ describe("provider web backends", () => {
       answer("OpenAI result"),
     ]));
     try {
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://api.openai.com/v1",
         auth: { type: "api_key", token: "oai-test" },
       });
@@ -540,7 +568,7 @@ describe("provider web backends", () => {
     ]));
     try {
       const claims = Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } })).toString("base64url");
-      const aiio = fakeAiio({
+      const aiio = await fakeAiio({
         url: "https://chatgpt.com/backend-api/codex",
         auth: { type: "oauth", token: `h.${claims}.s` },
         settings: { verify: "jwt" },
@@ -567,12 +595,12 @@ describe("provider web backends", () => {
       ? new Response(JSON.stringify({ error: { message: "Unsupported tool type: web_search" } }), { status: 400, statusText: "Bad Request" })
       : responsesStream([answer("answered from memory")]));
     try {
-      const local = fakeAiio({ url: "http://localhost:1234/v1", auth: { type: "api_key", token: "k" } });
+      const local = await fakeAiio({ url: "http://localhost:1234/v1", auth: { type: "api_key", token: "k" } });
       expect(await handler({ aiio: local, args: { query: "x" } })).toBeUndefined();
       expect(await handler({ aiio: local, args: { query: "x" } })).toBeUndefined();
       expect(calls).toHaveLength(1);
       // an answer without a web_search_call item is not proof: the tool was ignored
-      const ignoring = fakeAiio({ url: "https://ignores.test/v1", auth: { type: "api_key", token: "k" } });
+      const ignoring = await fakeAiio({ url: "https://ignores.test/v1", auth: { type: "api_key", token: "k" } });
       expect(await handler({ aiio: ignoring, args: { query: "x" } })).toBeUndefined();
       expect(await handler({ aiio: ignoring, args: { query: "x" } })).toBeUndefined();
       expect(calls).toHaveLength(2);
@@ -582,7 +610,7 @@ describe("provider web backends", () => {
   });
 
   test("Codex web-search stalled response head yields to the package backend before the tool deadline", async () => {
-    const e = env({ web: { debug: true, search: {
+    const e = await env({ web: { debug: true, search: {
       backends: [{ type: "searxng", url: "https://searx.test/" }], engines: [],
     } } });
     const calls = [];
@@ -591,7 +619,7 @@ describe("provider web backends", () => {
       return new Response(JSON.stringify({ results: [{ title: "Fallback", url: "https://result.test/", content: "found" }] }),
         { headers: { "content-type": "application/json" } });
     });
-    const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
+    const io = await fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
     e.toolAdd("web-search", webSearch, SEARCH);
     try {
       const started = Date.now();
@@ -606,15 +634,15 @@ describe("provider web backends", () => {
   }, 35_000);
 
   test("Codex web-search stalled SSE body yields to fallback before tool deadline", async () => {
-    const e = env({ web: { debug: true, search: {
+    const e = await env({ web: { debug: true, search: {
       backends: [{ type: "searxng", url: "https://searx-body.test/" }], engines: [],
     } } });
     const restore = stubFetch([], async (url) => String(url).includes("/responses")
       ? new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "text/event-stream" } })
       : new Response(JSON.stringify({ results: [{ title: "Body fallback", url: "https://body-result.test/" }] }),
         { headers: { "content-type": "application/json" } }));
-    const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
-    const agent = new Agent({ env: e });
+    const io = await fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
+    const agent = await Agent.create({ env: e });
     agent.model = "codex/gpt-6-sol";
     agent._connection = () => io;
     try {
@@ -629,14 +657,14 @@ describe("provider web backends", () => {
   }, 35_000);
 
   test("Codex web-search falls back within 1200ms of the last SSE byte", async () => {
-    const e = env({ web: { search: { backends: [{ type: "searxng", url: "https://searx-idle.test/" }], engines: [] } } });
+    const e = await env({ web: { search: { backends: [{ type: "searxng", url: "https://searx-idle.test/" }], engines: [] } } });
     const restore = stubFetch([], async (url) => String(url).includes("/responses")
       ? new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("data: ")); } }),
         { headers: { "content-type": "text/event-stream" } })
       : new Response(JSON.stringify({ results: [{ title: "Idle fallback", url: "https://idle.test/" }] }),
         { headers: { "content-type": "application/json" } }));
-    const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
-    const agent = new Agent({ env: e });
+    const io = await fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" }, env: e });
+    const agent = await Agent.create({ env: e });
     agent.model = "codex/gpt-6-sol";
     agent._connection = () => io;
     try {
@@ -665,7 +693,7 @@ describe("provider web backends", () => {
       },
     }), { headers: { "content-type": "text/event-stream" } }));
     try {
-      const io = fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" } });
+      const io = await fakeAiio({ url: "https://chatgpt.com/backend-api/codex", auth: { type: "api_key", token: "test" } });
       const handler = OpenAIProvider.provider.capabilities.tools["web-search"].function;
       expect(await handler({ aiio: io, args: { query: "slow bytes" } })).toBe("Slow result");
     } finally {
@@ -674,13 +702,13 @@ describe("provider web backends", () => {
   }, 8_000);
 
   test("OpenAI web-fetch bypasses the provider and uses package fetch immediately", async () => {
-    const e = env({ web: { debug: true, readability: false } });
+    const e = await env({ web: { debug: true, readability: false } });
     const calls = [];
     const restore = stubFetch(calls, async () => new Response("package result", {
       status: 200, headers: { "content-type": "text/plain" },
     }));
-    const io = fakeAiio({ url: "https://api.openai.com/v1", auth: { type: "api_key", token: "k" }, env: e });
-    const agent = new Agent({ env: e });
+    const io = await fakeAiio({ url: "https://api.openai.com/v1", auth: { type: "api_key", token: "k" }, env: e });
+    const agent = await Agent.create({ env: e });
     agent.model = "test/m";
     agent._connection = () => io;
     try {
@@ -697,18 +725,18 @@ describe("provider web backends", () => {
   test("providers no longer self-gate on web.provider (caps.tools is the single opt-out point)", async () => {
     // Opt-out lives ONLY in the pair's catalog entry (caps.tools). A provider
     // handler serves any endpoint it hosts regardless of legacy flags.
-    const e = env();
-    const make = (url, auth) => fakeAiio({ url, auth, env: e });
-    const anthropic = make("https://api.anthropic.com/v1", { type: "api_key", token: "sk" });
+    const e = await env();
+    const make = async (url, auth) => await fakeAiio({ url, auth, env: e });
+    const anthropic = await make("https://api.anthropic.com/v1", { type: "api_key", token: "sk" });
     expect(typeof AnthropicProvider.provider.capabilities.tools["web-search"].function).toBe("function");
     // unsupported on a third-party URL is the ONLY remaining provider-side gate
-    const deepseek = make("https://api.deepseek.com/anthropic", { type: "api_key", token: "sk" });
+    const deepseek = await make("https://api.deepseek.com/anthropic", { type: "api_key", token: "sk" });
     expect(await AnthropicProvider.provider.capabilities.tools["web-search"].function({ aiio: deepseek, args: { query: "x" } })).toBeUndefined();
   });
 
   test("an opted-out provider tool is not called; the rest of the provider's tools still serve", async () => {
-    const e = env({ providerTools: { "web-search": false } });
-    const io = fakeAiio({ url: "https://api.anthropic.com/v1", auth: { type: "api_key", token: "sk-test" }, env: e, Provider: AnthropicProvider });
+    const e = await env({ providers: { tools: { "web-search": false } } });
+    const io = await fakeAiio({ url: "https://api.anthropic.com/v1", auth: { type: "api_key", token: "sk-test" }, env: e, Provider: AnthropicProvider });
     const calls = [];
     const restore = stubFetch(calls, async () => new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
@@ -720,11 +748,11 @@ describe("provider web backends", () => {
       restore();
     }
     // control: without the opt-out the same pair reaches the provider
-    const open = env();
+    const open = await env();
     const calls2 = [];
     const restore2 = stubFetch(calls2, async () => new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }] }), { status: 200, headers: { "content-type": "application/json" } }));
     try {
-      const io2 = fakeAiio({ url: "https://api.anthropic.com/v1", auth: { type: "api_key", token: "sk-test" }, env: open, Provider: AnthropicProvider });
+      const io2 = await fakeAiio({ url: "https://api.anthropic.com/v1", auth: { type: "api_key", token: "sk-test" }, env: open, Provider: AnthropicProvider });
       expect(await open.toolCall("web-search", { query: "x" }, { env: open, selector: "test/m", io: io2 })).toBe("ok");
       expect(calls2.length).toBe(1);
     } finally {

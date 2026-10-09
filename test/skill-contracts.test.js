@@ -19,12 +19,12 @@ function put(layer, name, body, resource) {
   if (resource !== undefined) writeFileSync(join(folder, "example.js"), resource);
   return folder;
 }
-beforeEach(() => {
+beforeEach(async () => {
   mkdirSync("./ai-tmp", { recursive: true });
   root = mkdtempSync("./ai-tmp/skill-contracts-");
-  env = new Env({ cwd: resolve(root), settingsDir: null, settings: {}, skillDirs: [join(root, "base"), join(root, "later")] });
+  env = await Env.open(resolve(root), { settingsDir: null, settings: {}, skillDirs: [join(root, "base"), join(root, "later")], init: { providers: false, tools: false, detect: false, models: false } });
 });
-afterEach(() => { env.close(); rmSync(root, { recursive: true, force: true }); });
+afterEach(async () => { await env.close(); rmSync(root, { recursive: true, force: true }); });
 
 describe("skill overlays and references", () => {
   test("later bodies replace instead of concatenate", () => {
@@ -36,13 +36,13 @@ describe("skill overlays and references", () => {
     put("later", "web", "before\n{{web[2-3]}}\n{{web}}\nafter");
     expect(env.skills().get("web").body).toBe("before\ntwo\nthree\none\ntwo\nthree\nafter");
   });
-  test("self references select each previous definition across three layers", () => {
+  test("self references select each previous definition across three layers", async () => {
     put("base", "web", "one\ntwo\nthree");
     put("later", "web", "{{web[2-3]}}\nfour");
     put("last", "web", "{{web[2-3]}}\nfive");
-    const layered = new Env({ settingsDir: null, settings: {}, skillDirs: [join(root, "base"), join(root, "later"), join(root, "last")] });
+    const layered = await Env.open(process.cwd(), { settingsDir: null, settings: {}, skillDirs: [join(root, "base"), join(root, "later"), join(root, "last")] });
     try { expect(layered.skills().get("web").body).toBe("three\nfour\nfive"); }
-    finally { layered.close(); }
+    finally { await layered.close(); }
   });
   test("cross references resolve forward definitions and internal whitespace names", () => {
     put("base", "alpha", "{{ web build[1-2] }}");
@@ -63,6 +63,13 @@ describe("skill overlays and references", () => {
 });
 
 describe("atomic normalized activation", () => {
+  test("without a borrowed Env, opens and closes the agent folder environment", async () => {
+    const folder = resolve(root);
+    const result = await skill({}, { agent: { folder } });
+    expect(result).toContain("core");
+    expect(Env.envs[folder]).toBeUndefined();
+    expect(env.closed).toBe(false);
+  });
   test("strings, spaces and duplicate names normalize without splitting", async () => {
     put("base", "web build", "body");
     expect((await skill({ names: " web build " }, { env })).system).toHaveLength(1);
@@ -84,167 +91,84 @@ describe("atomic normalized activation", () => {
     host.skills = () => env.skills();
     host.toolAdd("skill", skill, { safe: true, inputSchema: {} });
     const io = scriptedIO([TOOLCALL(0, "c1", "skill", { names: "web" }), TEXT(0, "done")]);
-    const agent = new Agent({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
+    const agent = await Agent.create({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
     try {
       await agent.run({});
       put("base", "web", "edited body");
       const again = await skill({ names: ["web"] }, agent._toolContext({ name: "skill" }));
       expect(again.result).toBe("Loaded skills: web.");
       expect(again.system).toEqual([]);
-      agent.contextNew(false);
-      expect((await skill({ names: "web" }, agent._toolContext({ name: "skill" }))).system[0]).toContain("edited body");
-    } finally { agent.close(); host.close(); }
+      const fresh = await Agent.create({ env: host, model: "p/m", contextId: false, createIO: () => scriptedIO([]) });
+      try {
+        expect((await skill({ names: "web" }, fresh._toolContext({ name: "skill" }))).system[0]).toContain("edited body");
+        expect(loadedSkills(agent.context).has("web")).toBe(true);
+      } finally { await fresh.close(); }
+    } finally { await agent.close(); await host.close(); }
   });
 });
 
 describe("skill activation lifecycle", () => {
   test("prefilled guidance counts as active even when the file disappears", async () => {
-    const context = new Context({ messages: [Context.messageSystem(Agent.skillSection({ name: "web build", body: "prefilled" }))] });
+    const context = new Context({ messages: [Context.messageSystem(env.skillSection({ name: "web build", body: "prefilled" }))] });
     const loaded = await skill({ names: " web build " }, { env, loadedSkills: () => loadedSkills(context) });
     expect(loaded.system).toEqual([]);
-    context.close();
+    await context.close();
   });
   test("compaction, fork, and resume retain active wrappers", async () => {
-    const context = new Context({ id: "skill-resume", dir: join(root, "sessions"), save: true, messages: [Context.messageSystem(Agent.skillSection({ name: 'web "quoted"', body: "body" })), USER("work")] });
+    const context = new Context({ id: "skill-resume", dir: join(root, "sessions"), save: true, messages: [Context.messageSystem(env.skillSection({ name: 'web "quoted"', body: "body" })), USER("work")] });
     const agent = {
-      context, _append: (message) => context.append(message),
-      _lastUsage: null, pending: [],
+      context, env, _append: (message) => agent.context.append(message),
+      _contextReplace: (next) => { const previous = agent.context; agent.context = next; return previous; },
+      _emit: () => {}, _lastUsage: null, pending: [],
     };
     await compactContext(agent, "", async () => {
       context.append(Context.messageAssistant([{ type: "text", text: "summary" }]));
       return { type: "done" };
     });
-    expect(loadedSkills(context).has('web "quoted"')).toBe(true);
-    const forked = new Context({ messages: context.messages() });
-    expect(loadedSkills(forked).has('web "quoted"')).toBe(true);
-    forked.close(); context.flush(); context.close();
+    expect(loadedSkills(agent.context).has('web "quoted"')).toBe(true);
+    const forkedContext = new Context({ messages: agent.context.messages(), dir: context.dir,
+      origin: env.folder, save: context.save, settings: context.settings });
+    const forked = await Agent.create({ env, context: forkedContext, createIO: () => null });
+    expect(forked.context).toBe(forkedContext);
+    expect(loadedSkills(forked.context).has('web "quoted"')).toBe(true);
+    await forked.close(); context.flush(); await context.close(); await agent.context.close();
     const resumed = Context.resume({ id: "skill-resume", dir: join(root, "sessions") });
     try { expect(loadedSkills(resumed).has('web "quoted"')).toBe(true); }
-    finally { resumed.close(); }
+    finally { await resumed.close(); }
   });
   test("concurrent duplicate activations append a single instruction payload", async () => {
     put("base", "web", "body");
     const host = await testEnv(); host.skills = () => env.skills();
     host.toolAdd("skill", skill, { safe: true, inputSchema: {} });
     const io = scriptedIO([[...TOOLCALL(0, "c1", "skill", { names: "web" }), ...TOOLCALL(1, "c2", "skill", { names: "web" })], TEXT(0, "done")]);
-    const agent = new Agent({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
+    const agent = await Agent.create({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
     try {
       await agent.run({});
       const systems = agent.context.messages().filter((message) => message.type === 1 && message.content.some((block) => block.text?.includes('<skill name="web">')));
       expect(systems).toHaveLength(1);
-    } finally { agent.close(); host.close(); }
+    } finally { await agent.close(); await host.close(); }
   });
   test("unknown names produce a tool error with no partial activation", async () => {
     put("base", "web", "body");
     const host = await testEnv(); host.skills = () => env.skills();
     host.toolAdd("skill", skill, { safe: true, inputSchema: {} });
     const io = scriptedIO([TOOLCALL(0, "c1", "skill", { names: ["web", "missing"] }), TEXT(0, "done")]);
-    const agent = new Agent({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
+    const agent = await Agent.create({ env: host, model: "p/m", context: [USER("load")], createIO: () => io });
     try {
       await agent.run({});
       expect(loadedSkills(agent.context).size).toBe(0);
       expect(agent.context.messages().find((message) => message.type === 4).error).toBe(true);
-    } finally { agent.close(); host.close(); }
+    } finally { await agent.close(); await host.close(); }
   });
 });
 
-describe("skill-resource", () => {
-  test("lists merged skill-relative resources without paths or activation", async () => {
-    const base = put("base", "web", "base", "base bytes");
-    const later = put("later", "web", "later", "later bytes");
-    mkdirSync(join(base, "examples")); mkdirSync(join(later, "examples"));
-    writeFileSync(join(base, "examples", "base.txt"), "base");
-    writeFileSync(join(later, "examples", "later.txt"), "later");
-    symlinkSync("SKILL.md", join(later, "linked.txt"));
-    const { skillResource, toolDescription } = await import("../tools/skill-resource.js");
-    expect(toolDescription()["skill-resource"].inputSchema.required).toEqual(["name"]);
-    expect(await skillResource({ name: "web" }, { env, safe: true })).toEqual(["example.js", "examples/base.txt", "examples/later.txt"]);
-    await expect(skillResource({ name: "missing" }, { env })).rejects.toThrow("Unknown skill");
-    await expect(skillResource({ name: "web", target: "saved.txt" }, { env })).rejects.toThrow("path");
-  });
-  test("reads unlisted resources using last existing match and base fallback", async () => {
-    put("base", "web", "base", "base bytes"); put("later", "web", "later");
-    const { skillResource } = await import("../tools/skill-resource.js");
-    expect(await skillResource({ name: "web", path: "example.js" }, { env })).toBe("base bytes");
-    put("later", "web", "later", "later bytes");
-    expect(await skillResource({ name: "web", path: "example.js" }, { env })).toBe("later bytes");
-  });
-  test("exports exact binary bytes, creates parents, and refuses existing targets", async () => {
-    const folder = put("base", "web", "body");
-    const bytes = Buffer.from([0, 255, 10, 13, 42]);
-    writeFileSync(join(folder, "asset.bin"), bytes);
-    const { skillResource } = await import("../tools/skill-resource.js");
-    await skillResource({ name: "web", path: "asset.bin", target: "nested/asset.bin" }, { env });
-    expect(readFileSync(join(root, "nested/asset.bin"))).toEqual(bytes);
-    await expect(skillResource({ name: "web", path: "asset.bin", target: "nested/asset.bin" }, { env })).rejects.toThrow("already exists");
-  });
-  test("absolute project export targets produce relative labels", async () => {
-    put("base", "web", "body", "exact bytes");
-    const { skillResource } = await import("../tools/skill-resource.js");
-    const target = resolve(root, "absolute-target.js");
-    expect(await skillResource({ name: "web", path: "example.js", target }, { env })).toBe("Saved skill resource to absolute-target.js");
-    expect(readFileSync(target, "utf8")).toBe("exact bytes");
-  });
-  test("binary reads and oversized resources give actionable bounded errors", async () => {
-    const folder = put("base", "web", "body");
-    writeFileSync(join(folder, "binary.bin"), Buffer.from([0, 255]));
-    writeFileSync(join(folder, "large.txt"), "x"); truncateSync(join(folder, "large.txt"), 16 * 1024 * 1024 + 1);
-    const { skillResource } = await import("../tools/skill-resource.js");
-    await expect(skillResource({ name: "web", path: "binary.bin" }, { env })).rejects.toThrow("specify target");
-    await expect(skillResource({ name: "web", path: "large.txt", target: "too-large.txt" }, { env })).rejects.toThrow("16 MiB");
-  });
-  test("later symlinks do not fall back and target parent symlinks are refused", async () => {
-    put("base", "web", "body", "base");
-    const folder = put("later", "web", "later");
-    symlinkSync("SKILL.md", join(folder, "example.js"));
-    const { skillResource } = await import("../tools/skill-resource.js");
-    await expect(skillResource({ name: "web", path: "example.js" }, { env })).rejects.toThrow("symbolic");
-    symlinkSync("base", join(root, "linked"));
-    await expect(skillResource({ name: "web", path: "SKILL.md", target: "linked/copy.md" }, { env })).rejects.toThrow("symbolic");
-  });
-  test("exports are sequential barriers while resource reads remain parallelizable", async () => {
-    const { toolDescription } = await import("../tools/skill-resource.js");
-    const descriptor = toolDescription()["skill-resource"];
-    env.toolAdd("skill-resource", descriptor.fn, descriptor);
-    const info = (await env.tools()).get("skill-resource");
-    expect(info.schema.readOnly).toBeUndefined();
+describe("resource scheduling", () => {
+  test("copy is a sequential barrier and reads remain parallelizable", async () => {
+    const { toolDescription } = await import("../tools/resource.js");
+    const descriptor = toolDescription().resource;
+    await env.tools(); env.toolAdd("resource", descriptor.fn, descriptor);
+    const info = (await env.tools()).get("resource");
     expect(isReadOnlyCall(info, { arguments: { name: "web", path: "example.js" } })).toBe(true);
     expect(isReadOnlyCall(info, { arguments: { name: "web", path: "example.js", target: "saved.js" } })).toBe(false);
-    expect(isReadOnlyCall(info, { arguments: '{"target":"saved.js"}' })).toBe(false);
-    expect(isReadOnlyCall(info, { arguments: "invalid JSON" })).toBe(false);
-  });
-  test("the Agent serializes an export before the following workspace read", async () => {
-    put("base", "web", "body", "exact bytes");
-    const { skillResource, toolDescription } = await import("../tools/skill-resource.js");
-    env.close();
-    const host = await testEnv({}, { cwd: resolve(root) });
-    host.skillResource = (name, path) => env.skillResource(name, path);
-    host.toolAdd("skill-resource", skillResource, toolDescription()["skill-resource"]);
-    host.toolAdd("inspect", () => readFileSync(join(root, "saved.js"), "utf8"), { safe: true, inputSchema: {} });
-    const io = scriptedIO([[...TOOLCALL(0, "c1", "skill-resource", { name: "web", path: "example.js", target: "saved.js" }), ...TOOLCALL(1, "c2", "inspect", {})], TEXT(0, "done")]);
-    const agent = new Agent({ env: host, model: "p/m", context: [USER("save and read")], createIO: () => io });
-    try {
-      await agent.run({});
-      const result = agent.context.messages().find((message) => message.type === 4 && message.name === "inspect");
-      expect(result.error).toBeUndefined();
-      expect(result.content[0].text).toBe("exact bytes");
-    } finally { agent.close(); host.close(); }
-  });
-  test("safe calls can read but never save", async () => {
-    put("base", "web", "body", "safe text");
-    const { skillResource, toolDescription } = await import("../tools/skill-resource.js");
-    expect(toolDescription()["skill-resource"].safe).toBe(true);
-    expect(await skillResource({ name: "web", path: "example.js" }, { env, safe: true })).toBe("safe text");
-    await expect(skillResource({ name: "web", path: "example.js", target: "saved.js" }, { env, safe: true })).rejects.toThrow("safe mode");
-  });
-  test("missing, traversal, absolute paths, symlinks and outside targets are refused without host paths", async () => {
-    const folder = put("base", "web", "body", "content");
-    symlinkSync("example.js", join(folder, "link.js"));
-    const { skillResource } = await import("../tools/skill-resource.js");
-    for (const path of ["missing.js", "../web/example.js", resolve(folder, "example.js"), "link.js", "."]) {
-      try { await skillResource({ name: "web", path }, { env }); throw new Error("accepted invalid resource"); }
-      catch (error) { expect(error.message).not.toContain(resolve(root)); expect(error.message).not.toBe("accepted invalid resource"); }
-    }
-    await expect(skillResource({ name: "web", path: "example.js", target: "../escape.js" }, { env })).rejects.toThrow();
   });
 });

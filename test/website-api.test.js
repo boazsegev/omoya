@@ -18,11 +18,31 @@ test("hosted MCP client metadata matches its client ID and fixed loopback redire
 test("architecture environment detection links to the public startup API", async () => {
   const pages = apiPages(await collect());
   const architecture = pages.find((page) => page.path === "/api/architecture/").html;
-  const env = pages.find((page) => page.path === "/api/env/").html;
-  expect(architecture).toContain('href="/api/env/#Env-create"');
-  expect(architecture).toContain('<code>Env.create()</code>');
-  expect(env).toContain('id="Env-create"');
+  const env = pages.find((page) => page.path === "/api/agent.env/").html;
+  expect(architecture).toContain('href="/api/agent.env/#Env-open"');
+  expect(architecture).toContain('<code>Agent.Env.open(path)</code>');
+  expect(env).toContain('id="Env-open"');
   expect(architecture).not.toContain("Env-endpointsDetect");
+});
+
+test("static and instance Env contracts have distinct website anchors", async () => {
+  const env = apiPages(await collect()).find((page) => page.path === "/api/agent.env/").html;
+  for (const name of ["settings", "ready", "close", "settingsFlush"]) {
+    expect([...env.matchAll(new RegExp(`id="Env-${name}"`, "g"))]).toHaveLength(1);
+    expect([...env.matchAll(new RegExp(`id="Env-${name}-static"`, "g"))]).toHaveLength(1);
+  }
+});
+
+test("SettingsStore public documentation renders standalone error and composition examples", async () => {
+  const pages = apiPages(await collect());
+  const env = pages.find((page) => page.path === "/api/agent.env/").html;
+  const contracts = pages.find((page) => page.path === "/api/contracts/").html;
+  expect(env).toContain('href="/api/contracts/#settings%20store"');
+  expect(contracts).toContain("config.json");
+  expect(contracts).toContain("root writes are unsupported");
+  expect(contracts).toContain("shared remains open");
+  expect(contracts).toContain("SettingsStore-close");
+  expect(contracts).toContain("<pre");
 });
 
 test("external Bun and SearXNG links open in a separate tab safely", () => {
@@ -49,6 +69,9 @@ test("website settings render the same inferred contract as API-schema.md", asyn
   const values = settingsSchemaValues(data);
   const html = apiPages(data).find((page) => page.path === "/api/settings/").html;
   expect(values.tui.cursor.blink).toBe("number");
+  expect(values.context.autocompact).toContain("boolean | number");
+  expect(values.context.autocompactMax).toContain("integer (tokens");
+  expect(html).toContain("autocompactMax");
   expect(values.mcp["<server>"].args).toBe("string[]");
   expect(html).toContain('&quot;blink&quot;: &quot;number&quot;');
   expect(html).toContain('&quot;&lt;server&gt;&quot;');

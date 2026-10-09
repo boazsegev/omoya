@@ -1,6 +1,6 @@
 {
   "name": "omoya",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "A transparent, composable Bun AI agent harness library for people and things.",
   "keywords": [
     "ai-agent",
@@ -30,12 +30,13 @@
   "bugs": "https://github.com/boazsegev/omoya/issues",
   "type": "module",
   "exports": {
-    ".": "./lib/index.js",
+    ".": "./lib/agent.js",
     "./agent": "./lib/agent.js",
-    "./app": "./lib/index_app.js"
+    "./app": "./lib/app.js"
   },
   "bin": {
     "om": "bin/om",
+    "omd": "bin/omd",
     "om-agent": "bin/om-agent",
     "om-app": "bin/om-app",
     "om-io": "bin/om-io",

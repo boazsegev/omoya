@@ -20,8 +20,8 @@ describe("OpenAI stream rate limit", () => {
       async read() { return this.items.shift() ?? null; }
       async close() {}
     });
-    env._endpoints.stream = { provider: "stream", url: "http://fake" };
-    const agent = new Agent({ env, model: "stream/m", context: [USER("go")], createIO: (options) => new IO(options) });
+    env.settings.providers.stream = { provider: "stream", url: "http://fake" };
+    const agent = await Agent.create({ env, model: "stream/m", context: [USER("go")], createIO: (options) => new IO(options) });
     try {
       const terminal = await agent.run();
       expect(terminal.message.error).toMatchObject({ message: expect.stringContaining("Rate limit reached"), retry: 45 });
@@ -43,8 +43,8 @@ describe("OpenAI stream rate limit", () => {
       async read() { return this.items.shift() ?? null; }
       async close() {}
     });
-    env._endpoints.stream = { provider: "stream", url: "http://fake" };
-    const agent = new Agent({ env, model: "stream/m", context: [USER("go")], createIO: (options) => new IO(options) });
+    env.settings.providers.stream = { provider: "stream", url: "http://fake" };
+    const agent = await Agent.create({ env, model: "stream/m", context: [USER("go")], createIO: (options) => new IO(options) });
     try {
       await agent.run();
       expect(agent.context.messages().at(-1).error).toEqual({ message: "Please try again in 0.2s.", retry: 200 });

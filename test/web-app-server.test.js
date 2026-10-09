@@ -3,11 +3,15 @@
 // of these packets; every check here drives the wire, not the DOM.
 import { expect, test } from "bun:test";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { serve, MAX_WS_PAYLOAD_LENGTH } from "../lib/app/web/server.js";
+import { EventEmitter } from "node:events";
+import Sandbox from "../lib/sandbox.js";
+import { serve } from "../lib/app/web/server.js";
+import { MAX_WS_PAYLOAD_LENGTH } from "../lib/app/web/host.js";
 import { parseClientMessage } from "../lib/app/web/protocol.js";
 import { AgentSession } from "../lib/app/web/session.js";
 import { renderMarkdown } from "../lib/app/web/public/markdown.js";
 import Agent from "../lib/agent.js";
+const { Env } = Agent;
 import Context from "../lib/context.js";
 import { TEXT, TOOLCALL, scriptedIO, testEnv } from "./fakes.js";
 import { authSetOf, namesOf, providerAdd } from "./env-internals.js";
@@ -21,9 +25,9 @@ function connect(web, received = [], path = "/ws", host = "127.0.0.1") {
   socket.onmessage = (event) => received.push(JSON.parse(event.data));
   return new Promise((resolve, reject) => { socket.onopen = () => resolve(socket); socket.onerror = reject; });
 }
-const scripted = (env, lines, reply) => {
+const scripted = async (env, lines, reply) => {
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, reply), { type: "done" }]]);
-  return new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  return await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
 };
 
 test("protocol validates client packets and rejects malformed input", () => {
@@ -31,10 +35,16 @@ test("protocol validates client packets and rejects malformed input", () => {
   expect(parseClientMessage(JSON.stringify({ type: "chat.submit", text: "", attachments: ["a"] }))).toEqual({ type: "chat.submit", text: "", attachments: ["a"] });
   expect(() => parseClientMessage(JSON.stringify({ type: "chat.submit", text: "hi", attachments: ["a", "a"] }))).toThrow();
   expect(parseClientMessage(JSON.stringify({ type: "chat.unqueue" }))).toEqual({ type: "chat.unqueue" });
-  expect(parseClientMessage(JSON.stringify({ type: "settings.safe", on: true })).on).toBe(true);
-  expect(parseClientMessage(JSON.stringify({ type: "settings.session-save", on: true }))).toEqual({ type: "settings.session-save", on: true });
+  expect(parseClientMessage(JSON.stringify({ type: "agent.can.write", on: true })).on).toBe(true);
+  expect(parseClientMessage(JSON.stringify({ type: "context.save", on: true }))).toEqual({ type: "context.save", on: true });
+  expect(parseClientMessage(JSON.stringify({ type: "settings.autocompact", change: { autocompact: 0, autocompactMax: 0 } }))).toEqual({ type: "settings.autocompact", change: { autocompact: 0, autocompactMax: 0 } });
+  for (const change of [{ autocompact: -1 }, { autocompact: 1 }, { autocompactMax: -1 }, { autocompactMax: 1.5 }, { cap: 0.9 }, {}]) expect(() => parseClientMessage(JSON.stringify({ type: "settings.autocompact", change }))).toThrow();
   expect(parseClientMessage(JSON.stringify({ type: "question.answer", requestId: "q1", answers: null })).answers).toBeNull();
   expect(parseClientMessage(JSON.stringify({ type: "session.fork", id: "branch" }))).toEqual({ type: "session.fork", id: "branch" });
+  expect(parseClientMessage(JSON.stringify({ type: "session.fork", through: 2 }))).toEqual({ type: "session.fork", through: 2 });
+  for (const through of [-1, 1.5, "2", null]) expect(() => parseClientMessage(JSON.stringify({ type: "session.fork", through }))).toThrow(/through/);
+  expect(parseClientMessage(JSON.stringify({ type: "session.fork", agentId: "a", project: "/p" }))).toEqual({ type: "session.fork", agentId: "a", project: "/p" });
+  expect(parseClientMessage(JSON.stringify({ type: "session.add", anonymous: true, safe: true }))).toMatchObject({ type: "session.add", anonymous: true, safe: true });
   expect(parseClientMessage(JSON.stringify({ type: "session.close", agentId: "agent-1" }))).toEqual({ type: "session.close", agentId: "agent-1" });
   expect(parseClientMessage(JSON.stringify({ type: "context.edit-text", messageIndex: 0, blockIndex: 0, text: "revised" }))).toMatchObject({ type: "context.edit-text", text: "revised" });
   expect(parseClientMessage(JSON.stringify({ type: "tool.call", name: "read", args: { path: "README.md" } }))).toMatchObject({ type: "tool.call", name: "read" });
@@ -44,20 +54,46 @@ test("protocol validates client packets and rejects malformed input", () => {
   expect(() => parseClientMessage(JSON.stringify({ type: "question.answer", requestId: "q1", answers: "x" }))).toThrow();
 });
 
+test("serve exits on an idle SIGINT, ignores further signals and disarms on stop", async () => {
+  const env = await testEnv();
+  const signals = new EventEmitter();
+  const timers = new Map();
+  let next = 0;
+  const exitClock = { setTimeout: (callback) => { const id = ++next; timers.set(id, callback); return id; }, clearTimeout: (id) => timers.delete(id) };
+  const originalAbort = Sandbox.processesKill;
+  const exits = [];
+  Sandbox.processesKill = () => exits.push("owned kill");
+  let web;
+  try {
+    web = await serve({ port: 0, env, signals, exitClock, exitProcess: { abort: () => exits.push("abort"), exit: (code) => exits.push(code) } });
+    expect(signals.listenerCount("SIGINT")).toBe(1);
+    expect(signals.listenerCount("SIGTERM")).toBe(1);
+    signals.emit("SIGINT");
+    expect(timers.size).toBe(0);
+    const deadline = Date.now() + 4000;
+    while (!exits.length && Date.now() < deadline) await tick();
+    expect(exits).toEqual([0]);
+    signals.emit("SIGTERM");
+    expect(exits).toEqual([0]);
+  } finally { Sandbox.processesKill = originalAbort; if (web) await web.stop(); }
+  expect(signals.listenerCount("SIGINT")).toBe(0);
+  expect(signals.listenerCount("SIGTERM")).toBe(0);
+});
+
 test("hello names the served project; root is the all-projects view, the project URL its own view", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "unused");
+  const agent = await scripted(env, 0, "unused");
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [], scoped = [];
   try {
     const socket = await connect(web, received); await tick();
-    const name = env.cwd.split(/[\\/]/).filter(Boolean).at(-1);
-    expect(received.find((m) => m.type === "hello")).toMatchObject({ projects: [{ name, path: env.cwd, url: `/${name}/`, current: true }], scope: "all", canManageProjects: true });
-    expect(received.find((m) => m.type === "hello").agent.project).toBe(env.cwd);
+    const name = env.folder.split(/[\\/]/).filter(Boolean).at(-1);
+    expect(received.find((m) => m.type === "hello")).toMatchObject({ projects: [{ name, path: env.folder, url: `/${name}/`, current: true }], scope: "all", canManageProjects: true });
+    expect(received.find((m) => m.type === "hello").agent.project).toBe(env.folder);
     const own = await connect(web, scoped, `/${name}/ws`); await tick();
-    expect(scoped.find((m) => m.type === "hello")).toMatchObject({ scope: "project", agent: { project: env.cwd } });
+    expect(scoped.find((m) => m.type === "hello")).toMatchObject({ scope: "project", agent: { project: env.folder } });
     socket.close(); own.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("project.add gates local connections and validates directories; broadcast and prefixed routing work", async () => {
@@ -71,7 +107,7 @@ test("project.add gates local connections and validates directories; broadcast a
     const send = (path) => socket.send(JSON.stringify({ type: "project.add", path }));
     send("relative"); expect((await waitFor(root, "error")).message).toContain("absolute"); root.length = 0;
     send("~other/x"); expect((await waitFor(root, "error")).message).toContain("absolute"); root.length = 0;
-    const absolute = (await import("node:path")).resolve(env.cwd);
+    const absolute = (await import("node:path")).resolve(env.folder);
     send(`${absolute}/missing`); expect((await waitFor(root, "error")).message).toContain("does not exist"); root.length = 0;
     send(absolute); expect((await waitFor(root, "error")).message).toContain("already served"); root.length = 0;
     const path = `${absolute}/other`; (await import("node:fs")).mkdirSync(path);
@@ -98,7 +134,7 @@ test("project.add gates local connections and validates directories; broadcast a
     expect((await waitFor(alternate, "hello")).projects.find((p) => p.current)?.url).toBe("/other/");
     send(path); expect((await waitFor(root, "error")).message).toContain("already served");
     second.close(); socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the all-projects view lists, switches, and manages agents across projects", async () => {
@@ -109,36 +145,50 @@ test("the all-projects view lists, switches, and manages agents across projects"
   const sessionsWith = (count) => (m) => m.type === "sessions" && m.agents.length === count;
   try {
     const { resolve } = await import("node:path");
-    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const path = `${resolve(env.folder)}/second`; (await import("node:fs")).mkdirSync(path);
     const root = await connect(web, all);
     const first = (await waitFor(all, (m) => m.type === "hello")).agent;
     root.send(JSON.stringify({ type: "project.add", path }));
     // Moving to the new project opens its first agent (none yet: a new one).
     const second = (await waitFor(all, (m) => m.type === "hello" && m.agent.project === path)).agent;
     const listed = await waitFor(all, sessionsWith(2));
-    expect(listed.agents.map((a) => [a.project, a.id])).toEqual([[env.cwd, first.id], [path, second.id]]);
+    expect(listed.agents.map((a) => [a.project, a.id])).toEqual([[env.folder, first.id], [path, second.id]]);
     expect(listed.agents.find((a) => a.active).project).toBe(path);
     // A project view sees only its own agents, and cannot address others.
     const scoped = await connect(web, mine, "/second/ws");
     expect((await waitFor(mine, (m) => m.type === "sessions")).agents.map((a) => a.project)).toEqual([path]);
-    scoped.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
+    scoped.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.folder }));
     expect((await waitFor(mine, (m) => m.type === "error")).message).toBe("unknown agent");
     // Switching to another project's agent moves the socket and updates the project indicator.
     all.length = 0;
-    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
+    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.folder }));
     const back = await waitFor(all, (m) => m.type === "hello");
-    expect(back.agent).toMatchObject({ id: first.id, project: env.cwd });
-    expect(back.projects.find((p) => p.current).path).toBe(env.cwd);
+    expect(back.agent).toMatchObject({ id: first.id, project: env.folder });
+    expect(back.projects.find((p) => p.current).path).toBe(env.folder);
     // Selecting a project opens its first agent; the same project is a no-op.
     all.length = 0;
     root.send(JSON.stringify({ type: "project.select", path }));
     expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ id: second.id, project: path });
     // Agent changes in one project refresh all-projects viewers attached elsewhere.
-    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.cwd }));
-    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.cwd);
+    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.folder }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.folder);
     all.length = 0;
     scoped.send(JSON.stringify({ type: "session.add" }));
     expect((await waitFor(all, sessionsWith(3))).agents.filter((a) => a.project === path)).toHaveLength(2);
+    // Project records carry each project's model choices; adding an agent to
+    // another shown project creates it there and views it.
+    all.length = 0;
+    root.send(JSON.stringify({ type: "session.add", project: path }));
+    const addedHello = await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
+    expect(addedHello.projects.every((p) => Array.isArray(p.models))).toBe(true);
+    expect(addedHello.projects.find((p) => p.path === path)?.lastModel).toBe(`p/${addedHello.agent.model}`);
+    const added = addedHello.agent;
+    expect(added.id).not.toBe(second.id);
+    expect((await waitFor(all, sessionsWith(4))).agents.filter((a) => a.project === path)).toHaveLength(3);
+    root.send(JSON.stringify({ type: "session.close", agentId: added.id, project: path }));
+    await waitFor(all, sessionsWith(3));
+    root.send(JSON.stringify({ type: "session.switch", agentId: first.id, project: env.folder }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.folder);
     // Managing another project's agent runs in that project.
     all.length = 0;
     root.send(JSON.stringify({ type: "agent.rename", agentId: second.id, name: "Renamed", project: path }));
@@ -148,7 +198,7 @@ test("the all-projects view lists, switches, and manages agents across projects"
     root.send(JSON.stringify({ type: "session.switch", agentId: "missing", project: path }));
     expect((await waitFor(all, (m) => m.type === "error")).message).toBe("unknown agent");
     root.close(); scoped.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the all-projects view lists and manages every project's saved sessions; a project view only its own", async () => {
@@ -160,17 +210,17 @@ test("the all-projects view lists and manages every project's saved sessions; a 
   const ids = (packet, project) => packet.recent.filter((s) => s.project === project).map((s) => s.id).sort();
   try {
     const { resolve } = await import("node:path");
-    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const path = `${resolve(env.folder)}/second`; (await import("node:fs")).mkdirSync(path);
     const root = await connect(web, all);
     await waitFor(all, (m) => m.type === "hello");
     root.send(JSON.stringify({ type: "project.add", path }));
     await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
-    const home = resolve(env.cwd);
+    const home = resolve(env.folder);
     save("home-a", home); save("home-b", home); save("second-a", path);
     all.length = 0;
     root.send(JSON.stringify({ type: "session.list" }));
     const listed = await waitFor(all, (m) => m.type === "sessions" && m.recent.length >= 3);
-    expect(ids(listed, env.cwd)).toEqual(["home-a", "home-b"]);
+    expect(ids(listed, env.folder)).toEqual(["home-a", "home-b"]);
     expect(ids(listed, path)).toEqual(["second-a"]);
     // A project view lists only its own saved sessions.
     const scoped = await connect(web, mine, "/second/ws");
@@ -178,8 +228,8 @@ test("the all-projects view lists and manages every project's saved sessions; a 
     expect(own.recent.map((s) => s.project)).toEqual([path]);
     // Resuming another project's session moves the socket there, onto a new agent.
     all.length = 0;
-    root.send(JSON.stringify({ type: "session.resume", id: "home-a", project: env.cwd }));
-    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ project: env.cwd, session: "home-a" });
+    root.send(JSON.stringify({ type: "session.resume", id: "home-a", project: env.folder }));
+    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ project: env.folder, session: "home-a" });
     // Renaming and deleting another project's saved session run in that project.
     all.length = 0;
     root.send(JSON.stringify({ type: "session.rename", id: "second-a", name: "second-b", project: path }));
@@ -189,7 +239,7 @@ test("the all-projects view lists and manages every project's saved sessions; a 
     root.send(JSON.stringify({ type: "session.resume", id: "missing", project: path }));
     expect((await waitFor(all, (m) => m.type === "error")).message).toBe("unknown session");
     root.close(); scoped.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("group views show their member projects; a project URL wins over a group URL; leaving the group moves its viewers", async () => {
@@ -200,7 +250,7 @@ test("group views show their member projects; a project URL wins over a group UR
   try {
     const { resolve } = await import("node:path");
     const { mkdirSync } = await import("node:fs");
-    const home = resolve(env.cwd);
+    const home = resolve(env.folder);
     const red = `${home}/red`, blue = `${home}/blue`, clash = `${home}/group:blue`;
     for (const path of [red, blue, clash]) mkdirSync(path);
     const root = await connect(web, all);
@@ -235,7 +285,12 @@ test("group views show their member projects; a project URL wins over a group UR
     const clashed = await connect(web, clashView, "/group:blue/ws");
     expect((await waitFor(clashView, (m) => m.type === "hello"))).toMatchObject({ scope: "project", agent: { project: clash } });
     root.close(); view.close(); clashed.close();
-  } finally { web.stop(); }
+  } finally {
+    await web.stop();
+    const home = env.folder;
+    for (const path of [home, `${home}/red`, `${home}/blue`, `${home}/group:blue`]) delete Env.settings.projects[path];
+    await Env.settingsFlush();
+  }
 });
 
 test("/session-resume reaches any open project's saved session: in place in a multi-project view, by navigation elsewhere", async () => {
@@ -245,20 +300,21 @@ test("/session-resume reaches any open project's saved session: in place in a mu
   const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
   try {
     const { resolve } = await import("node:path");
-    const path = `${resolve(env.cwd)}/second`; (await import("node:fs")).mkdirSync(path);
+    const path = `${resolve(env.folder)}/second`; (await import("node:fs")).mkdirSync(path);
     const root = await connect(web, all);
     await waitFor(all, (m) => m.type === "hello");
     root.send(JSON.stringify({ type: "project.add", path }));
     await waitFor(all, (m) => m.type === "hello" && m.agent.project === path);
     for (const [id, origin] of [["far-a", path], ["far-b", path]]) new Context({ id, dir: env.settings.sessions, origin, save: true, messages: [messageUser(id)] }).flush();
     // The root view (now in `second`) moves home, then resumes `second`'s session in place.
-    root.send(JSON.stringify({ type: "project.select", path: env.cwd }));
-    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.cwd);
+    all.length = 0;
+    root.send(JSON.stringify({ type: "project.select", path: env.folder }));
+    await waitFor(all, (m) => m.type === "hello" && m.agent.project === env.folder);
     all.length = 0;
     root.send(JSON.stringify({ type: "chat.submit", text: "/session-resume far-a" }));
-    expect((await waitFor(all, (m) => m.type === "hello")).agent).toMatchObject({ project: path, session: "far-a" });
+    expect((await waitFor(all, (m) => m.type === "hello" && m.agent.project === path && m.agent.session === "far-a")).agent).toMatchObject({ project: path, session: "far-a" });
     // A project view navigates to the owning project's URL, which resumes the session on connect.
-    const homeUrl = all.findLast((m) => m.type === "hello").projects.find((p) => p.path === env.cwd).url;
+    const homeUrl = all.findLast((m) => m.type === "hello").projects.find((p) => p.path === env.folder).url;
     const scoped = await connect(web, mine, `${homeUrl}ws`);
     expect((await waitFor(mine, (m) => m.type === "hello")).scope).toBe("project");
     scoped.send(JSON.stringify({ type: "chat.submit", text: "/session-resume far-b" }));
@@ -273,18 +329,19 @@ test("/session-resume reaches any open project's saved session: in place in a mu
     const unknown = await connect(web, plain, "/second/ws?resume=nowhere");
     expect((await waitFor(plain, (m) => m.type === "hello")).agent.session).not.toBe("nowhere");
     root.close(); scoped.close(); arrived.close(); unknown.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("projects are pinned to projects.json, served at the next start, and removed with their viewers redirected", async () => {
   const env = await testEnv();
-  const { resolve, join } = await import("node:path");
+  const { resolve } = await import("node:path");
   const { mkdirSync } = await import("node:fs");
   const envOptions = { settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } };
-  const path = `${resolve(env.cwd)}/pinned`; mkdirSync(path);
+  const path = `${resolve(env.folder)}/pinned`; mkdirSync(path);
   const waitFor = async (messages, check) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && !messages.some(check)) await tick(); return messages.findLast(check); };
   const listed = (messages, pinned) => (m) => m.type === "projects" && m.projects.find((p) => p.path === path)?.pinned === pinned;
-  const projectsFile = () => JSON.parse(readFileSync(join(env._settingsDir, "projects.json"), "utf8")).projects;
+  await Env.ready();
+  const projectsFile = () => Env.settings.projects;
   let web = await serve({ port: 0, env, session: { kind: "anonymous" }, envOptions });
   const first = [];
   try {
@@ -293,7 +350,7 @@ test("projects are pinned to projects.json, served at the next start, and remove
     await waitFor(first, (m) => m.type === "hello" && m.agent.project === path);
     root.send(JSON.stringify({ type: "project.pin", path, pinned: true }));
     await waitFor(first, listed(first, true));
-    await tick(50); // coalesced settings write
+    await Env.settingsFlush();
     // the pin seeds the model its agent runs; the listed name is env.name
     expect(Object.keys(projectsFile()[path].models)).toEqual([`p/${first.findLast((m) => m.type === "hello").agent.model}`]);
     expect(first.findLast(listed(first, true)).projects.find((p) => p.path === path).name).toBe("pinned");
@@ -302,26 +359,42 @@ test("projects are pinned to projects.json, served at the next start, and remove
     root.send(JSON.stringify({ type: "project.group", path, group: "ruby", member: true }));
     root.send(JSON.stringify({ type: "project.group", path, group: "c", member: true }));
     await waitFor(first, grouped(["c", "ruby"]));
-    await tick(50);
+    await Env.settingsFlush();
     expect(projectsFile()[path].groups).toEqual({ ruby: true, c: true });
+    root.send(JSON.stringify({ type: "project.description", path, description: "Grouped work" }));
+    await waitFor(first, (m) => m.type === "projects" && m.projects.find((p) => p.path === path)?.description === "Grouped work");
+    await Env.settingsFlush();
+    expect(projectsFile()[path].groups).toEqual({ ruby: true, c: true });
+    expect(projectsFile()[path].models).toBeDefined();
+    first.length = 0; // only packets for this removal can satisfy the wait
     root.send(JSON.stringify({ type: "project.group", path, group: "c", member: false }));
     root.send(JSON.stringify({ type: "project.group", path, group: "ruby", member: false }));
     await waitFor(first, grouped([]));
-    await tick(50);
+    await Env.settingsFlush();
     expect(projectsFile()[path].groups).toBeUndefined();
     expect(projectsFile()[path].models).toBeDefined();
+    root.send(JSON.stringify({ type: "project.description", path, description: "  Pinned research  " }));
+    await waitFor(first, (m) => m.type === "projects" && m.projects.find((p) => p.path === path)?.description === "Pinned research");
+    await Env.settingsFlush();
+    expect(projectsFile()[path].description).toBe("Pinned research");
+    expect(projectsFile()[path].models).toBeDefined();
     root.close();
-  } finally { web.stop(); }
-  env.close(); // one open Env per folder: the restarted server opens the folder again
+  } finally { await web.stop(); }
+  await env.close(); // one open Env per folder: the restarted server opens the folder again
 
   // A new server with the same user settings serves the pinned project from the start.
-  const restarted = new (await import("../lib/env.js")).Env({ dir: env._dir, cwd: env.cwd, settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+  const restarted = await Env.open(env.folder, { dir: env._dir, settingsDir: env._settingsDir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
   web = await serve({ port: 0, env: restarted, session: { kind: "anonymous" }, envOptions });
   const all = [], scoped = [];
   try {
     const root = await connect(web, all);
     const hello = await waitFor(all, (m) => m.type === "hello");
-    expect(hello.projects.find((p) => p.path === path)).toMatchObject({ pinned: true, url: "/pinned/" });
+    expect(hello.projects.find((p) => p.path === path)).toMatchObject({ pinned: true, url: "/pinned/", description: "Pinned research" });
+    root.send(JSON.stringify({ type: "project.description", path, description: "" }));
+    await waitFor(all, (m) => m.type === "projects" && m.projects.find((p) => p.path === path)?.description === "");
+    await Env.settingsFlush();
+    expect(projectsFile()[path].description).toBeUndefined();
+    expect(projectsFile()[path].models).toBeDefined();
     const own = await connect(web, scoped, "/pinned/ws");
     await waitFor(scoped, (m) => m.type === "hello");
     root.send(JSON.stringify({ type: "project.select", path }));
@@ -330,19 +403,77 @@ test("projects are pinned to projects.json, served at the next start, and remove
     root.send(JSON.stringify({ type: "project.remove", path }));
     // the project view is redirected; the all-projects view moves to a served project
     expect((await waitFor(scoped, (m) => m.type === "project.removed")).url).toBe("/");
-    expect((await waitFor(all, (m) => m.type === "hello")).agent.project).toBe(restarted.cwd);
-    expect((await waitFor(all, (m) => m.type === "projects" && m.projects.length === 1)).projects[0].path).toBe(restarted.cwd);
-    await tick(50);
+    expect((await waitFor(all, (m) => m.type === "hello")).agent.project).toBe(restarted.folder);
+    expect((await waitFor(all, (m) => m.type === "projects" && m.projects.every((p) => p.path !== path)))?.projects.some((p) => p.path === restarted.folder)).toBe(true);
+    await Env.settingsFlush();
     expect(projectsFile()[path]).toBeUndefined();
-    root.send(JSON.stringify({ type: "project.remove", path: restarted.cwd }));
+    root.send(JSON.stringify({ type: "project.remove", path: restarted.folder }));
     expect((await waitFor(all, (m) => m.type === "error")).message).toContain("last served project");
     root.close(); own.close();
-  } finally { web.stop(); }
+  } finally {
+    await web.stop();
+    delete Env.settings.projects[path];
+    await Env.settingsFlush();
+  }
+});
+
+test("global pin edits refresh Web lists once with all settings files loaded", async () => {
+  const originEnv = await testEnv();
+  const cwd = originEnv.folder;
+  const dir = originEnv._dir;
+  await originEnv.close();
+  const env = await Env.open(cwd, { dir, settings: { providers: { p: { provider: "test", url: "test://script" } } } });
+  const { join } = await import("node:path");
+  const { mkdirSync } = await import("node:fs");
+  const added = join(env.folder, "a project");
+  mkdirSync(added);
+  const web = await serve({ port: 0, env, session: { kind: "anonymous" } });
+  const received = [];
+  const socket = await connect(web, received);
+  try {
+    await env.ready();
+    const deadlineHello = Date.now() + 4000;
+    while (!received.some((m) => m.type === "hello") && Date.now() < deadlineHello) await tick();
+    expect(received.some((m) => m.type === "hello")).toBe(true);
+    await tick(30);
+    received.length = 0;
+    await Env.ready();
+    Env.settings.projects[added] = { description: "Added on disk" };
+    Env.settings.projects[env.folder] = { description: "Externally edited" };
+    await Env.settingsFlush();
+    writeFileSync(join(env._settingsDir, "settings.json"), JSON.stringify({ theme: "light" }));
+    await env._sourceGraph.store.poll();
+    const deadline = Date.now() + 4000;
+    while (!received.some((m) => m.type === "projects" && m.projects.some((p) => p.path === added)) && Date.now() < deadline) await tick();
+    const updated = received.findLast((m) => m.type === "projects");
+    expect(updated?.projects.some((p) => p.path === added)).toBe(true);
+    expect(updated?.projects.find((p) => p.path === added)?.name).toBe("a project");
+    expect(updated?.projects.find((p) => p.path === env.folder)).toMatchObject({ pinned: true, description: "Externally edited" });
+    expect(updated?.projects.find((p) => p.path === added)).toMatchObject({ pinned: true, description: "Added on disk" });
+    received.length = 0;
+    Env.settings.projects[added] = { description: "Renamed externally" };
+    delete Env.settings.projects[env.folder];
+    await Env.settingsFlush();
+    writeFileSync(join(env._settingsDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+    await env._sourceGraph.store.poll();
+    const nextDeadline = Date.now() + 4000;
+    while (!received.some((m) => m.type === "projects" && m.projects.some((p) => p.description === "Renamed externally")) && Date.now() < nextDeadline) await tick();
+    const next = received.findLast((m) => m.type === "projects");
+    expect(next?.projects.find((p) => p.path === added)).toMatchObject({ description: "Renamed externally", pinned: true });
+    expect(next?.projects.find((p) => p.path === env.folder)?.pinned).toBe(false);
+  } finally {
+    socket.close();
+    await web.stop();
+    delete Env.settings.projects[added];
+    delete Env.settings.projects[env.folder];
+    await Env.settingsFlush();
+    await env.close();
+  }
 });
 
 test("project.add denies a non-loopback Host even when its peer is loopback", async () => {
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const received = [];
   try {
     const socket = await connect(web, received, "/ws", "localhost");
@@ -355,18 +486,31 @@ test("project.add denies a non-loopback Host even when its peer is loopback", as
     if (["localhost", "127.0.0.1"].includes(hostname().toLowerCase())) return;
     const count = received.filter((m) => m.type === "hello").length;
     const remote = await connect(web, received, "/ws", hostname());
-    while (Date.now() < deadline && received.filter((m) => m.type === "hello").length === count) await tick();
+    const remoteDeadline = Date.now() + 4000;
+    while (Date.now() < remoteDeadline && received.filter((m) => m.type === "hello").length === count) await tick();
     expect(received.findLast((m) => m.type === "hello").canManageProjects).toBe(false);
-    remote.send(JSON.stringify({ type: "project.add", path: env.cwd }));
-    while (Date.now() < deadline && !received.some((m) => m.type === "error")) await tick();
+    remote.send(JSON.stringify({ type: "project.add", path: env.folder }));
+    const addDeadline = Date.now() + 4000;
+    while (Date.now() < addDeadline && !received.some((m) => m.type === "error")) await tick();
+    expect(received.findLast((m) => m.type === "error")?.message).toContain("local connection");
+    received.length = 0;
+    remote.send(JSON.stringify({ type: "project.description", path: env.folder, description: "should not persist" }));
+    const descriptionDeadline = Date.now() + 4000;
+    while (Date.now() < descriptionDeadline && !received.some((m) => m.type === "error")) await tick();
+    expect(received.findLast((m) => m.type === "error")?.message).toContain("local connection");
+    expect(Env.settings.projects[env.folder]?.description).toBeUndefined();
+    received.length = 0;
+    remote.send(JSON.stringify({ type: "app.exit" }));
+    const exitDeadline = Date.now() + 4000;
+    while (Date.now() < exitDeadline && !received.some((m) => m.type === "error")) await tick();
     expect(received.findLast((m) => m.type === "error")?.message).toContain("local connection");
     remote.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("uploads are origin and connection bound, bounded, and consumed as text-first binary blocks", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "uploaded");
+  const agent = await scripted(env, 0, "uploaded");
   const web = await serve({ port: 0, env, uploadLimits: { fileBytes: 8, totalBytes: 16 }, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -385,7 +529,7 @@ test("uploads are origin and connection bound, bounded, and consumed as text-fir
     expect(user.content.map((block) => block.type)).toEqual(["text", "binary"]);
     expect(Buffer.from(user.content[1].content, "base64").toString()).toBe("data");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("context images replay as immutable capability media URLs", async () => {
@@ -397,7 +541,7 @@ test("context images replay as immutable capability media URLs", async () => {
     { type: 3, content: [{ type: "toolCall", callId: "c1", name: "read", arguments: {} }] },
     { type: 4, callId: "c1", name: "read", content: [{ type: "text", text: "ok" }, { type: "image", mimetype: "image/svg+xml", content: svg.toString("base64") }] },
   ];
-  const agent = new Agent({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
+  const agent = await Agent.create({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -423,7 +567,7 @@ test("context images replay as immutable capability media URLs", async () => {
     expect((await fetch(`${origin(web)}/media/${key}/0/2/${version}`)).status).toBe(404);
     expect((await fetch(origin(web))).headers.get("content-security-policy")).toContain("img-src 'self'");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the context inspector previews file blocks and display images without their bytes", async () => {
@@ -435,7 +579,7 @@ test("the context inspector previews file blocks and display images without thei
     { type: 3, content: [{ type: "toolCall", callId: "c1", name: "snap", arguments: {} }] },
     { type: 4, callId: "c1", name: "snap", content: [{ type: "text", text: "ok" }], display: [{ type: "image", mimetype: "image/gif", content: gif }] },
   ];
-  const agent = new Agent({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
+  const agent = await Agent.create({ env, model: "p/m", context, createIO: () => scriptedIO([]) });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -453,7 +597,7 @@ test("the context inspector previews file blocks and display images without thei
     expect(display).toMatchObject({ blockIndex: 1, text: null, attachment: { mime: "image/gif" } });
     expect(Buffer.from(await (await fetch(`${origin(web)}/${display.attachment.url}`)).arrayBuffer()).toString("base64")).toBe(gif);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("live tool results send image URLs instead of image bytes", async () => {
@@ -466,7 +610,7 @@ test("live tool results send image URLs instead of image bytes", async () => {
     [{ type: "start" }, ...TOOLCALL(0, "c1", "snap", {}), { type: "done" }],
     [{ type: "start" }, ...TEXT(0, "seen"), { type: "done" }],
   ]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -480,12 +624,12 @@ test("live tool results send image URLs instead of image bytes", async () => {
     const response = await fetch(`${origin(web)}/${packet.attachments[0].url}`);
     expect(Buffer.from(await response.arrayBuffer()).toString("base64")).toBe(png);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("server enforces origin, frame size, and serves the SPA with CSP", async () => {
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   try {
     const home = await fetch(origin(web));
     expect(home.status).toBe(200);
@@ -508,7 +652,7 @@ test("server enforces origin, frame size, and serves the SPA with CSP", async ()
     const closed = new Promise((resolve) => { socket.onclose = (event) => resolve(event.code); });
     socket.send("x".repeat(MAX_WS_PAYLOAD_LENGTH + 1));
     expect([1009, 1006]).toContain(await closed);
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("server refuses foreign Host names (DNS rebinding) and accepts this machine's names", async () => {
@@ -516,7 +660,7 @@ test("server refuses foreign Host names (DNS rebinding) and accepts this machine
   // peer address is loopback; only the Host name it used gives it away.
   const { hostname, networkInterfaces } = await import("node:os");
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const as = (host, path = "/", extra = {}) => fetch(`${origin(web)}${path}`, { headers: { Host: host, ...extra } });
   try {
     const rebound = `evil.example:${web.port}`;
@@ -531,7 +675,7 @@ test("server refuses foreign Host names (DNS rebinding) and accepts this machine
     }
     const lan = Object.values(networkInterfaces()).flat().find((entry) => entry?.family === "IPv4" && !entry.internal);
     if (lan) expect((await as(`${lan.address}:${web.port}`)).status).toBe(200); // --host 0.0.0.0 LAN use
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("completion reconciles final Markdown when assembled text differs from streamed text", async () => {
@@ -545,7 +689,7 @@ test("completion reconciles final Markdown when assembled text differs from stre
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const session = new AgentSession(agent);
   const packets = [];
   session.addSink((packet) => packets.push(packet));
@@ -573,7 +717,7 @@ test("a running turn reports live activity (Stop/composer state) without an agen
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -597,15 +741,15 @@ test("a running turn reports live activity (Stop/composer state) without an agen
     while (Date.now() < deadline && received.findLast((m) => m.type === "agent")?.agent?.busy !== false) await tick();
     expect(received.findLast((m) => m.type === "agent")?.agent?.state).toBe("idle");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("reconnecting selects the first running agent before creating a session", async () => {
   const env = await testEnv();
-  const first = scripted(env, 0, "first");
-  const second = scripted(env, 0, "second");
+  const first = await scripted(env, 0, "first");
+  const second = await scripted(env, 0, "second");
   let created = 0;
-  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: scripted(env, 0, "new") }; } });
+  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: await scripted(env, 0, "new") }; } });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -615,19 +759,19 @@ test("reconnecting selects the first running agent before creating a session", a
     expect(created).toBe(0);
     expect(env.agents()).toEqual([first, second]);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("an agent is ready at connection time so settings work before chat, and chat streams turn deltas", async () => {
   const env = await testEnv();
   let created = 0;
-  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: scripted(env, 0, "web scripted reply") }; } });
+  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: await scripted(env, 0, "web scripted reply") }; } });
   const received = [];
   try {
     const socket = await connect(web, received);
     await tick();
     expect(created).toBe(1); // Ghost-mode agent is ready before the first message.
-    socket.send(JSON.stringify({ type: "settings.safe", on: true }));
+    socket.send(JSON.stringify({ type: "agent.can.write", on: false }));
     await tick();
     expect(received.findLast((m) => m.type === "settings")?.safe).toBe(true);
     socket.send(JSON.stringify({ type: "chat.submit", text: "hello" }));
@@ -640,27 +784,27 @@ test("an agent is ready at connection time so settings work before chat, and cha
     expect(received.some((m) => m.type === "turn.delta" && m.kind === "text" && m.text.includes("web scripted reply"))).toBe(true);
     expect(text).toContain("web scripted reply");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("session logging settings update persisted agents; an agent that is not logged opts in and logs the same conversation", async () => {
   const env = await testEnv();
-  const saved = new Agent({ env, model: "p/m", context: [], contextId: "web-session", createIO: () => scriptedIO([[{ type: "done" }]]) });
+  const saved = await Agent.create({ env, model: "p/m", context: [], contextId: "web-session", createIO: () => scriptedIO([[{ type: "done" }]]) });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: saved }) });
   const received = [];
   try {
     const socket = await connect(web, received);
     await tick();
     expect(received.find((m) => m.type === "settings")?.sessionSave).toBe(true);
-    socket.send(JSON.stringify({ type: "settings.session-save", on: false }));
+    socket.send(JSON.stringify({ type: "context.save", on: false }));
     await tick();
     expect(saved.context.save).toBe(false);
     expect(received.findLast((m) => m.type === "settings")?.sessionSave).toBe(false);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 
   const anonymousEnv = await testEnv();
-  const anonymous = scripted(anonymousEnv);
+  const anonymous = await scripted(anonymousEnv);
   const anonymousWeb = await serve({ port: 0, env: anonymousEnv, createSession: async () => ({ agent: anonymous }) });
   const anonymousReceived = [];
   try {
@@ -669,7 +813,7 @@ test("session logging settings update persisted agents; an agent that is not log
     expect(anonymousReceived.find((m) => m.type === "settings")?.sessionSave).toBe(false);
     const transcript = anonymous.context;
     const transcriptLength = transcript.length;
-    socket.send(JSON.stringify({ type: "settings.session-save", on: true }));
+    socket.send(JSON.stringify({ type: "context.save", on: true }));
     // The toggle is always accessible: opting in on an agent that is not
     // logged logs ITS conversation — the transcript continues persisted.
     // Wait for the server's response instead of a bare tick: session
@@ -683,13 +827,13 @@ test("session logging settings update persisted agents; an agent that is not log
     const listed = anonymousReceived.findLast((m) => m.type === "sessions")?.agents?.find((a) => a.id === anonymous.name);
     expect(listed?.session).toBe(anonymous.context.id);
     socket.close();
-  } finally { anonymousWeb.stop(); }
+  } finally { await anonymousWeb.stop(); }
 });
 
 test("web sessions are saved by default; --session anon starts not logged", async () => {
   const savedEnv = await testEnv();
   const savedWeb = await serve({ port: 0, env: savedEnv, createSession: async () => ({
-    agent: new Agent({ env: savedEnv, model: "p/m", context: [], contextId: crypto.randomUUID(), createIO: () => scriptedIO([[{ type: "done" }]]) }),
+    agent: await Agent.create({ env: savedEnv, model: "p/m", context: [], contextId: crypto.randomUUID(), createIO: () => scriptedIO([[{ type: "done" }]]) }),
   }) });
   const received = [];
   try {
@@ -711,7 +855,7 @@ test("web sessions are saved by default; --session anon starts not logged", asyn
     while (Date.now() < deadline && readFiles().length === 0) await tick();
     expect(readFiles().length).toBe(1);
     socket.close();
-  } finally { savedWeb.stop(); }
+  } finally { await savedWeb.stop(); }
 
   const ghostEnv = await testEnv();
   const ghostWeb = await serve({ port: 0, env: ghostEnv, session: { kind: "anonymous" } });
@@ -721,7 +865,7 @@ test("web sessions are saved by default; --session anon starts not logged", asyn
     await tick(60);
     expect(ghostReceived.find((m) => m.type === "hello")?.agent?.logged).toBe(false);
     socket.close();
-  } finally { ghostWeb.stop(); }
+  } finally { await ghostWeb.stop(); }
 });
 
 test("tool-call response events stream as distinct wire packets", async () => {
@@ -739,7 +883,7 @@ test("tool-call response events stream as distinct wire packets", async () => {
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -753,29 +897,29 @@ test("tool-call response events stream as distinct wire packets", async () => {
     ]);
     expect(received.some((m) => m.type === "turn.delta" && m.kind === "thinking")).toBe(true);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the web server uses an explicit theme background and otherwise preserves system fallback", async () => {
   const env = await testEnv();
-  env.settings.tui = { themes: {
+  env.settings.themes = {
     night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } },
     inherited: { text: { fg: "#222222" } },
-  } };
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   try {
     const css = await (await fetch(`${origin(web)}/themes.css`)).text();
     expect(css).toContain(':root[data-theme="night"]{--page:#101820');
     expect(css).toContain(':root[data-theme="night"]{--page:#101820;--surface:#101820');
     expect(css).toContain(':root[data-theme="inherited"]{--fg:#222222}');
     expect(css).not.toContain(':root[data-theme="inherited"]{--page:');
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the web server publishes loaded theme CSS and initial usage status", async () => {
   const env = await testEnv();
-  env.settings.tui = { themes: { ember: { text: { fg: "#123456" }, accent: { fg: "#abcdef" }, "status.busy": { animation: { type: "wave", period: 720 } }, "input.border.active.bottom": { animation: { type: "comet", crossing: 1300 } } } } };
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  env.settings.themes = { ember: { text: { fg: "#123456" }, accent: { fg: "#abcdef" }, "status.busy": { animation: { type: "wave", period: 720 } }, "input.border.active.bottom": { animation: { type: "comet", crossing: 1300 } } } };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const received = [];
   try {
     const css = await (await fetch(`${origin(web)}/themes.css`)).text();
@@ -791,25 +935,33 @@ test("the web server publishes loaded theme CSS and initial usage status", async
     expect(hello.status).toMatchObject({ input: 0, output: 0, used: expect.any(Number), available: expect.any(Number) });
     expect(received.find((m) => m.type === "settings")?.prefs.themes).toContain("ember");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
-test("statusSnapshot() carries the provider's plan/quota report (mirrors tui-app's planUsage readout)", async () => {
+test("statusSnapshot() carries Context's provider quota report, including at terminal delivery", async () => {
   const env = await testEnv();
-  const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const report = { quotas: { requests: { total: 500, remaining: 470 } } };
+  const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "hi"), { type: "done" }]], {
+    onRequest: (io) => { io.context.planUsage = report; },
+  });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const session = new AgentSession(agent);
-  expect(session.statusSnapshot().plan).toBeNull();
-  agent.send(messageUser("hi"));
-  io.planUsage = { quotas: { requests: { total: 500, remaining: 470 } } };
-  await agent.run();
-  expect(session.statusSnapshot().plan).toEqual({ quotas: { requests: { total: 500, remaining: 470 } } });
+  const packets = [];
+  session.addSink((packet) => packets.push(packet));
+  try {
+    expect(agent.context.planUsage).toBeNull();
+    expect(session.statusSnapshot().plan).toBeNull();
+    await agent.send(messageUser("hi"));
+    expect(agent.context.planUsage).toEqual(report);
+    expect(session.statusSnapshot().plan).toEqual(report);
+    expect(packets.findLast((packet) => packet.type === "turn.end")?.status.plan).toEqual(report);
+  } finally { session.dispose(); }
 });
 
 test("the settings packet carries settings.web display prefs (defaults + overrides)", async () => {
   const env = await testEnv();
   env.settings.web = { theme: "dark", collapse: { thinking: false } };
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -823,7 +975,7 @@ test("the settings packet carries settings.web display prefs (defaults + overrid
     expect(packet.prefs.autocomplete).toBe(true);   // untouched default
     expect(packet.prefs.thinkingLevels).toContain("xhigh");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("closing the browser leaves its server-owned agent running", async () => {
@@ -840,7 +992,7 @@ test("closing the browser leaves its server-owned agent running", async () => {
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -857,7 +1009,7 @@ test("closing the browser leaves its server-owned agent running", async () => {
     release();
     while (Date.now() < deadline && agent.busy) await tick();
     expect(agent.busy).toBe(false);
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("queued web messages can be unqueued for editing before the active turn settles", async () => {
@@ -871,7 +1023,7 @@ test("queued web messages can be unqueued for editing before the active turn set
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -879,9 +1031,10 @@ test("queued web messages can be unqueued for editing before the active turn set
     await tick();
     socket.send(JSON.stringify({ type: "chat.submit", text: "active" }));
     const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && !agent.busy) await tick();
+    while (Date.now() < deadline && !release) await tick();
+    expect(typeof release).toBe("function");
     socket.send(JSON.stringify({ type: "chat.submit", text: "revise me" }));
-    while (Date.now() < deadline && !received.findLast((m) => m.type === "chat.queue")) await tick();
+    while (Date.now() < deadline && !received.some((m) => m.type === "chat.queue" && m.messages?.includes("revise me"))) await tick();
     expect(agent.pending).toHaveLength(1);
     expect(received.findLast((m) => m.type === "chat.queue")?.messages).toEqual(["revise me"]);
     socket.send(JSON.stringify({ type: "chat.unqueue" }));
@@ -889,7 +1042,7 @@ test("queued web messages can be unqueued for editing before the active turn set
     expect(received.findLast((m) => m.type === "chat.queue")?.messages).toEqual([]);
     release();
     socket.close();
-  } finally { web.stop(); }
+  } finally { release?.(); await web.stop(); }
 });
 
 test("queued messages clear and enter the stream when the active turn delivers them", async () => {
@@ -906,7 +1059,7 @@ test("queued messages clear and enter the stream when the active turn delivers t
     },
     async close() { this.state = "closed"; },
   };
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -923,12 +1076,12 @@ test("queued messages clear and enter the stream when the active turn delivers t
     expect(received.findLast((m) => m.type === "chat.queue")?.messages).toEqual([]);
     expect(received.some((m) => m.type === "chat.user" && m.message?.text === "delivered later")).toBe(true);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("context inspection separates viewer block types and tool display", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "idle");
+  const agent = await scripted(env, 0, "idle");
   agent.context.update((messages) => { messages.push(
     { type: 1, content: [{ type: "text", text: "system" }] },
     { type: 2, content: [{ type: "text", text: "user" }] },
@@ -950,12 +1103,12 @@ test("context inspection separates viewer block types and tool display", async (
     expect(blocks.filter((block) => block.viewerType.startsWith("tool")).map((block) => block.name)).toEqual(["read", "read", "read"]);
     expect(blocks.filter((block) => !block.viewerType.startsWith("tool")).every((block) => block.name === undefined)).toBe(true);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("context deletion removes selected messages through the web protocol", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "idle");
+  const agent = await scripted(env, 0, "idle");
   agent.context.update((messages) => { messages.push(
     { type: 2, content: [{ type: "text", text: "first" }] },
     { type: 2, content: [{ type: "text", text: "second" }] },
@@ -972,7 +1125,7 @@ test("context deletion removes selected messages through the web protocol", asyn
     expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["second"]);
     expect(received.findLast((m) => m.type === "context")?.blocks).toHaveLength(1);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the web protocol exposes context inspection/editing and direct tool calls", async () => {
@@ -980,7 +1133,7 @@ test("the web protocol exposes context inspection/editing and direct tool calls"
   env.toolAdd("echo", async ({ value }) => ({ content: [{ type: "text", text: String(value) }] }), {
     description: "Returns the supplied value.", inputSchema: { type: "object", properties: { value: { type: "string" } } }, safe: true,
   });
-  const agent = scripted(env, 0, "idle");
+  const agent = await scripted(env, 0, "idle");
   agent.context.append({ type: 2, content: [{ type: "text", text: "before" }] });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
@@ -998,14 +1151,14 @@ test("the web protocol exposes context inspection/editing and direct tool calls"
     while (Date.now() < deadline && !JSON.stringify(received).includes("tool result")) await tick();
     expect(JSON.stringify(received)).toContain("tool result");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("web startup replaces an invalid last model with the first available combo alphabetically", async () => {
   const env = await testEnv();
-  env._endpoints.p.models = { m: {} };
-  env._endpoints.zed = { provider: "test", url: "test://zed", models: { omega: {} } };
-  env._endpoints.alpha = { provider: "test", url: "test://alpha", models: { beta: {}, alpha: {} } };
+  env.settings.providers.p.models = { m: {} };
+  env.settings.providers.zed = { provider: "test", url: "test://zed", models: { omega: {} } };
+  env.settings.providers.alpha = { provider: "test", url: "test://alpha", models: { beta: {}, alpha: {} } };
   writeFileSync(`${env._settingsDir}/last-model.json`, JSON.stringify({ endpoint: "p", model: "removed" }));
   const web = await serve({ port: 0, env, session: { kind: "anonymous" } });
   const received = [];
@@ -1015,14 +1168,19 @@ test("web startup replaces an invalid last model with the first available combo 
     const hello = received.find((message) => message.type === "hello");
     expect(`${hello.agent.endpoint}/${hello.agent.model}`).toBe("alpha/alpha");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("the model menu lists clean endpoint/model combos, never completion noise", async () => {
+  class MenuProtocol {
+    static provider = { label: "Menu", capabilities: {} };
+    static async models() { return { "acme-pro": {}, "acme-mini": {} }; }
+  }
   const env = await testEnv();
-  env._endpoints.acme = { provider: "test", url: "test://script" };
-  authSetOf(env, "acme", { token: "t", models: { "acme-pro": null, "acme-mini": null } });
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  await env.ready();
+  providerAdd(env, "menu", MenuProtocol);
+  env.settings.providers.acme = { provider: "menu", url: "https://acme.invalid", models: { "acme-pro": {}, "acme-mini": {} } };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -1035,12 +1193,12 @@ test("the model menu lists clean endpoint/model combos, never completion noise",
     expect(models).not.toContain("acme-pro");
     expect(models.every((m) => m.includes("/"))).toBe(true);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("session.fork branches under the new id and keeps the logging setting", async () => {
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env, 0, "idle") }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env, 0, "idle") }) });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -1051,14 +1209,61 @@ test("session.fork branches under the new id and keeps the logging setting", asy
     while (Date.now() < deadline && received.findLast((m) => m.type === "hello")?.agent?.session !== "web-branch") await tick();
     expect(received.findLast((m) => m.type === "hello")?.agent).toMatchObject({ session: "web-branch", logged: false });
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
+});
+
+test("session.fork through keeps messages through the selected index, leaving the source untouched", async () => {
+  const env = await testEnv();
+  const source = await scripted(env, 0, "idle");
+  source.context.append(messageUser("first"));
+  source.context.append({ type: Context.MessageType.Assistant, content: [{ type: "text", text: "answer" }] });
+  source.context.append(messageUser("later"));
+  const before = source.context.messages();
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: source }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "session.fork", through: 2 }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && received.filter((m) => m.type === "hello").length < 2) await tick();
+    const branch = env.agents().find((agent) => agent !== source);
+    expect(branch).toBeDefined();
+    expect(branch.context.messages()).toEqual(before.slice(0, 2));
+    expect(source.context.messages()).toEqual(before);
+    expect(source.closed).toBe(false);
+    expect(branch.context.uuid).not.toBe(source.context.uuid);
+    socket.close();
+  } finally { await web.stop(); }
+});
+
+test("forking a sidebar agent preserves the source and views the new branch", async () => {
+  const env = await testEnv();
+  const source = await scripted(env, 0, "idle");
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: source }) });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    socket.send(JSON.stringify({ type: "session.fork", agentId: source.name }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && received.filter((m) => m.type === "hello").length < 2) await tick();
+    const fork = env.agents().find((agent) => agent !== source);
+    expect(source.closed).toBe(false);
+    expect(fork).toBeDefined();
+    expect(fork.context.uuid).not.toBe(source.context.uuid);
+    expect(fork.name).not.toBe(source.name);
+    expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(fork.name);
+    expect(received.findLast((m) => m.type === "sessions")?.agents).toHaveLength(2);
+    socket.close();
+  } finally { await web.stop(); }
 });
 
 test("session.new replaces the viewed agent with a fresh one", async () => {
   const env = await testEnv();
   const agents = [];
   const web = await serve({ port: 0, env, createSession: async () => {
-    const agent = scripted(env, 0, "idle");
+    const agent = await scripted(env, 0, "idle");
     agents.push(agent);
     return { agent };
   } });
@@ -1069,19 +1274,21 @@ test("session.new replaces the viewed agent with a fresh one", async () => {
     const first = agents[0];
     socket.send(JSON.stringify({ type: "session.new" }));
     const deadline = Date.now() + 4000;
-    while (Date.now() < deadline && agents.length < 2) await tick();
+    while (Date.now() < deadline && !first.closed) await tick();
+    const next = env.agents()[0];
     expect(first.closed).toBe(true);
-    expect(agents[1].context.save).toBe(false);
-    expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
+    expect(next).not.toBe(first);
+    expect(next.context.save).toBe(false);
+    expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(next.name);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("resuming a saved session replaces the viewed agent", async () => {
   const env = await testEnv();
   const agents = [];
   const web = await serve({ port: 0, env, createSession: async () => {
-    const agent = scripted(env, 0, "idle");
+    const agent = await scripted(env, 0, "idle");
     agents.push(agent);
     return { agent };
   } });
@@ -1089,22 +1296,23 @@ test("resuming a saved session replaces the viewed agent", async () => {
   try {
     const socket = await connect(web, received);
     await tick();
-    const originalList = Agent.Context.listAsync;
-    Agent.Context.listAsync = async () => [{ id: "saved", preview: "saved", messages: 0 }];
-    try {
-      socket.send(JSON.stringify({ type: "session.resume", id: "saved" }));
-      const deadline = Date.now() + 4000;
-      while (Date.now() < deadline && agents.length < 2) await tick();
-      expect(agents[0].closed).toBe(true);
-      expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
-    } finally { Agent.Context.listAsync = originalList; }
+    const saved = new Context({ id: "saved", dir: env.settings.sessions, origin: env.folder });
+    saved.append(messageUser("saved content"));
+    await saved.close();
+    socket.send(JSON.stringify({ type: "session.resume", id: "saved" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !agents[0].closed) await tick();
+    const next = env.agents()[0];
+    expect(agents[0].closed).toBe(true);
+    expect(next).not.toBe(agents[0]);
+    expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(next.name);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("saved sessions rename and delete by id from the sidebar", async () => {
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env, 0, "idle") }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env, 0, "idle") }) });
   const received = [];
   const Store = Agent.Context;
   const original = { listAsync: Store.listAsync, renameById: Store.renameById, deleteById: Store.deleteById };
@@ -1124,14 +1332,14 @@ test("saved sessions rename and delete by id from the sidebar", async () => {
     expect(received.filter((m) => m.type === "command.result").map((m) => m.text)).toEqual(["session named: kept", "session deleted: saved"]);
     expect(received.find((m) => m.type === "error")?.message).toContain("unknown session");
     socket.close();
-  } finally { Object.assign(Store, original); web.stop(); }
+  } finally { Object.assign(Store, original); await web.stop(); }
 });
 
 test("deleting a live saved session closes its agent and moves all viewers before deleting its file", async () => {
   const env = await testEnv();
   const agents = [];
   const web = await serve({ port: 0, env, createSession: async () => {
-    const agent = new Agent({ env, model: "p/m", contextId: agents.length ? `replacement-${agents.length}` : "target", createIO: () => scriptedIO([[{ type: "done" }]]) });
+    const agent = await Agent.create({ env, model: "p/m", contextId: agents.length ? `replacement-${agents.length}` : "target", createIO: () => scriptedIO([[{ type: "done" }]]) });
     agents.push(agent);
     if (agents.length === 1) { agent.context.append(messageUser("keep this conversation")); agent.context.flush(); }
     return { agent };
@@ -1153,7 +1361,7 @@ test("deleting a live saved session closes its agent and moves all viewers befor
     expect(first.findLast((m) => m.type === "sessions")?.recent.some((s) => s.id === "target")).toBe(false);
     expect(readdirSync(env.settings.sessions).some((name) => name.includes("target"))).toBe(false);
     a.close(); b.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("switching sessions keeps the current model unless the session stored its own", async () => {
@@ -1162,32 +1370,32 @@ test("switching sessions keeps the current model unless the session stored its o
   const received = [];
   const hellos = () => received.filter((m) => m.type === "hello");
   const nextHello = async (count) => { const deadline = Date.now() + 4000; while (Date.now() < deadline && hellos().length < count) await tick(); return hellos().at(-1)?.agent; };
-  const stored = (id, settings) => { const store = new Agent.Context({ id, dir: env.settings.sessions, origin: env.cwd, settings }); store.append({ type: 2, content: [{ type: "text", text: id }] }); store.close(); };
+  const stored = async (id, settings) => { const store = new Agent.Context({ id, dir: env.settings.sessions, origin: env.folder, settings }); store.append({ type: 2, content: [{ type: "text", text: id }] }); await store.close(); };
   try {
     const socket = await connect(web, received);
     expect(await nextHello(1)).toMatchObject({ endpoint: "p1", model: "launch" });
     env.agents()[0].model = "p2/picked"; // the user switched models since launch
     socket.send(JSON.stringify({ type: "session.new" }));
     expect(await nextHello(2)).toMatchObject({ endpoint: "p2", model: "picked" }); // not the launch last-model
-    stored("with-model", { model: "x/own" });
-    stored("without-model", { name: "plain" });
+    await stored("with-model", { model: "x/own" });
+    await stored("without-model", { name: "plain" });
     socket.send(JSON.stringify({ type: "session.resume", id: "with-model" }));
     expect(await nextHello(3)).toMatchObject({ endpoint: "x", model: "own" }); // the session's own model
     socket.send(JSON.stringify({ type: "session.resume", id: "without-model" }));
     expect(await nextHello(4)).toMatchObject({ endpoint: "x", model: "own" }); // no model stored: the current one stays
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("settings and session.add retain qualified Agent models while displaying native model IDs", async () => {
   const env = await testEnv();
-  env._endpoints.p.models = { m: {}, "team/nested": {} };
+  env.settings.providers.p.models = { m: {}, "team/nested": {} };
   const web = await serve({ port: 0, env, model: { model: "p/m" } });
   const received = [];
   try {
     const socket = await connect(web, received);
     expect(await until(() => received.some((packet) => packet.type === "settings"))).toBe(true);
-    socket.send(JSON.stringify({ type: "settings.model", model: "p/team/nested" }));
+    socket.send(JSON.stringify({ type: "agent.model", model: "p/team/nested" }));
     expect(await until(() => env.agents()[0]?.model === "p/team/nested")).toBe(true);
     expect(received.findLast((packet) => packet.type === "settings")).toMatchObject({ endpoint: "p", model: "team/nested" });
     socket.send(JSON.stringify({ type: "session.add", model: "p/team/nested" }));
@@ -1195,13 +1403,34 @@ test("settings and session.add retain qualified Agent models while displaying na
     expect(env.agents()[1].model).toBe("p/team/nested");
     expect(received.findLast((packet) => packet.type === "hello")?.agent).toMatchObject({ endpoint: "p", model: "team/nested" });
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
+});
+
+test("session.add anonymous creates an unlogged agent without closing the original", async () => {
+  const env = await testEnv();
+  const web = await serve({ port: 0, env });
+  const received = [];
+  try {
+    const socket = await connect(web, received);
+    await tick();
+    const source = env.agents()[0];
+    socket.send(JSON.stringify({ type: "session.add", anonymous: true, safe: true }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && received.filter((m) => m.type === "hello").length < 2) await tick();
+    const added = env.agents().find((agent) => agent !== source);
+    expect(source.closed).toBe(false);
+    expect(received.filter((m) => m.type === "error")).toEqual([]);
+    expect(received.filter((m) => m.type === "hello").length).toBe(2);
+    expect(added?.context.save).toBe(false);
+    expect(added?.can.write).toBe(false);
+    socket.close();
+  } finally { await web.stop(); }
 });
 
 test("session.add creates an additional agent while keeping the current one", async () => {
   const env = await testEnv();
   let created = 0;
-  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: scripted(env, 0, `reply-${created}`) }; } });
+  const web = await serve({ port: 0, env, createSession: async () => { created++; return { agent: await scripted(env, 0, `reply-${created}`) }; } });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -1215,14 +1444,14 @@ test("session.add creates an additional agent while keeping the current one", as
     while (Date.now() < d2 && created < 2) await tick();
     expect(created).toBe(2); // an ADDITIONAL agent, not a replacement
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("session.close closes an open agent and replaces its attached view", async () => {
   const env = await testEnv();
   const agents = [];
   const web = await serve({ port: 0, env, createSession: async () => {
-    const agent = scripted(env, 0, "idle");
+    const agent = await scripted(env, 0, "idle");
     agents.push(agent);
     return { agent };
   } });
@@ -1239,13 +1468,13 @@ test("session.close closes an open agent and replaces its attached view", async 
     expect(agents).toHaveLength(2);
     expect(received.findLast((m) => m.type === "hello")?.agent?.id).toBe(agents[1].name);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("attaching to an agent replays context user messages as history blocks", async () => {
   const env = await testEnv();
   const io = scriptedIO([[{ type: "start" }, ...TEXT(0, "seeded reply"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [messageUser("context-only question")], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [messageUser("context-only question")], createIO: () => io });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1269,7 +1498,7 @@ test("attaching to an agent replays context user messages as history blocks", as
     expect(history).toContain("seeded question");
     expect(history).toContain("seeded reply");
     socket.close(); b.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("re-entering an agent replays a response streamed while it was in the background", async () => {
@@ -1288,7 +1517,7 @@ test("re-entering an agent replays a response streamed while it was in the backg
       return { type: "done" };
     },
   };
-  const first = new Agent({ env, model: "p/m", context: [], createIO: () => firstIO });
+  const first = await Agent.create({ env, model: "p/m", context: [], createIO: () => firstIO });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent: first }) });
   const received = [];
   try {
@@ -1307,12 +1536,12 @@ test("re-entering an agent replays a response streamed while it was in the backg
     const hello = received.findLast((m) => m.type === "hello");
     expect(hello.history.map((block) => block.text).join("")).toContain("before switch after switch");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("reconnected views share the selected running agent's stream", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "shared reply");
+  const agent = await scripted(env, 0, "shared reply");
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const aMsgs = []; const bMsgs = [];
   try {
@@ -1325,7 +1554,7 @@ test("reconnected views share the selected running agent's stream", async () => 
     expect(JSON.stringify(aMsgs)).toContain("shared reply");
     expect(JSON.stringify(bMsgs)).toContain("shared reply");
     a.close(); b.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 // The question bridge is the AgentSession's seam for interactive tools. We
@@ -1334,7 +1563,7 @@ test("reconnected views share the selected running agent's stream", async () => 
 // Agent's concern and covered by agent-question tests.
 test("a timed-out bridge question closes over the wire and rejects a late answer", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "idle");
+  const agent = await scripted(env, 0, "idle");
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1351,7 +1580,7 @@ test("a timed-out bridge question closes over the wire and rejects a late answer
     await tick();
     expect(received.filter((m) => m.type === "question.close")).toHaveLength(1);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 // The question bridge is the AgentSession's seam for interactive tools. We
@@ -1360,7 +1589,7 @@ test("a timed-out bridge question closes over the wire and rejects a late answer
 // Agent's concern and covered by agent-question tests.
 test("a question asked through the bridge opens over the wire and an answer resolves it", async () => {
   const env = await testEnv();
-  const agent = scripted(env, 0, "idle");
+  const agent = await scripted(env, 0, "idle");
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1378,7 +1607,7 @@ test("a question asked through the bridge opens over the wire and an answer reso
     socket.send(JSON.stringify({ type: "question.answer", requestId: opened.requestId, answers: [{ question: "Pick", answer: "A" }] }));
     await expect(bridgePromise).resolves.toEqual([{ question: "Pick", answer: "A" }]);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 /* ------------------------------------------------ TUI-parity packets */
@@ -1391,20 +1620,24 @@ const until = async (predicate, ms = 4000) => {
 
 test("every SPA asset the page references is served (no dangling module paths)", async () => {
   const env = await testEnv();
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   try {
     for (const path of ["/", "/app.js", "/style.css", "/themes.css", "/markdown.js", "/markdown/browser.js", "/markdown/math.js", "/markdown/inline.js", "/read-preview.js", "/text-safe.js", "/format.js", "/favicon.svg", "/logo.svg"]) {
       const response = await fetch(`${origin(web)}${path}`);
       expect([path, response.status]).toEqual([path, 200]);
     }
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("protocol validates the TUI-parity packets", () => {
   expect(parseClientMessage(JSON.stringify({ type: "session.new", anonymous: true, safe: true }))).toEqual({ type: "session.new", anonymous: true, safe: true });
-  expect(parseClientMessage(JSON.stringify({ type: "session.add", model: "p/m" }))).toEqual({ type: "session.add", safe: false, model: "p/m" });
+  expect(parseClientMessage(JSON.stringify({ type: "session.add", model: "p/m" }))).toEqual({ type: "session.add", safe: false, anonymous: false, model: "p/m" });
+  expect(parseClientMessage(JSON.stringify({ type: "session.add", project: "/x" }))).toEqual({ type: "session.add", safe: false, anonymous: false, project: "/x" });
   expect(parseClientMessage(JSON.stringify({ type: "agent.rename", name: "  scribe " }))).toEqual({ type: "agent.rename", name: "scribe" });
-  expect(parseClientMessage(JSON.stringify({ type: "settings.spawn", value: "Ask" }))).toEqual({ type: "settings.spawn", value: null });
+  expect(parseClientMessage(JSON.stringify({ type: "agent.can.delegate", value: null }))).toEqual({ type: "agent.can.delegate", value: null });
+  expect(() => parseClientMessage(JSON.stringify({ type: "agent.can.delegate", value: "Ask" }))).toThrow("invalid delegation permission");
+  expect(() => parseClientMessage(JSON.stringify({ type: "settings.spawn", value: true }))).toThrow("unsupported message type");
+  expect(() => parseClientMessage(JSON.stringify({ type: "project.description", path: "/p", description: 5 }))).toThrow("invalid description");
   expect(parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" }))).toEqual({ type: "endpoint.login", scope: "package", name: "e", provider: "p", url: "u" });
   expect(() => parseClientMessage(JSON.stringify({ type: "endpoint.login", scope: "global", name: "e", provider: "p", url: "u" }))).toThrow("invalid scope");
   expect(() => parseClientMessage(JSON.stringify({ type: "session.rename", name: "   " }))).toThrow("invalid name");
@@ -1413,9 +1646,9 @@ test("protocol validates the TUI-parity packets", () => {
   expect(parseClientMessage(JSON.stringify({ type: "chat.continue" }))).toEqual({ type: "chat.continue" });
 });
 
-test("agents are renamed, delegation is set, and the web theme persists independently of tui.theme", async () => {
-  const env = await testEnv({ theme: "night", tui: { theme: "default", themes: { night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } } } } });
-  const agent = scripted(env);
+test("agents are renamed, delegation is set, and web theme selection syncs with TUI", async () => {
+  const env = await testEnv({ theme: "night", themes: { night: { background: { bg: "#101820" }, text: { fg: "#eeeeee" } } } });
+  const agent = await scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1423,32 +1656,53 @@ test("agents are renamed, delegation is set, and the web theme persists independ
     expect(await until(() => received.some((m) => m.type === "settings"))).toBe(true);
     expect(received.findLast((m) => m.type === "settings").prefs.activeTheme).toBe("night");
     socket.send(JSON.stringify({ type: "agent.rename", name: "scribe" }));
-    socket.send(JSON.stringify({ type: "settings.spawn", value: false }));
+    socket.send(JSON.stringify({ type: "agent.can.delegate", value: false }));
     socket.send(JSON.stringify({ type: "settings.theme", name: "night" }));
-    expect(await until(() => env.settings.web.theme === "night" && agent.name === "scribe" && agent.spawnPermission === false)).toBe(true);
+    expect(await until(() => env.settings.web.theme === "night" && agent.name === "scribe" && agent.can.delegate === false)).toBe(true);
     expect(agent.name).toBe("scribe");
-    expect(agent.spawnPermission).toBe(false);
+    expect(agent.can.delegate).toBe(false);
     expect(env.settings.web.theme).toBe("night");
-    expect(env.settings.tui.theme).toBe("default");
-    expect(await until(() => { try { return JSON.parse(readFileSync(`${env._settingsDir}/settings.json`, "utf8")).web?.theme === "night"; } catch { return false; } })).toBe(true);
+    expect(env.settings.tui.theme).toBe("night");
+    // Selecting the inherited theme leaves the shared setting unchanged.
+    await env.settingsFlush();
+    expect(env._sourceGraph.store.read(["theme"])).toBe("night");
+    expect(env._sourceGraph.store.read(["web", "theme"])).toBeUndefined();
     expect(received.findLast((m) => m.type === "settings").prefs.themeModes.night).toBe("dark");
     expect(received.some((m) => m.type === "agent" && m.agent.name === "scribe")).toBe(true);
     const css = await (await fetch(`${origin(web)}/themes.css`)).text();
     expect(css).toContain('.theme-card[data-theme="night"]{');
     socket.send(JSON.stringify({ type: "settings.theme", name: "system" }));
     expect(await until(() => env.settings.web.theme === "system")).toBe(true);
-    expect(env.settings.tui.theme).toBe("default");
+    expect(env.settings.theme).toBe("system");
+    expect(env.settings.tui.theme).toBe("system");
+    expect(env._sourceGraph.store.read(["tui", "theme"])).toBeUndefined();
+    expect(env._sourceGraph.store.read(["web", "theme"])).toBeUndefined();
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
+});
+
+test("web theme selection clears legacy per-interface overrides", async () => {
+  const env = await testEnv({ theme: "night", tui: { theme: "default" }, web: { theme: "dark" } });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
+  try {
+    const socket = await connect(web);
+    socket.send(JSON.stringify({ type: "settings.theme", name: "light" }));
+    expect(await until(() => env.settings.theme === "light")).toBe(true);
+    expect(env.settings.tui.theme).toBe("light");
+    expect(env.settings.web.theme).toBe("light");
+    expect(env._sourceGraph.store.read(["tui", "theme"])).toBeUndefined();
+    expect(env._sourceGraph.store.read(["web", "theme"])).toBeUndefined();
+    socket.close();
+  } finally { await web.stop(); }
 });
 
 test("dual-mode theme CSS merges inherited shared roles and mode colors per swatch", async () => {
   const env = await testEnv();
-  env.settings.tui = { themes: {
+  env.settings.themes = {
     base: { text: { fg: "#eeeeee" }, background: { bg: "#123456" }, dark: { background: { bg: "#000000" } } },
     child: { parent: "base", text: { bold: true }, light: { text: { bg: "#abcdef" } }, dark: { text: { bg: "#654321" } } },
-  } };
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   try {
     const css = await (await fetch(`${origin(web)}/themes.css`)).text();
     expect(css).toContain(':root[data-theme="child"][data-mode="light"]{--page:#123456;--surface:#123456;--surface-2:#123456;--fg:#eeeeee}');
@@ -1460,7 +1714,7 @@ test("dual-mode theme CSS merges inherited shared roles and mode colors per swat
     expect(await until(() => received.some((m) => m.type === "settings"))).toBe(true);
     expect(received.findLast((m) => m.type === "settings").prefs.dualThemes).toContain("child");
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 // A verifiable no-network protocol (the CLI login tests' fake): login
@@ -1475,7 +1729,7 @@ class LoginProtocol {
 test("endpoints are listed, signed in (direct form) and signed out over the wire", async () => {
   const env = await testEnv();
   providerAdd(env, "wire", LoginProtocol);
-  const agent = scripted(env);
+  const agent = await scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1494,13 +1748,13 @@ test("endpoints are listed, signed in (direct form) and signed out over the wire
     expect(namesOf(env)).not.toContain("added");
     expect(agent.model).toBeUndefined();
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("endpoint policies (disabled, endpoint/model maxActive) are listed and set over the wire", async () => {
   const env = await testEnv();
   providerAdd(env, "wire", LoginProtocol);
-  const agent = scripted(env);
+  const agent = await scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   /** The newest endpoints packet's policy for one endpoint. */
@@ -1522,12 +1776,12 @@ test("endpoint policies (disabled, endpoint/model maxActive) are listed and set 
     socket.send(JSON.stringify({ type: "endpoint.policy", selector: "budget", change: { maxActive: -1 } }));
     expect(await until(() => received.some((m) => m.type === "error"))).toBe(true);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("a pending question is re-opened for a view that attaches later (reload)", async () => {
   const env = await testEnv();
-  const agent = scripted(env);
+  const agent = await scripted(env);
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const first = [];
   const second = [];
@@ -1543,12 +1797,12 @@ test("a pending question is re-opened for a view that attaches later (reload)", 
     socketB.send(JSON.stringify({ type: "question.answer", requestId, answers: [{ labels: ["A"] }] }));
     expect(await answer).toEqual([{ labels: ["A"] }]);
     socketB.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("a run that throws ends the turn with an error terminal (indicators never stick)", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => { throw new Error("no usable endpoint"); } });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => { throw new Error("no usable endpoint"); } });
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
   try {
@@ -1560,17 +1814,17 @@ test("a run that throws ends the turn with an error terminal (indicators never s
     expect(end.terminal).toMatchObject({ type: "error" });
     expect(end.busy).toBe(false);
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("collapsed-preview rows come from each theme's <role>.preview.maxRows (TUI defaults otherwise)", async () => {
   const env = await testEnv();
-  env.settings.tui = { themes: {
+  env.settings.themes = {
     tall: { "tool.preview": { maxRows: 12 }, "message.thinking.preview": { maxRows: false } },
     child: { parent: "tall", "message.system.preview": { maxRows: 3 } },
     broken: { "tool.preview": { maxRows: -1 } },
-  } };
-  const web = await serve({ port: 0, env, createSession: async () => ({ agent: scripted(env) }) });
+  };
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent: await scripted(env) }) });
   const received = [];
   try {
     const socket = await connect(web, received);
@@ -1581,14 +1835,14 @@ test("collapsed-preview rows come from each theme's <role>.preview.maxRows (TUI 
     expect(rows.child).toEqual({ system: 3, thinking: false, tool: 12 }); // parent chain
     expect(rows.broken.tool).toBe(7); // invalid values fall back
     socket.close();
-  } finally { web.stop(); }
+  } finally { await web.stop(); }
 });
 
 test("a failed response replays as an error block; retracting it resyncs the browser", async () => {
   const env = await testEnv({ retry: { attempts: 1 } });
   const failed = { type: 3, content: [], error: "socket hang up" };
   const io = scriptedIO([[{ type: "start" }, { type: "error", error: "socket hang up", kind: "network", message: failed }], [{ type: "start" }, ...TEXT(0, "answer"), { type: "done" }]]);
-  const agent = new Agent({ env, model: "p/m", context: [Context.messageUser("go")], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [Context.messageUser("go")], createIO: () => io });
   const session = new AgentSession(agent);
   const sent = [];
   session.addSink((packet) => sent.push(packet));

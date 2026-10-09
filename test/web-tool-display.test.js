@@ -13,7 +13,7 @@ test("live tool.result keeps a scalar edit diff display as Markdown source", () 
 
 test("history replay includes the edit diff on its tool answer", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env });
+  const agent = await Agent.create({ env });
   try {
     agent.context.update((messages) => { messages.push(
       { type: 3, content: [{ type: "toolCall", name: "edit", callId: "edit-1", arguments: {} }] },

@@ -608,6 +608,35 @@ describe("GTUI menu, scroll, and overlay", () => {
     await fixture.running;
   });
 
+  test("menu notes ellipsize or drop at the box edge instead of overflowing or shredding", () => {
+    const controls = createControls(() => {});
+    const node = GTUI.view.menu({ id: "menu", focus: true, filter: false, items: [
+      { kind: "action", label: "alpha-long-name", note: "current" },
+      { kind: "action", label: "b", note: "a very long note that cannot possibly fit" },
+    ] });
+    const lines = layoutView(node, { width: 40, height: 8, controls }).snapshot.lines;
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(40);
+    expect(lines.find((line) => line.includes("alpha-long-name"))).toContain("current");
+    const clipped = lines.find((line) => line.includes("b "));
+    expect(clipped).toContain("…");
+    expect(clipped).not.toContain("possibly fit");
+    // A label that fills the row leaves no room: the note drops wholesale.
+    const full = layoutView(GTUI.view.menu({ id: "menu", focus: true, filter: false, items: [
+      { kind: "action", label: "a-label-that-takes-nearly-the-whole-row", note: "dropped-note" },
+    ] }), { width: 40, height: 8, controls }).snapshot.lines.join("\n");
+    expect(full).not.toContain("dropped-note");
+  });
+
+  test("clip-end labels run to the box edge before only the tail is clipped", () => {
+    const controls = createControls(() => {});
+    const label = "endpoint/a-rather-long-model-identifier-that-overflows";
+    const scene = layoutView(GTUI.view.menu({ id: "models", focus: true, labelOverflow: "clip-end", items: [{ label, value: "selected" }] }), { width: 30, height: 8, controls });
+    const visible = scene.snapshot.lines.join("\n");
+    const row = scene.snapshot.lines.find((line) => line.includes("endpoint/"));
+    expect(row).toMatch(/endpoint\/a-rather-long-mod…\s*$/); // 26 of 30 columns before the cut
+    expect(visible).not.toContain("…that"); // no mid-label break
+  });
+
   test("filters/navigates a controlled menu and emits semantic selection", async () => {
     const items = [{ id: "head", kind: "header", label: "Main" }, { id: "a", label: "Alpha" }, { id: "b", label: "Beta" }];
     const fixture = controlled({}, () => GTUI.view.overlay({ id: "dialog" }, [GTUI.view.menu({ id: "menu", focus: true, items })]));
@@ -640,7 +669,7 @@ describe("GTUI menu, scroll, and overlay", () => {
     expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "viewer", offset: 1 });
     fixture.memory.send(GTUI.event.key({ key: "pagedown" }));
     // Five body rows retain four rows of context; a page advances one.
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "viewer", offset: 2 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "viewer", offset: 2, source: "keyboard" });
     expect(JSON.stringify(fixture.events)).not.toContain("\"x\"");
     fixture.ui.stop();
     await fixture.running;
@@ -654,10 +683,10 @@ describe("GTUI menu, scroll, and overlay", () => {
     ]));
     // Alt+Up/Down scroll the transcript one line; the input caret never moves.
     fixture.memory.send(GTUI.event.key({ key: "alt+up" }));
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1, source: "keyboard" });
     fixture.memory.send(GTUI.event.key({ key: "alt+up" }));
     fixture.memory.send(GTUI.event.key({ key: "alt+down" }));
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1, source: "keyboard" });
     // Meta+Up/Down remain the input's whole-value caret jump (an
     // intentional editing contract) — they never reach the transcript.
     fixture.memory.send(GTUI.event.key({ key: "meta+up" }));
@@ -665,9 +694,9 @@ describe("GTUI menu, scroll, and overlay", () => {
     // Alt+Meta+Up/Down remain line scrolling (Alt wins over Meta).
     fixture.memory.send(GTUI.event.key({ key: "alt+up" }));
     fixture.memory.send(GTUI.event.key({ key: "alt+meta+up" }));
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 3 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 3, source: "keyboard" });
     fixture.memory.send(GTUI.event.key({ key: "alt+meta+down" }));
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 2 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 2, source: "keyboard" });
     fixture.ui.stop();
     await fixture.running;
   });
@@ -797,7 +826,7 @@ describe("GTUI menu, scroll, and overlay", () => {
     fixture.memory.send(GTUI.event.pointer({ kind: "wheel", target: "history", direction: "up" }));
     expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 1 });
     fixture.memory.send(GTUI.event.key({ key: "pageup" }));
-    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 4 });
+    expect(fixture.events.at(-1)).toEqual({ type: "scroll.change", id: "history", offset: 4, source: "keyboard" });
     fixture.ui.stop();
     await fixture.running;
   });

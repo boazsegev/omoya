@@ -27,7 +27,8 @@ test("application selects stable named contexts for finite overlay states", () =
   const completion = appBindings(model(null, ["item"]));
   const combined = appBindings(model({ type: "viewer" }, ["item"]));
   const question = appBindings(model(null, [], {}));
-  expect(new Set([main, menu, viewer, completion, combined, question]).size).toBe(6);
+  expect(new Set([main, menu, viewer, completion, combined, question]).size).toBe(5);
+  expect(combined).toBe(viewer); // hidden composer completions cannot intercept viewer keys
   for (const context of [main, menu, viewer, completion, combined, question]) {
     expect(context.tables).toHaveLength(16);
     expect(typeof context.name).toBe("string");

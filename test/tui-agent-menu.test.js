@@ -2,16 +2,26 @@ import { describe, expect, test } from "bun:test";
 import { layoutView } from "../lib/app/gtui/layout.js";
 import { createControls } from "../lib/app/gtui/controls.js";
 import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions, modelMenuOptions } from "../lib/app/tui/menu-sources.js";
-import { buildMenuItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/app/tui/menu-data.js";
+import { buildMenuItems, buildAutocompactItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/app/tui/menu-data.js";
 import { resolveMenuAction } from "../lib/app/tui/menu-actions.js";
 import { openMenu, previewMenu } from "../lib/app/tui/overlay-controller.js";
 import { overlayView } from "../lib/app/tui/overlay-view.js";
 
 const agent = (name, parent, { busy = false, description = "" } = {}) => ({
-  name, parent, description, ioState: busy ? "working" : "idle",
+  name, parent, description, can: { write: true, delegate: undefined }, ioState: busy ? "working" : "idle",
 });
 
 describe("active-agent menu snapshots", () => {
+  test("auto-compaction exposes independent limits and a two-trigger off switch", () => {
+    const env = { settings: { context: { autocompact: 0.6, autocompactMax: 100000 } } };
+    expect(buildMenuItems({ autocompact: env.settings.context }).find((row) => row.value?.type === "autocompact-menu")?.label).toContain("on");
+    const menu = resolveMenuAction({ type: "autocompact-menu" }, env);
+    expect(menu.items.find((row) => row.label.includes("toggle"))?.value.change).toEqual({ autocompact: 0, autocompactMax: 0 });
+    expect(menu.items.find((row) => row.label.startsWith("60%"))?.label).toContain("current");
+    expect(menu.items.find((row) => row.label.startsWith("100,000 tokens"))?.label).toContain("current");
+    expect(resolveMenuAction({ type: "autocompact.set", change: { autocompactMax: 0 } })).toEqual({ kind: "autocompact", change: { autocompactMax: 0 } });
+    expect(buildAutocompactItems({ autocompact: 0, autocompactMax: 0 }).find((row) => row.label.includes("toggle"))?.value.change).toEqual({ autocompact: 0.4, autocompactMax: 200000 });
+  });
   test("reads Env once, groups children after their parent, and preserves duplicate names by identity", () => {
     const alpha = agent("alpha");
     const alphaFirst = agent("same", alpha, { busy: true, description: "First child." });
@@ -33,9 +43,18 @@ describe("active-agent menu snapshots", () => {
     ]);
   });
 
+  test("sorts active agent names again after a rename", () => {
+    const zebra = agent("Zebra");
+    const alpha = agent("alpha");
+    const env = { agents: () => [zebra, alpha] };
+    expect(activeAgentMenuOptions(env, alpha).map(({ name }) => name)).toEqual(["alpha", "Zebra"]);
+    zebra.name = "Aardvark";
+    expect(activeAgentMenuOptions(env, alpha).map(({ name }) => name)).toEqual(["Aardvark", "alpha"]);
+  });
+
   test("sorts the full theme menu alphabetically, including default", () => {
-    const env = { settings: { tui: { themes: { zebra: {}, amber: {}, blues: {} } } }, endpointNames: () => [], agents: () => [] };
-    const options = masterMenuOptions({ thinking: "default", safe: false }, env, "(none)/(none)", { catalog: { sessions: [], prompts: [] } });
+    const env = { settings: { themes: { zebra: {}, amber: {}, blues: {} } }, endpointNames: () => [], agents: () => [] };
+    const options = masterMenuOptions({ thinking: "default", can: { write: true, delegate: undefined } }, env, "(none)/(none)", { catalog: { sessions: [], prompts: [] } });
     expect(options.themes).toEqual(["amber", "blues", "default", "zebra"]);
   });
 
@@ -44,7 +63,7 @@ describe("active-agent menu snapshots", () => {
     const second = agent("second");
     let next = [first];
     const env = { agents: () => next, prompts: () => new Map(), toolNames: () => [], endpointNames: () => [] };
-    const current = { thinking: undefined, safe: false, listSessions: () => [] };
+    const current = { thinking: undefined, can: { write: true, delegate: undefined }, listSessions: () => [] };
     const options = masterMenuOptions(current, env, "(none)/(none)");
     next = [second];
     expect(buildMenuItems(options).some((item) => item.label === "first")).toBe(true);
@@ -96,11 +115,29 @@ describe("active-agent menu snapshots", () => {
   });
 
   test("opens a delegation permission submenu with all three choices", () => {
-    const item = buildMenuItems({ spawnPermission: "custom" }).find((entry) => entry.label === "Allow to Delegate | Ask");
+    const item = buildMenuItems({ can: { delegate: "custom" } }).find((entry) => entry.label === "Allow to Delegate | Ask");
     const submenu = resolveMenuAction(item.value);
     expect(submenu.kind).toBe("push");
     expect(submenu.items.map(({ label }) => label)).toEqual(["Allow to Delegate", "← back", "Allow", "Deny", "Ask (current)"]);
-    expect(submenu.items.slice(2).map(({ value }) => value.value)).toEqual([true, false, "Ask"]);
+    expect(submenu.items.slice(2).map(({ value }) => value.value)).toEqual([true, false, undefined]);
+  });
+
+  test("group request reads the live permission, offers three choices, and locks linked agents", () => {
+    const root = agent("root");
+    root.can.request = false;
+    const env = { agents: () => [root], endpointNames: () => [], settings: { themes: {} } };
+    const options = masterMenuOptions(root, env, "(none)/(none)", { catalog: { sessions: [], prompts: [] } });
+    expect(options.can.request).toBe(false);
+    const item = buildMenuItems(options).find((entry) => entry.label === "Allow group request | Deny");
+    const submenu = resolveMenuAction(item.value);
+    expect(submenu.kind).toBe("push");
+    expect(submenu.items.map(({ label }) => label)).toEqual(["Allow group request", "← back", "Allow", "Deny (current)", "Ask"]);
+    for (const [row, value] of submenu.items.slice(2).map((row) => [row, row.value.value])) {
+      expect(resolveMenuAction(row.value)).toEqual({ kind: "agent.can.request", value });
+    }
+    const child = agent("child", root);
+    expect(buildMenuItems(masterMenuOptions(child, env, "(none)/(none)", { catalog: { sessions: [], prompts: [] } })).filter((row) => row.value?.type?.startsWith("agent.can."))).toEqual([]);
+    expect(buildMenuItems({ linked: true }).find((row) => row.label === "Allow group request | Deny (linked agent)")?.kind).toBe("info");
   });
 
   test("dims the current session", () => {
@@ -128,17 +165,17 @@ describe("agents of several open Envs", () => {
     const { default: Env } = await import("../lib/env.js");
     const root = resolve(mkdtempSync("./ai-tmp/tui-projects-"));
     for (const name of ["iodine", "fio"]) mkdirSync(join(root, name));
-    const iodine = new Env({ cwd: join(root, "iodine"), settingsDir: null });
-    const fio = new Env({ cwd: join(root, "fio"), settingsDir: null });
-    const bug = fio.agentCreate({ name: "bug" });
-    const main = iodine.agentCreate({ name: "main" });
+    const iodine = await Env.open(join(root, "iodine"));
+    const fio = await Env.open(join(root, "fio"));
+    const bug = await fio.agentCreate({ name: "bug" });
+    const main = await iodine.agentCreate({ name: "main" });
     const options = activeAgentMenuOptions(iodine, main);
     expect(options.map(({ name }) => name)).toEqual(["iodine/main", "fio/bug"]);
     expect(buildMenuItems({ agents: options }).filter((item) => item.value?.type === "agent.switch").map((item) => item.label)).toEqual(["iodine/main", "fio/bug"]);
-    bug.close();
-    fio.close();
+    await bug.close();
+    await fio.close();
     expect(activeAgentMenuOptions(iodine, main).map(({ name }) => name)).toEqual(["main"]);
-    main.close();
-    iodine.close();
+    await main.close();
+    await iodine.close();
   });
 });

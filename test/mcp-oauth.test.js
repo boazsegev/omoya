@@ -47,7 +47,13 @@ async function fixture({ cimd = true, issuerInResponse = true, clientId, stepUp 
   await new Promise((resolve) => server.listen(0, "localhost", resolve));
   port = server.address().port;
   const dir = mkdtempSync("./ai-tmp/mcp-oauth-");
-  const env = new Env({ dir, settingsDir: dir, cwd: dir, settings: { mcp: { fixture: { url: `http://localhost:${port}/mcp`, oauth: { ...(clientId ? { clientId, issuer: `http://localhost:${port}` } : {}) } } } } });
+  const cwd = mkdtempSync("./ai-tmp/mcp-project-");
+  // Write through the trusted settings surface (project settings cannot own
+  // MCP servers). Constructor settings outrank live writes and mask changes.
+  const env = await Env.open(cwd, { dir, settingsDir: dir });
+  await env.ready();
+  env.settings.mcp = { fixture: { url: `http://localhost:${port}/mcp`, oauth: { ...(clientId ? { clientId, issuer: `http://localhost:${port}` } : {}) } } };
+  await env.toolCall("tool-refresh", {});
   return { env, dir, server, origin: `http://localhost:${port}`, get tokenSeen() { return tokenSeen; }, get registrations() { return registrations; }, get tokenRequests() { return tokenRequests; }, get lastTokenFields() { return lastTokenFields; } };
 }
 test("changing MCP resource URL cannot reuse another resource's bearer", async () => {
@@ -63,7 +69,7 @@ test("changing MCP resource URL cannot reuse another resource's bearer", async (
     await f.env.toolCall("tool-refresh", {});
     await expect(f.env.toolCall("mcp", { action: "resources", server: "fixture" })).rejects.toThrow(/MCP HTTP 404/);
     expect(f.tokenSeen.slice(before)).not.toContain("Bearer access");
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("near-expiry access token refreshes, rotates token and includes resource", async () => {
   const f = await fixture({ expire: true });
@@ -79,7 +85,7 @@ test("near-expiry access token refreshes, rotates token and includes resource", 
     expect(f.lastTokenFields.get("resource")).toBe(`${f.origin}/mcp`);
     const file = readdirSync(f.dir).find((name) => name.startsWith("mcp-auth-"));
     expect(JSON.parse(readFileSync(`${f.dir}/${file}`, "utf8")).refresh).toBe("rotated");
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("403 insufficient_scope requests explicit union of prior and challenged scopes", async () => {
   const f = await fixture({ stepUp: true });
@@ -99,7 +105,7 @@ test("403 insufficient_scope requests explicit union of prior and challenged sco
     expect(f.env.mcpStatus()[0].state).toBe("needs-sign-in");
     expect((await complete("upgrade")).searchParams.get("scope")).toBe("read write");
     expect(await f.env.toolCall("mcp", { action: "prompt", server: "fixture", name: "greet" })).toContain("Hello");
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("configured client ID takes precedence over CIMD", async () => {
   const f = await fixture({ clientId: "pre-registered" });
@@ -111,7 +117,7 @@ test("configured client ID takes precedence over CIMD", async () => {
     f.env.mcpPaste(`${REDIRECT}?code=ok&state=${new URL(url).searchParams.get("state")}&iss=${encodeURIComponent(f.origin)}`);
     await login;
     expect(f.registrations).toBe(0);
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("DCR fallback registers native client when CIMD is unavailable", async () => {
   const f = await fixture({ cimd: false });
@@ -123,7 +129,7 @@ test("DCR fallback registers native client when CIMD is unavailable", async () =
     f.env.mcpPaste(`${REDIRECT}?code=ok&state=${new URL(url).searchParams.get("state")}&iss=${encodeURIComponent(f.origin)}`);
     await login;
     expect(f.registrations).toBe(1);
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("advertised response issuer cannot be omitted or changed before token exchange", async () => {
   const f = await fixture();
@@ -134,7 +140,7 @@ test("advertised response issuer cannot be omitted or changed before token excha
     f.env.mcpPaste(`${REDIRECT}?code=ok&state=${new URL(url).searchParams.get("state")}`);
     await expect(login).rejects.toThrow(/issuer mismatch/);
     expect(f.tokenRequests).toBe(0);
-  } finally { f.env.close(); f.server.close(); }
+  } finally { await f.env.close(); f.server.close(); }
 });
 test("Bearer challenge parses quoted scope and resource URI", () => {
   expect(bearerChallenge('Bearer resource_metadata="http://localhost/a,b", scope="read write", error="insufficient_scope"')).toEqual({ resource_metadata: "http://localhost/a,b", scope: "read write", error: "insufficient_scope" });
@@ -165,9 +171,8 @@ test("401 requires explicit sign-in, CIMD gets resource-bound token into user au
     expect(image.content).toEqual([{ type: "text", text: "a picture" }, { type: "image", content: "AQID", mimetype: "image/png" }]);
     expect(await f.env.toolCall("mcp", { action: "prompt", server: "fixture", name: "greet" })).toContain("[assistant message]");
     expect(f.tokenSeen).toContain("Bearer access");
-    f.env.close();
-    const restarted = new Env({ dir: f.dir, cwd: f.dir, settingsDir: f.dir,
-      settings: { mcp: { fixture: { url: `${f.origin}/mcp`, oauth: {} } } } });
+    await f.env.close();
+    const restarted = await Env.open(f.dir, { dir: f.dir, settingsDir: f.dir, settings: { mcp: { fixture: { url: `${f.origin}/mcp`, oauth: {} } } } });
     try {
       expect(await restarted.toolCall("mcp", { action: "resources", server: "fixture" })).toContain("fixture://readme");
     } finally { restarted.close(); }
@@ -175,6 +180,6 @@ test("401 requires explicit sign-in, CIMD gets resource-bound token into user au
     expect(files).toHaveLength(1);
     expect(statSync(`${f.dir}/${files[0]}`).mode & 0o077).toBe(0);
     expect(readFileSync(`${f.dir}/${files[0]}`, "utf8")).toContain("refresh");
-    expect(readdirSync(f.dir).filter((entry) => entry === "settings.json")).toHaveLength(0);
-  } finally { f.env.close(); f.server.close(); }
+    expect(JSON.parse(readFileSync(`${f.dir}/settings.json`, "utf8")).mcp.fixture).not.toHaveProperty("auth"); // OAuth tokens live only in the separate auth file
+  } finally { await f.env.close(); f.server.close(); }
 });

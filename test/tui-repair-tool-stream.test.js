@@ -9,7 +9,7 @@ async function settle() { for (let i = 0; i < 8; i++) await new Promise((resolve
 
 test("tool result and display become visible before the next provider request completes", async () => {
   const env = await testEnv();
-  env.toolAdd("preview", () => ({ result: "RESULT VISIBLE", display: "DISPLAY VISIBLE" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  env.toolAdd("preview", () => ({ result: "RESULT VISIBLE", display: "DISPLAY VISIBLE" }), { description: "fixture", inputSchema: { type: "object" }, safe: true, sandbox: false });
   const secondStarted = deferred();
   const release = deferred();
   let request = 0;
@@ -20,7 +20,7 @@ test("tool result and display become visible before the next provider request co
     await release.promise;
     return emitScript([{ type: "start" }, { type: "done" }], callbacks);
   });
-  const agent = new Agent({ env, model: "p/m", context: [], tools: ["preview"], toolCall: { fork: false }, createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], tools: ["preview"], toolCall: { fork: false }, createIO: () => io });
   const host = GTUI.host.memory({ width: 80, height: 24 });
   const ui = new GTUI({ host });
   const run = ui.run(createApp(agent, { env, sources: {} }));
@@ -35,7 +35,7 @@ test("tool result and display become visible before the next provider request co
 
 test("structured display content is rendered as text rather than object coercion", async () => {
   const env = await testEnv();
-  const agent = new Agent({ env, model: "p/m", context: [{ type: 4, callId: "call", name: "preview", content: [{ type: "text", text: "ok" }], display: [{ type: "text", text: "DISPLAY CONTENT" }] }] });
+  const agent = await Agent.create({ env, model: "p/m", context: [{ type: 4, callId: "call", name: "preview", content: [{ type: "text", text: "ok" }], display: [{ type: "text", text: "DISPLAY CONTENT" }] }] });
   const host = GTUI.host.memory({ width: 80, height: 24 });
   const ui = new GTUI({ host });
   const run = ui.run(createApp(agent, { env, sources: {} }));
@@ -45,11 +45,11 @@ test("structured display content is rendered as text rather than object coercion
 
 test("tool result callback observes the appended result and display in Agent context", async () => {
   const env = await testEnv();
-  env.toolAdd("preview", () => ({ result: "done", display: "shown" }), { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  env.toolAdd("preview", () => ({ result: "done", display: "shown" }), { description: "fixture", inputSchema: { type: "object" }, safe: true, sandbox: false });
   let round = 0;
   const io = fakeIO(async (_, callbacks) => emitScript(round++ === 0 ? [{ type: "start" }, ...TOOLCALL(0, "call", "preview", {}), { type: "done" }] : [{ type: "done" }], callbacks));
   let appendedAtNotification = false;
-  const agent = new Agent({ env, model: "p/m", context: [], toolCall: { fork: false }, createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], toolCall: { fork: false }, createIO: () => io });
   agent.onEvent(Agent.EVENT.TOOL_RESULT, ({ result }) => { appendedAtNotification = agent.context.messages().includes(result); });
   await agent.run();
   expect(appendedAtNotification).toBe(true);
@@ -64,12 +64,12 @@ test("bash-style live output renders in the transcript with tool-result styling"
     streamed.resolve();
     await release.promise;
     return "final output";
-  }, { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  }, { description: "fixture", inputSchema: { type: "object" }, safe: true, sandbox: false });
   let round = 0;
   const io = fakeIO(async (_, callbacks) => emitScript(round++ === 0
     ? [{ type: "start" }, ...TOOLCALL(0, "call", "streamer", {}), { type: "done" }]
     : [{ type: "done" }], callbacks));
-  const agent = new Agent({ env, model: "p/m", context: [], tools: ["streamer"], toolCall: { fork: false }, createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], tools: ["streamer"], toolCall: { fork: false }, createIO: () => io });
   const host = GTUI.host.memory({ width: 80, height: 24 });
   const ui = new GTUI({ host });
   const run = ui.run(createApp(agent, { env, sources: {} }));
@@ -89,12 +89,12 @@ test("final tool output immediately replaces its live stream without duplication
   const release = deferred();
   env.toolAdd("streamer", async (_args, context) => {
     context.onData("SAME OUTPUT"); streamed.resolve(); await release.promise; return "SAME OUTPUT";
-  }, { description: "fixture", inputSchema: { type: "object" }, sandbox: false });
+  }, { description: "fixture", inputSchema: { type: "object" }, safe: true, sandbox: false });
   let round = 0;
   const io = fakeIO(async (_, callbacks) => emitScript(round++ === 0
     ? [{ type: "start" }, ...TOOLCALL(0, "call", "streamer", {}), { type: "done" }]
     : [{ type: "done" }], callbacks));
-  const agent = new Agent({ env, model: "p/m", context: [], tools: ["streamer"], toolCall: { fork: false }, createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], tools: ["streamer"], toolCall: { fork: false }, createIO: () => io });
   const host = GTUI.host.memory({ width: 80, height: 24 });
   const ui = new GTUI({ host });
   const run = ui.run(createApp(agent, { env, sources: {} }));
@@ -116,7 +116,7 @@ test("tool-call argument deltas render before their end event", async () => {
     await release.promise;
     return { type: "done" };
   });
-  const agent = new Agent({ env, model: "p/m", context: [], createIO: () => io });
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
   const host = GTUI.host.memory({ width: 80, height: 24 });
   const ui = new GTUI({ host });
   const run = ui.run(createApp(agent, { env, sources: {} }));

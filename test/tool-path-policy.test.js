@@ -6,7 +6,7 @@ import Agent from "../lib/agent.js";
 import { resolveAgentPath } from "../lib/agent/path-info.js";
 import { findWriteTraversal } from "../tools/guard/paths.js";
 import { write } from "../tools/write.js";
-import { edit } from "../tools/edit.js";
+import { edit, editUndo } from "../tools/edit.js";
 import { read } from "../tools/read/read.js";
 import { bash } from "../tools/bash.js";
 import { scriptedIO, TOOLCALL, TEXT } from "./fakes.js";
@@ -20,7 +20,7 @@ function setup() {
   mkdirSync(folder, { recursive: true });
   const file = resolve(project, "file with spaces.txt");
   writeFileSync(file, "old\n");
-  return { project, folder, file, context: { env: { cwd: project }, agent: { folder } } };
+  return { project, folder, file, context: { env: { folder: project }, agent: { folder } } };
 }
 
 function contentText(result) {
@@ -46,10 +46,10 @@ describe("material path policy and tool-owned labels", () => {
     const edited = await edit({ path: target, edits: [{ oldText: "old", newText: "new" }] }, { ...context, call: { callId: "path-edit" } });
     expect(edited.result).toContain("new.txt");
     expect(edited.display).not.toContain(project);
-    await edit({ path: "new.txt", rollback: "path-edit" }, context);
+    await editUndo({ path: "new.txt", editId: "path-edit" }, context);
     expect(readFileSync(target, "utf8")).toBe("old\n");
     await edit({ path: "./new.txt", edits: [{ oldText: "old", newText: "new" }] }, { ...context, call: { callId: "relative-edit" } });
-    await edit({ path: target, rollback: "relative-edit" }, context);
+    await editUndo({ path: target, editId: "relative-edit" }, context);
     expect(readFileSync(target, "utf8")).toBe("old\n");
     const listing = contentText(await read({ path: project }, context));
     expect(listing).toContain("ls ..");
@@ -83,15 +83,15 @@ describe("material path policy and tool-owned labels", () => {
 
   test("Agent preserves tool-owned arguments, including refused originals", async () => {
     const { project, file } = setup();
-    const env = await Env.create({ cwd: project, dir: project, settingsDir: project, settings: {
+    const env = await Env.open(project, { dir: project, settingsDir: project, settings: {
       providers: { fixture: { provider: "test", url: "test://script" } },
-    } }, { providers: false, models: false });
+    }, init: { providers: false, models: false } });
     const calls = [file, resolve(ROOT, "outside.txt")];
     const io = scriptedIO([
       [...calls.flatMap((path, index) => TOOLCALL(index, `path-${index}`, "read", { path, annotate: false })), { type: "done" }],
       [...TEXT(0, "done"), { type: "done" }],
     ]);
-    const agent = new Agent({ env, model: "fixture/m", contextId: "path-policy", createIO: () => io });
+    const agent = await Agent.create({ env, model: "fixture/m", contextId: "path-policy", createIO: () => io });
     const callPaths = (messages) => messages.flatMap((message) => message.content ?? []).filter((block) => block.type === "toolCall").map((block) => block.arguments.path);
     try {
       await agent.run();

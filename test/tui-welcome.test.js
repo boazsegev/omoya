@@ -52,7 +52,7 @@ describe("TUI opening", () => {
 
   test("sits after leading system messages and keeps input at bottom in both hosts", async () => {
     const env = await testEnv();
-    const agent = new Agent({ env, model: "p/m", context: [] });
+    const agent = await Agent.create({ env, model: "p/m", context: [] });
     const model = createApp(agent, { env }).init().model;
     for (const [width, height] of [[100, 32], [40, 12]]) {
       const app = createApp(agent, { env, columns: width, rows: height, sources: { catalog: () => ({ prompts: ["task"] }) } });

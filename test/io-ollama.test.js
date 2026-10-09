@@ -2,6 +2,7 @@
 // metadata surface, models()/login(), and error/timeout surfacing in the
 // consistent auth/network/provider/malformed shape.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { Context } from "../lib/context.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Env } from "../lib/env.js";
@@ -22,9 +23,9 @@ const ollama = {
 };
 
 let dir, env;
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync((mkdirSync("./ai-tmp", { recursive: true }), join("./ai-tmp/", "io-oll-")));
-  env = new Env({ dir, cwd: dir });
+  env = await Env.open(dir, { dir, init: { providers: false, tools: false, detect: false, models: false } });
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -48,7 +49,7 @@ function ndjson(frames) {
 describe("Ollama thinking control", () => {
   test("native modes: none disables, a level passes through, undefined omits", () => {
     const think = (value) => ollama.context2msg([{ type: 2, content: [{ type: "text", text: "q" }] }],
-      { settings: { think: value }, modelCurrent: "test/gpt-oss:20b" })[1].think;
+      { settings: { think: value }, model: "test/gpt-oss:20b" })[1].think;
     expect(think(undefined)).toBeUndefined();
     expect(think("none")).toBe(false);
     expect(think("low")).toBe("low");
@@ -122,7 +123,7 @@ describe("Ollama metadata surface", () => {
 
 describe("Ollama context2msg (outgoing shape)", () => {
   const aiio = {
-    modelCurrent: "test/qwen3:8b",
+    model: "test/qwen3:8b",
     settings: {},
     tools: () => [],
   };
@@ -213,7 +214,7 @@ describe("Ollama msg2events (incoming shape)", () => {
     expect(e2).toEqual([{ type: "text_delta", contentIndex: 0, text: "world" }]);
     expect(e3[0]).toEqual({ type: "text_end", contentIndex: 0 });
     expect(e3[1].type).toBe("done");
-    expect(e3[1].usage).toEqual({ inputTokens: 12, outputTokens: 7 });
+    expect(e3[1].usage).toEqual({ inputTokens: 12, outputTokens: 7, totalTokens: 19 });
   });
 
   test("done without counts leaves usage undefined (estimate fallback)", () => {
@@ -234,9 +235,10 @@ describe("Ollama error/timeout surfacing (consistent classes)", () => {
   async function runWith(handler) {
     mock.handler = handler;
     providerAdd(env, "ollama", OllamaPlugin);
-    env._endpoints.ollama = { provider: "ollama", url: "http://localhost:11434" };
-    const aiio = new IO({ env, model: "ollama/m", timeout: 50 });
-    return aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    env.settings.providers.ollama = { provider: "ollama", url: "http://localhost:11434" };
+    env.settings.providers.ollama.timeout = 50;
+    const aiio = new IO({ env, model: "ollama/m" });
+    return aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
   }
 
   test("network failure class", async () => {

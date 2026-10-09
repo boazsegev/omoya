@@ -1,8 +1,8 @@
-// test/cli-tool-run.test.js — proof for lib/cli/tool-run.js: the
+// test/cli-tool-run.test.js — proof for lib/app/shared/tool-run.js: the
 // shared "manual door" arg-resolution and result-unwrapping used by
 // bin/ai-tool and the TUI's /<tool> command.
 import { describe, expect, test } from "bun:test";
-import { resolveToolArgs, unwrapToolResult, formatToolResult } from "../lib/cli.js";
+import { resolveToolArgs, unwrapToolResult, formatToolResult } from "../lib/app/shared/tool-run.js";
 
 describe("resolveToolArgs", () => {
   const entry = { name: "skill", schema: { inputSchema: { properties: { names: {}, args: {} } } } };

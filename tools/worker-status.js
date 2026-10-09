@@ -28,11 +28,11 @@ export function worker_status(args = {}, context = {}) {
 export function toolDescription() {
   return { "worker-status": {
     fn: worker_status, trusted: true, safe: true,
-    description: "Shows workers grouped by busy/idle, available models, and the commands a worker accepts at the start of a message (/compact, /<prompt>). Omit flags for all; request sections with workers, models, or commands.",
+    description: "Show workers (busy/idle), models with free capacity, and the commands a message may start with (/compact, /<prompt>). Omit flags for all sections. Not for worker polling / busy waiting (just finish your turn and they will update you when they're done).",
     inputSchema: { type: "object", additionalProperties: false, properties: {
-      workers: { type: "boolean", description: "Includes workers and their models, grouped by busy/idle." },
-      models: { type: "boolean", description: "Includes models and available capacity for new work." },
-      commands: { type: "boolean", description: "Includes /compact and the prompt commands workers expand." },
+      workers: { type: "boolean", description: "Include workers and their models." },
+      models: { type: "boolean", description: "Include models and their free capacity." },
+      commands: { type: "boolean", description: "Include message commands." },
     } },
   } };
 }

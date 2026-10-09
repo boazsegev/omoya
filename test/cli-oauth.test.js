@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   generatePKCE, authorizeUrl, parseAuthorizationInput, tokensToAuth,
   runOAuthFlow, completeOAuthPaste, oauthPasteOnly, refreshOAuthTokens,
-} from "../lib/cli/oauth.js";
+} from "../lib/app/host/oauth.js";
 
 const DESCRIPTOR = {
   label: "Test OAuth",
@@ -65,6 +65,20 @@ describe("tokensToAuth", () => {
 });
 
 describe("OAuth token refresh", () => {
+  test("Google Desktop-client refresh includes the user's own client secret", async () => {
+    const server = Bun.serve({ port: 0, fetch: async (request) => {
+      const form = new URLSearchParams(await request.text());
+      expect(form.get("client_id")).toBe("own-client");
+      expect(form.get("client_secret")).toBe("own-secret");
+      return Response.json({ access_token: "renewed", expires_in: 60 });
+    } });
+    try {
+      const descriptor = { tokenUrl: server.url.toString(), clientId: "own-client", clientSecret: "own-secret" };
+      expect((await refreshOAuthTokens(descriptor, "old")).access_token).toBe("renewed");
+      const { refreshOAuth } = await import("../lib/io/oauth.js");
+      expect((await refreshOAuth(descriptor, "old")).token).toBe("renewed");
+    } finally { server.stop(true); }
+  });
   test("exchanges a refresh token and retains it when the server omits a replacement", async () => {
     const server = Bun.serve({ port: 0, fetch: async (request) => {
       const body = await request.text();
@@ -113,6 +127,26 @@ describe("runOAuthFlow", () => {
     expect(form.get("code_verifier")).toBeTruthy();
   });
 
+  test("Google-style Desktop client exchange includes its secret and offline consent", async () => {
+    let form;
+    const stub = tokenServer(async (request) => {
+      form = new URLSearchParams(await request.text());
+      return Response.json({ access_token: "access", refresh_token: "refresh" });
+    });
+    const descriptor = { ...DESCRIPTOR, clientSecret: "own-secret", tokenUrl: `${stub.url}/token`,
+      extraAuthorizeParams: { access_type: "offline", prompt: "consent" } };
+    let authUrl;
+    const flow = runOAuthFlow(descriptor, { open: (url) => { authUrl = url; return true; }, onLog: () => {} });
+    await Bun.sleep(60);
+    const authorization = new URL(authUrl);
+    expect(authorization.searchParams.get("access_type")).toBe("offline");
+    expect(authorization.searchParams.get("prompt")).toBe("consent");
+    await fetch(`http://127.0.0.1:18993/auth/callback?code=owned&state=${authorization.searchParams.get("state")}`);
+    try { expect((await flow).access_token).toBe("access");
+      expect(form.get("client_secret")).toBe("own-secret");
+      expect(form.get("code_verifier")).toBeTruthy();
+    } finally { stub.stop(); }
+  });
   test("paste fallback: completeOAuthPaste feeds the redirect (headless)", async () => {
     const stub = tokenServer(() => Response.json({ access_token: "a-paste" }));
     let authUrl = null;

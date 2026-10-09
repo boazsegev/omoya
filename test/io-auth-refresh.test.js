@@ -5,10 +5,10 @@
 // token) and re-send ONCE with the updated credentials; an unchanged
 // token, a prior data event, or a kill makes the request final.
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { Context } from "../lib/context.js";
+import { mkdtempSync, rmSync, renameSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Env } from "../lib/env.js";
-import { writeJsonAtomic as jsonWriteAtomic } from "../lib/env/persist.js";
 import { ProviderError } from "../lib/io.js";
 import { IO } from "../lib/io.js";
 import TestPlugin from "../providers/test.js";
@@ -18,22 +18,27 @@ let dir;
 beforeEach(() => {
   dir = mkdtempSync("./ai-tmp/auth-refresh-");
 });
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(Object.values(Env.envs).filter((env) => env.folder === resolve(dir)).map((env) => env.close()));
   rmSync(dir, { recursive: true, force: true });
 });
 
 /** An Env holding the "stale" in-memory token, persisted to its own folder. */
-function staleEnv() {
-  const value = new Env({ dir, cwd: dir, settingsDir: dir });
+async function staleEnv() {
+  const value = await Env.open(dir, { dir, settingsDir: dir, init: { providers: false, tools: false, detect: false, models: false } });
   providerAdd(value, "test", TestPlugin);
   value.settings.providers.test = { provider: "test", url: "test://script", secret: true };
   authSetOf(value, "test", { auth: { type: "token", token: "stale-token" } });
+  await value.settingsFlush();
   return value;
 }
 
 /** The OTHER process: overwrite the endpoint's on-disk auth record directly. */
 function rotateOnDisk(endpoint, section) {
-  jsonWriteAtomic(join(dir, `auth-${endpoint}.json`), { [endpoint]: section });
+  const file = join(dir, `auth-${endpoint}.json`);
+  const temporary = `${file}.rotation`;
+  writeFileSync(temporary, JSON.stringify({ [endpoint]: section }));
+  renameSync(temporary, file);
 }
 
 /**
@@ -69,26 +74,26 @@ function tokenGate({ log, onSend }) {
 }
 
 /** A gate-registered Env holding the stale in-memory token. */
-function gateEnv(options) {
-  const env = staleEnv();
+async function gateEnv(options) {
+  const env = await staleEnv();
   providerAdd(env, "gate", tokenGate(options));
   env.settings.providers.gate = { provider: "gate", url: "test://gate" };
   authSetOf(env, "gate", { auth: { type: "token", token: "stale-token" } });
+  await env.settingsFlush();
   return env;
 }
 
 describe("IO auth refresh: multi-process token rotation", () => {
   test("an auth failure re-reads the auth file and retries once with the fresh token", async () => {
     const log = [];
-    const env = gateEnv({
+    const env = await gateEnv({
       log,
       // the other process rotates the credential while the first attempt is in flight
       onSend: () => rotateOnDisk("gate", { auth: { type: "token", token: "fresh-token" } }),
     });
     const aiio = new IO({ env, model: "gate/test-model" });
     const events = [];
-    const terminal = await aiio.write(
-      [{ type: 2, content: [{ type: "text", text: "hi" }] }],
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }),
       new Proxy({}, { get: () => (e) => events.push(e) }),
     );
     expect(terminal.type).toBe("done");
@@ -100,9 +105,9 @@ describe("IO auth refresh: multi-process token rotation", () => {
 
   test("an unchanged token surfaces the auth error (no retry)", async () => {
     const log = [];
-    const env = gateEnv({ log });
+    const env = await gateEnv({ log });
     const aiio = new IO({ env, model: "gate/test-model" });
-    const terminal = await aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
     expect(terminal.type).toBe("error");
     expect(terminal.kind).toBe("auth");
     expect(terminal.error).toContain("401");
@@ -110,39 +115,37 @@ describe("IO auth refresh: multi-process token rotation", () => {
   });
 
   test("an auth error AFTER response data stays final (no replay over streamed output)", async () => {
-    const env = staleEnv();
-    const aiio = new IO({ env, model: "test/m", settings: {
-      script: [[{ text: "partial" }, { error: "401 Unauthorized" }]],
-    } });
+    const env = await staleEnv();
+    env.settings.providers.test.script = [[{ text: "partial" }, { error: "401 Unauthorized" }]];
+    const aiio = new IO({ env, model: "test/m" });
     const events = [];
-    const terminal = await aiio.write(
-      [{ type: 2, content: [{ type: "text", text: "hi" }] }],
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }),
       new Proxy({}, { get: () => (e) => events.push(e) }),
     );
     expect(terminal.type).toBe("error");
     expect(events.filter((e) => e.type === "start").length).toBe(1); // never retried
   });
 
-  test("an explicit auth override still follows the rotated file", async () => {
+  test("Env credentials still follow the rotated file", async () => {
     const log = [];
-    const env = gateEnv({
+    const env = await gateEnv({
       log,
       onSend: () => rotateOnDisk("gate", { auth: { type: "token", token: "fresh-token" } }),
     });
-    const aiio = new IO({ env, model: "gate/test-model", settings: { auth: { type: "token", token: "stale-token" } } });
-    const terminal = await aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    const aiio = new IO({ env, model: "gate/test-model" });
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
     expect(terminal.type).toBe("done");
     expect(log).toEqual(["stale-token", "fresh-token"]);
   });
 
   test("a kill during the failing attempt cancels — the refresh never re-sends", async () => {
     const log = [];
-    const env = gateEnv({
+    const env = await gateEnv({
       log,
       onSend: () => rotateOnDisk("gate", { auth: { type: "token", token: "fresh-token" } }),
     });
     const aiio = new IO({ env, model: "gate/test-model" });
-    const write = aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    const write = aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
     await aiio.close();
     const terminal = await write;
     expect(terminal.type).toBe("error");
@@ -163,23 +166,25 @@ describe("IO auth refresh: multi-process token rotation", () => {
         urls.push(url);
       }
     }
-    const env = staleEnv();
+    const env = await staleEnv();
     providerAdd(env, "gate", UrlGatePlugin);
     env.settings.providers.gate = { provider: "gate", url: "test://old" };
     authSetOf(env, "gate", { auth: { type: "token", token: "stale-token" } });
+    await env.settingsFlush();
     const aiio = new IO({ env, model: "gate/test-model" });
-    const terminal = await aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
     expect(terminal.type).toBe("done");
     expect(urls).toEqual(["test://old", "test://new"]);
   });
 
   test("a non-auth failure never touches the settings files", async () => {
-    const env = staleEnv();
+    const env = await staleEnv();
     let refreshed = 0;
-    const aiio = new IO({ env, model: "test/m", settings: { script: [[{ error: "boom" }]] } });
+    env.settings.providers.test.script = [[{ error: "boom" }]];
+    const aiio = new IO({ env, model: "test/m" });
     const original = aiio._refreshEndpointAuth.bind(aiio);
     aiio._refreshEndpointAuth = () => { refreshed++; return original(); };
-    const terminal = await aiio.write([{ type: 2, content: [{ type: "text", text: "hi" }] }]);
+    const terminal = await aiio.write(new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] }));
     expect(terminal.type).toBe("error");
     expect(terminal.error).toBe("boom");
     expect(refreshed).toBe(0);

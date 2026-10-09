@@ -26,7 +26,7 @@ import { scriptedIO } from "./fakes.js";
 async function captureOptions(tuiSettings) {
   const { mkdtempSync } = await import("node:fs");
   const dir = mkdtempSync("./ai-tmp/env-");
-  const env = new Env({ dir, cwd: dir, settings: { providers: { p: { provider: "test", url: "test://script" } }, ...(tuiSettings === undefined ? {} : { tui: tuiSettings }) }, settingsDir: dir });
+  const env = await Env.open(dir, { dir, settings: { providers: { p: { provider: "test", url: "test://script" } }, ...(tuiSettings === undefined ? {} : { tui: tuiSettings }) }, settingsDir: dir, init: { providers: false, tools: false, detect: false, models: false } });
   const realHost = GTUI.host;
   let captured;
   GTUI.host = {
@@ -37,7 +37,7 @@ async function captureOptions(tuiSettings) {
     },
   };
   try {
-    const agent = new Agent({
+    const agent = await Agent.create({
       env, model: "p/m", context: [],
       createIO: () => scriptedIO([[{ type: "done" }]]),
     });
