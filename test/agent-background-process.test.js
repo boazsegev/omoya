@@ -5,7 +5,7 @@ import Env from "../lib/env.js";
 import Agent from "../lib/agent.js";
 import Sandbox from "../lib/sandbox.js";
 import { processJoin, processList, processOutput, processStop, toolDescription as processDescription } from "../tools/process.js";
-import { scriptedIO } from "./fakes.js";
+import { scriptedIO, TEXT, TOOLCALL } from "./fakes.js";
 
 const ROOT = `./ai-tmp/procs/${process.pid}`;
 const instances = [];
@@ -14,11 +14,11 @@ afterEach(async () => {
   rmSync(ROOT, { recursive: true, force: true });
 });
 
-async function setup(name) {
+async function setup(name, io = scriptedIO([])) {
   mkdirSync(`${ROOT}/${name}`, { recursive: true });
   const cwd = resolve(`${ROOT}/${name}`);
   const env = await Env.open(cwd, { dir: cwd, settingsDir: cwd, settings: { providers: { fixture: { provider: "test", url: "test://script" } } }, init: { providers: false, models: false } });
-  const agent = await Agent.create({ env, model: "fixture/m", createIO: () => scriptedIO([]) });
+  const agent = await Agent.create({ env, model: "fixture/m", createIO: () => io });
   instances.push([agent, env]);
   return { agent, env };
 }
@@ -39,13 +39,56 @@ async function started(agent, command) {
 }
 
 describe("Agent-owned background bash", () => {
+  test("process-list formats every field as readable text and describes an empty list", async () => {
+    expect(await processList({}, { background: { list: () => [] } })).toBe("No background processes.");
+    const processes = [
+      { id: "1", command: "bun server.js", state: "running", uptime: 12000, bytes: 245 },
+      { id: "2", command: "printf 'first\nsecond'", state: "exited(0)", uptime: 3000, bytes: 5 },
+      { id: "3", command: "sleep 30", state: "exited(SIGTERM)", uptime: 13522, bytes: 0 },
+    ];
+    expect(await processList({}, { background: { list: () => processes } })).toBe([
+      "id | state | uptime | bytes | command",
+      `1 | running | 12000ms | 245B | ${JSON.stringify(processes[0].command)}`,
+      `2 | exited(0) | 3000ms | 5B | ${JSON.stringify(processes[1].command)}`,
+      `3 | exited(SIGTERM) | 13522ms | 0B | ${JSON.stringify(processes[2].command)}`,
+    ].join("\n"));
+  });
+
+  test("an empty process-list remains a successful result through the Agent loop", async () => {
+    const io = scriptedIO([
+      [...TOOLCALL(0, "empty-list", "process-list", {}), { type: "done" }],
+      [...TEXT(0, "finished"), { type: "done" }],
+    ]);
+    const { agent } = await setup("empty-list", io);
+    const warnings = [];
+    const emitWarning = process.emitWarning;
+    process.emitWarning = (warning, options) => warnings.push({ warning, ...options });
+    try {
+      expect((await agent.run()).type).toBe("done");
+    } finally {
+      process.emitWarning = emitWarning;
+    }
+    const expected = {
+      type: 4,
+      callId: "empty-list",
+      name: "process-list",
+      content: [{ type: "text", text: "No background processes." }],
+    };
+    expect(agent.context.messages().find((message) => message.type === 4 && message.callId === "empty-list")).toEqual(expected);
+    expect(io.writes[1].context.find((message) => message.type === 4 && message.callId === "empty-list")).toEqual(expected);
+    expect(warnings.filter((warning) => warning.code === "OMOYA_EMPTY_MESSAGE")).toEqual([]);
+  });
+
   test("starts, reports first output and reads incremental byte offsets and exit code", async () => {
     const { agent } = await setup("read");
-    const first = await started(agent, "printf 'begin\\n'; sleep 2; printf 'end\\n'; exit 3");
+    const command = "printf 'begin\\n'; sleep 2; printf 'end\\n'; exit 3";
+    const first = await started(agent, command);
     expect(first.id).toBe("1");
     expect(first.output).toContain("begin");
-    expect((await processList({}, { agent, background: backgroundFor(agent) }))[0].state).toBe("running");
-    expect((await invoke(agent, "process-list", {}))[0].id).toBe(first.id);
+    const listed = await processList({}, { agent, background: backgroundFor(agent) });
+    expect(listed).toStartWith("id | state | uptime | bytes | command\n1 | running | ");
+    expect(listed.endsWith(JSON.stringify(command))).toBe(true);
+    expect(await invoke(agent, "process-list", {})).toContain("1 | running | ");
     expect((await invoke(agent, "process-output", { id: first.id, from: first.next })).output).toBe("");
     const output = Sandbox.backgroundOutput(agent, first.id, first.next);
     expect(output.output).toBe("");
@@ -169,7 +212,7 @@ describe("Agent-owned background bash", () => {
     const { agent, env } = await setup("safe");
     const startedProcess = await started(agent, "sleep 30");
     await expect(processStop({ id: startedProcess.id }, { agent, background: backgroundFor(agent), safe: true })).rejects.toThrow(/safe mode/);
-    expect((await processList({}, { agent, background: backgroundFor(agent), safe: true })).length).toBe(1);
+    expect(await processList({}, { agent, background: backgroundFor(agent), safe: true })).toContain("1 | running | ");
     expect((await processOutput({ id: startedProcess.id }, { agent, background: backgroundFor(agent), safe: true })).next).toBe(0);
     const previous = agent.can.write;
     agent.can.write = false;

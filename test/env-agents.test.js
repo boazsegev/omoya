@@ -22,7 +22,7 @@ describe("Env active-Agent capacity inspection", () => {
     await agent(env, "ep", "m");
 
     expect(pair(env, "ep/m")).toMatchObject({ maxActive: 2, active: 0, available: 2 });
-    expect(pair(env, "ep/other")).toMatchObject({ maxActive: 4, available: 4 }); // the endpoint cap
+    expect(pair(env, "ep/other")).toMatchObject({ maxActive: 4, available: 4 }); // the endpoint default
     expect(pair(env, "ep/m").available).toBe(2); // reading never reserves
   });
 
@@ -30,14 +30,16 @@ describe("Env active-Agent capacity inspection", () => {
     const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settings: { maxActive: 8 } });
     env.settings.providers.ep = { provider: "test", maxActive: 0, models: { m: { maxActive: 3 }, inherited: {} } };
     env.settings.providers.wide = { provider: "test", maxActive: 16, models: { m: {} } };
-    env.settings.providers.default = { provider: "test", models: { m: {} } };
+    env.settings.providers.default = { provider: "test", models: { m: {}, other: {} } };
 
     expect(pair(env, "ep/m")).toMatchObject({ maxActive: 3, available: 3 });
     expect(pair(env, "ep/inherited")).toMatchObject({ maxActive: 0, available: 0 });
     expect(pair(env, "wide/m")).toMatchObject({ maxActive: 16, available: 16 });
     expect(pair(env, "default/m")).toMatchObject({ maxActive: 8, available: 8 });
+    expect(pair(env, "default/other")).toMatchObject({ maxActive: 8, available: 8 });
 
     for (let index = 0; index < 9; index++) env._agentAdd({ model: "default/m", busy: true });
+    expect(pair(env, "default/other")).toMatchObject({ active: 0, available: 8 }); // the global default is per model
     expect(pair(env, "ep/m")).toMatchObject({ maxActive: 3, available: 3 });
     expect(pair(env, "wide/m")).toMatchObject({ maxActive: 16, available: 16 });
     env._agentAdd({ model: "ep/inherited", busy: true });
@@ -46,14 +48,26 @@ describe("Env active-Agent capacity inspection", () => {
     expect(pair(env, "ep/m")).toMatchObject({ maxActive: 3, active: 1, available: 2 });
   });
 
-  test("subtracts only busy agents from global, endpoint, and model capacity", async () => {
+  test("subtracts only busy agents on each exact model pair", async () => {
     const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settings: { maxActive: 4 } });
     env.settings.providers.ep = { provider: "test", maxActive: 3, models: { m: { maxActive: 2 }, other: {} } };
     await agent(env, "ep", "m");
     env._agentAdd({ model: "ep/m", busy: true });
 
     expect(pair(env, "ep/m")).toMatchObject({ active: 1, available: 1 });
-    expect(pair(env, "ep/other")).toMatchObject({ active: 0, available: 2 }); // the endpoint's busy agent counts
+    expect(pair(env, "ep/other")).toMatchObject({ active: 0, available: 3 }); // endpoint defaults do not aggregate models
+  });
+
+  test("active counts the exact endpoint/model and inherited limits stay per model", async () => {
+    const env = await Env.open(mkdtempSync("./ai-tmp/env-case-"), { settings: { maxActive: 1 } });
+    env.settings.providers.foo = { provider: "test", maxActive: 1, models: { bar: { maxActive: 1 }, baz: { maxActive: 1 }, shared: {} } };
+    env.settings.providers.other = { provider: "test", models: { bar: { maxActive: 1 } } };
+    env._agentAdd({ model: "foo/bar", busy: true });
+
+    expect(pair(env, "foo/bar")).toMatchObject({ active: 1, available: 0 });
+    expect(pair(env, "foo/baz")).toMatchObject({ active: 0, available: 1 }); // model caps isolate siblings
+    expect(pair(env, "other/bar")).toMatchObject({ active: 0, available: 1 }); // model names do not cross endpoints
+    expect(pair(env, "foo/shared")).toMatchObject({ active: 0, available: 1 }); // an endpoint default is per model
   });
 
   test("does not consume capacity for registered idle agents", async () => {

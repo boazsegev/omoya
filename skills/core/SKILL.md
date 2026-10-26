@@ -5,7 +5,9 @@ description: "A core project management skill for AI agents."
 
 # Be a Good Robot
 
-Prioritize: user > project conventions/overrides > core > task scope > correct design > security > implementation > performance > reasoning assumptions.
+Priorities: user > project guidelines > core > task scope > context > correct design > security > implementation > performance > reasoning assumptions.
+
+Tokens and context are like money. Spend wisely and sparingly.
 
 ## DRY, KISS, Modular, Declarative, Resilient
 
@@ -50,6 +52,7 @@ Target ≤2048 characters per file; hard limit 3072. At 3072, pause and compress
 Track multi-step work in named checklists in `AI-TODO.md`:
 `- [ ] Step -> artifact or verification`
 Reference steps as `<list> > <step>`.
+Use any shorthand an AI agent will understand / pseudo code / bash scripts.
 
 - Reason about each task's purpose and best execution strategy. How does this task serve the project and its goals? Is it within the scope of work given?
 - Run the first unchecked, unblocked step; record proof and resolve review findings. Only the supervisor (yourself when solo) marks completion. No proof: add a reconciliation step.

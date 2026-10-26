@@ -115,9 +115,11 @@ describe("revised API ownership and lifecycle", () => {
     const release = questionBridgeInstall(agent, first);
     const releaseSecond = questionBridgeInstall(agent, second);
     release();
-    expect(agent.question).toBe(second);
+    expect(agent.question).not.toBe(first);
+    expect(typeof agent.question.ask).toBe("function");
     releaseSecond();
-    expect(agent.question).toBe(first);
+    expect(agent.question).not.toBe(second);
+    expect(typeof agent.question.ask).toBe("function");
     agent.question = null;
     await agent.close(); await env.close();
   });

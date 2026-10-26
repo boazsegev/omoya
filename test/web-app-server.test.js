@@ -600,6 +600,31 @@ test("the context inspector previews file blocks and display images without thei
   } finally { await web.stop(); }
 });
 
+test("tool messages reach the viewed agent on hello and after tool results", async () => {
+  const env = await testEnv();
+  env.toolAdd("memo", async (_args, { messageSet }) => { messageSet("**Plan** — ship notes"); return "saved"; }, {
+    description: "Publishes sticky data.", inputSchema: { type: "object", properties: {} }, safe: true,
+  });
+  const io = scriptedIO([
+    [{ type: "start" }, ...TOOLCALL(0, "c1", "memo", {}), { type: "done" }],
+    [{ type: "start" }, ...TEXT(0, "done"), { type: "done" }],
+  ]);
+  const agent = await Agent.create({ env, model: "p/m", context: [], createIO: () => io });
+  const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
+  const received = [], resumed = [];
+  try {
+    const socket = await connect(web, received);
+    expect(received.find((m) => m.type === "hello")?.agent.toolMessages).toEqual([]);
+    socket.send(JSON.stringify({ type: "chat.submit", text: "save" }));
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline && !received.some((m) => m.type === "tool.messages" && m.messages.length)) await tick();
+    expect(received.find((m) => m.type === "tool.messages" && m.messages.length)?.messages).toEqual([{ name: "memo", text: "**Plan** — ship notes" }]);
+    const second = await connect(web, resumed);
+    expect(resumed.find((m) => m.type === "hello")?.agent.toolMessages).toEqual([{ name: "memo", text: "**Plan** — ship notes" }]);
+    second.close(); socket.close();
+  } finally { await web.stop(); }
+});
+
 test("live tool results send image URLs instead of image bytes", async () => {
   const env = await testEnv();
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7, 6]).toString("base64");
@@ -1573,9 +1598,13 @@ test("a timed-out bridge question closes over the wire and rejects a late answer
     let opened;
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && !(opened = received.find((m) => m.type === "question.open"))) await tick();
+    while (Date.now() < deadline && !received.some((m) => m.type === "sessions" && m.agents.some((a) => a.waitingForUser))) await tick();
+    expect(received.some((m) => m.type === "sessions" && m.agents.some((a) => a.waitingForUser))).toBe(true);
     agent._question.timeout(); // mirrors Agent's timeout boundary
     while (Date.now() < deadline && !received.some((m) => m.type === "question.close")) await tick();
     await expect(question).resolves.toBeNull();
+    while (Date.now() < deadline && !received.some((m) => m.type === "sessions" && m.agents.some((a) => a.waitingForUser === false))) await tick();
+    expect(received.findLast((m) => m.type === "sessions")?.agents[0]?.waitingForUser).toBe(false);
     socket.send(JSON.stringify({ type: "question.answer", requestId: opened.requestId, answers: [{ labels: ["Allow"] }] }));
     await tick();
     expect(received.filter((m) => m.type === "question.close")).toHaveLength(1);
@@ -1592,9 +1621,14 @@ test("a question asked through the bridge opens over the wire and an answer reso
   const agent = await scripted(env, 0, "idle");
   const web = await serve({ port: 0, env, createSession: async () => ({ agent }) });
   const received = [];
+  const listAsync = Agent.Context.listAsync;
+  let recentReads = 0;
+  Agent.Context.listAsync = async (...args) => { recentReads++; return listAsync(...args); };
   try {
     const socket = await connect(web, received);
     await tick();
+    recentReads = 0;
+    const sessionMarker = received.length;
     // The connection's ready agent has an AgentSession-installed question
     // bridge. Ask through it (an interactive tool calls exactly this): it must open a
     // question over the wire and resolve with the user's answer.
@@ -1604,10 +1638,18 @@ test("a question asked through the bridge opens over the wire and an answer reso
     while (Date.now() < openDeadline && !(opened = received.find((m) => m.type === "question.open"))) await tick();
     expect(opened).toBeDefined();
     expect(JSON.stringify(opened.questions)).toContain("Pick");
+    while (Date.now() < openDeadline && received.findLast((m) => m.type === "sessions")?.agents[0]?.waitingForUser !== true) await tick();
+    expect(received.findLast((m) => m.type === "sessions")?.agents[0]?.waitingForUser).toBe(true);
     socket.send(JSON.stringify({ type: "question.answer", requestId: opened.requestId, answers: [{ question: "Pick", answer: "A" }] }));
     await expect(bridgePromise).resolves.toEqual([{ question: "Pick", answer: "A" }]);
+    while (Date.now() < openDeadline && received.findLast((m) => m.type === "sessions")?.agents[0]?.waitingForUser !== false) await tick();
+    expect(received.findLast((m) => m.type === "sessions")?.agents[0]?.waitingForUser).toBe(false);
+    expect(recentReads).toBe(0);
+    const updates = received.slice(sessionMarker).filter((packet) => packet.type === "sessions");
+    expect(updates.length).toBeGreaterThan(0);
+    expect(updates.every((packet) => packet.recent === undefined)).toBe(true);
     socket.close();
-  } finally { await web.stop(); }
+  } finally { Agent.Context.listAsync = listAsync; await web.stop(); }
 });
 
 /* ------------------------------------------------ TUI-parity packets */

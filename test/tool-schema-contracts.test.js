@@ -119,11 +119,13 @@ describe("intended model-facing tool inputs", () => {
     expect(jobs.inputSchema.properties.schedule.type).toBeUndefined();
     expect(jobs.inputSchema.properties.schedule.properties.at.type).toBe("array");
     expect(jobs.inputSchema.properties.schedule.description).toMatch(/exactly one/);
-    const notes = noteDescription().note;
-    expect(notes.description.length).toBeLessThan(450);
-    expect(notes.inputSchema.properties.notes.type).toBeUndefined();
-    expect(notes.inputSchema.properties.notes.additionalProperties.description).toContain("null patch");
-    expect(notes.inputSchema.properties.max.type).toBe("integer");
+    const notes = noteDescription();
+    expect(Object.keys(notes)).toEqual(["note-list", "note-read", "note-write"]);
+    for (const tool of Object.values(notes)) expect(tool.storage).toBe("note");
+    expect(notes["note-list"].inputSchema.properties).toEqual({});
+    expect(notes["note-read"].inputSchema.properties.titles.type).toBe("array");
+    expect(notes["note-write"].inputSchema.required).toEqual(["notes"]);
+    expect(notes["note-write"].inputSchema.properties.notes.additionalProperties.description).toContain("null patch");
   });
 
   test("all package tool schemas avoid combinators and document every input field", async () => {

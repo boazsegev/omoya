@@ -168,11 +168,11 @@ test("web usage meter is separate from the block viewer control", () => {
   expect(composer).toContain('id = "usage-details"');
   const css = readFileSync(new URL("../lib/app/web/public/style.css", import.meta.url), "utf8");
   expect(css).toMatch(/\.composer\s*\{[^}]*position:\s*relative/);
-  expect(css).toMatch(/\.usage-anchor\s*\{[^}]*position:\s*relative/);
+  expect(css).toMatch(/\.usage-anchor[^{}]*\{[^}]*position:\s*relative/);
   expect(css).toMatch(/\.usage-details\s*\{[^}]*position:\s*absolute/);
   expect(css).toMatch(/\.usage-details\s*\{[^}]*bottom:\s*calc\(100%/);
   const mobile = css.slice(css.indexOf("@media (max-width: 40rem)"));
-  expect(mobile).toMatch(/\.usage-anchor\s*\{[^}]*position:\s*static/);
+  expect(mobile).toMatch(/\.usage-anchor[^{}]*\{[^}]*position:\s*static/);
   expect(mobile).toMatch(/\.usage-details\s*\{[^}]*right:\s*\.55rem;[^}]*max-width:\s*calc\(100% - 1\.1rem\)/);
   const shell = readFileSync(new URL("../lib/app/web/public/app/views/shell/shell.js", import.meta.url), "utf8");
   expect(shell).toContain('document.addEventListener("pointerdown"');

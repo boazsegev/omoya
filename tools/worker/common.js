@@ -1,11 +1,12 @@
 import Context from "../../lib/context.js";
 
 export const NOTICE = "<notice>You are a worker recruited by another agent. Perform your assigned task yourself.</notice>\n";
+const DELEGATION_UNAVAILABLE = "delegation unavailable, please continue without workers";
 
 export async function requireControl(agent, context, details, prompt) {
   if (agent.can.delegate === true) return;
   if (agent.can.interact !== true) throw new Error("tool unavailable");
-  if (agent.can.delegate === false || typeof context?.question?.ask !== "function") throw new Error("Ask the user to permit worker creation, or continue without workers.");
+  if (agent.can.delegate === false || typeof context?.question?.ask !== "function") throw new Error(DELEGATION_UNAVAILABLE);
   const answers = await context.question.ask([{
     question: "Allow this Agent to create and control workers?",
     header: "Allow Agent to spawn / delegate?",
@@ -18,7 +19,7 @@ export async function requireControl(agent, context, details, prompt) {
   const answer = answers?.[0];
   if (answer?.labels?.length === 1 && answer.labels[0] === "Allow") { (agent.can.delegate = true); return; }
   if (answer?.labels?.length === 1 && answer.labels[0] === "Deny") (agent.can.delegate = false);
-  throw new Error(typeof answer?.text === "string" && answer.text.trim() ? answer.text.trim() : "Ask the user to permit worker creation, or continue without workers.");
+  throw new Error(DELEGATION_UNAVAILABLE);
 }
 
 export function requirePrompt(prompt) {

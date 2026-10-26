@@ -84,6 +84,74 @@ describe("transcript message fork action", () => {
   }));
 });
 
+describe("transcript message rollback actions", () => {
+  it("creates each row's toolbar on its first pointer or keyboard interaction", async () => withBrowser(async () => {
+    const { messageFrame } = await renderer();
+    let index = 0;
+    for (const block of [
+      { kind: "user", text: "question", done: true },
+      { kind: "text", text: "answer", done: true },
+      { kind: "thinking", text: "thought", done: true, open: false },
+      { kind: "tool", name: "read", args: "{}", output: "result", done: true, open: false },
+      { kind: "system", text: "system", done: true, open: false },
+      { kind: "error", text: "error", done: true },
+      { kind: "command", text: "command", done: true },
+    ]) {
+      const row = messageFrame(block);
+      expect(row.querySelector(".block-controls")).toBeNull();
+      expect(row.tabIndex).toBe(0);
+      await row.dispatch(index++ % 2 ? "focusin" : "pointerenter");
+      expect(row.querySelector(".block-controls")?.parent).toBe(row);
+      const controls = row.querySelector(".block-controls");
+      await row.dispatch("pointerenter");
+      expect(row.querySelector(".block-controls")).toBe(controls);
+    }
+  }));
+
+  it("allocates no action buttons for 1000 untouched collapsed tools", async () => withBrowser(async () => {
+    const { messageFrame } = await renderer();
+    const rows = Array.from({ length: 1000 }, (_, messageIndex) => messageFrame({ kind: "tool", name: "read", done: true, open: false, messageIndex, resultIndex: messageIndex + 1 }));
+    expect(rows.reduce((total, row) => total + row.querySelectorAll("button").length, 0)).toBe(0);
+    await rows[0].dispatch("focusin");
+    expect(rows[0].querySelectorAll("button")).toHaveLength(5);
+    expect(rows.slice(1).reduce((total, row) => total + row.querySelectorAll("button").length, 0)).toBe(0);
+  }));
+
+  it("offers rollback on non-user messages, retaining the selected message", async () => withBrowser(async () => {
+    const { blockControls, mount } = await renderer();
+    const events = [];
+    const previousConfirm = Object.getOwnPropertyDescriptor(globalThis, "confirm");
+    globalThis.confirm = () => true;
+    mount(null, { emit: (channel, packet) => events.push([channel, packet]) });
+    try {
+      for (const [block, messageIndex] of [
+        [{ kind: "text", text: "answer", messageIndex: 2, blockIndex: 0, done: true }, 3],
+        [{ kind: "thinking", text: "thought", messageIndex: 2, blockIndex: 0, done: true }, 3],
+        [{ kind: "system", text: "system", messageIndex: 2, blockIndex: 0, done: true }, 3],
+        [{ kind: "tool", messageIndex: 2, resultIndex: 3, done: true }, 4],
+      ]) {
+        const controls = blockControls(block);
+        const rollback = controls.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === "Roll back to here");
+        expect(rollback).toBeDefined();
+        await rollback.dispatch("click");
+        expect(events.at(-1)).toEqual(["server", { type: "context.rollback", messageIndex }]);
+      }
+      expect(events.filter(([channel]) => channel === "composer.insert")).toEqual([]);
+
+      const user = blockControls({ kind: "user", text: "question", messageIndex: 5, blockIndex: 0, done: true });
+      expect(user.querySelectorAll("button").some((node) => node.getAttribute("aria-label") === "Roll back to here")).toBe(false);
+      await user.querySelectorAll("button").find((node) => node.getAttribute("aria-label") === "Edit & resend from here").dispatch("click");
+      expect(events.slice(-2)).toEqual([
+        ["server", { type: "context.rollback", messageIndex: 5 }],
+        ["composer.insert", ["question", true]],
+      ]);
+    } finally {
+      mount(null, { emit() {} });
+      if (previousConfirm) Object.defineProperty(globalThis, "confirm", previousConfirm); else delete globalThis.confirm;
+    }
+  }));
+});
+
 describe("transcript streaming invalidation", () => {
   it("keeps every unchanged bubble mounted during text and tool streaming", async () => withBrowser(async () => {
     const view = await renderer();
@@ -200,14 +268,17 @@ describe("thinking stream DOM updates", () => {
       const block = { kind: "thinking", text: "First **thought**.", done: false, open };
       const row = messageFrame(block);
       const card = row.firstElementChild;
-      const selectors = ["summary", ".card-head", ".block-kind", ".shimmer-dots", ".thinking-preview", ".thinking-body", ".block-controls"];
+      const selectors = ["summary", ".card-head", ".block-kind", ".shimmer-dots", ".thinking-preview", ".thinking-body"];
       const mounted = selectors.map((selector) => card.querySelector(selector));
+      await row.dispatch("pointerenter");
+      const controls = row.querySelector(".block-controls");
       const labelWrites = card.querySelector(".block-kind").textWrites;
       for (const delta of ["\nSecond `thought`.", "\nThird thought."]) {
         block.text += delta;
         patchMessage(row, block);
         expect(row.firstElementChild).toBe(card);
         for (const [index, selector] of selectors.entries()) expect(card.querySelector(selector)).toBe(mounted[index]);
+        expect(row.querySelector(".block-controls")).toBe(controls);
         expect(card.open).toBe(open);
         expect(card.querySelector(".thinking-body").innerHTML).toContain("<strong>thought</strong>");
         expect(card.querySelector(".thinking-body").innerHTML).toContain("<code>thought</code>");
@@ -222,6 +293,7 @@ describe("thinking stream DOM updates", () => {
     const { messageFrame, patchMessage } = await renderer();
     const block = { kind: "thinking", text: "First", done: false };
     const row = messageFrame(block);
+    await row.dispatch("pointerenter");
     const copy = row.querySelector(".block-controls").firstElementChild;
     block.text += " **second**";
     patchMessage(row, block);
@@ -247,7 +319,8 @@ describe("thinking stream DOM updates", () => {
     expect(markdownSources.get(row.querySelector(".thinking-body"))).toBe(history.text);
     expect(row.querySelector(".thinking-body").innerHTML).toContain("<strong>Final</strong>");
     expect(row.querySelector(".thinking-body").innerHTML).toContain('role="math"');
-    expect(row.querySelector(".block-controls").childNodes.length).toBe(4); // copy, view, fork, delete
+    await row.dispatch("focusin");
+    expect(row.querySelector(".block-controls").childNodes.length).toBe(5); // copy, view, rollback, fork, delete
   }));
 
   it("updates the capped Markdown preview from head-only to head and tail", async () => withBrowser(async () => {

@@ -14,6 +14,21 @@ test("menu search indexes nested action rows without crowding the empty-query ro
   expect(filteredMenu({ query: "absent" }, node)).toEqual([]);
 });
 
+test("menu search matches every whitespace-separated term across searchable fields", () => {
+  const session = { kind: "action", label: "fix the build", note: "Saved sessions › demo" };
+  for (const query of ["build fix", "fix   build", "demo build", "   "]) {
+    expect(filteredMenu({ query }, { items: [session] })).toEqual([session]);
+  }
+  expect(filteredMenu({ query: "build missing" }, { items: [session] })).toEqual([]);
+});
+
+test("menu search stops converting fields after a term matches", () => {
+  let conversions = 0;
+  const item = { kind: "action", label: "Needle in the label", note: { toString() { conversions++; return "later field"; } } };
+  expect(filteredMenu({ query: "needle" }, { items: [item] })).toEqual([item]);
+  expect(conversions).toBe(0);
+});
+
 test("filtering preserves explicit escape-hatch choices without retaining headers", () => {
   const custom = { kind: "action", label: "Custom value…", alwaysVisible: true };
   const header = { kind: "header", label: "Header", alwaysVisible: true };

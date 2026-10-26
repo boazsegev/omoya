@@ -5,9 +5,8 @@
     },
     {
       "toolCall": {
-        "name": "note",
+        "name": "note-write",
         "arguments": {
-          "action": "set",
           "notes": {
             "UI tour": {
               "type": "todo",
@@ -22,15 +21,10 @@
   [
     {
       "toolCall": {
-        "name": "note",
+        "name": "note-read",
         "arguments": {
-          "action": "get",
-          "notes": [
+          "titles": [
             "UI tour"
-          ],
-          "only": [
-            "summary",
-            "content"
           ]
         }
       }
@@ -39,9 +33,8 @@
   [
     {
       "toolCall": {
-        "name": "note",
+        "name": "note-write",
         "arguments": {
-          "action": "set",
           "notes": {
             "UI tour": {
               "type": "done"
@@ -213,11 +206,13 @@
       "toolCall": {
         "name": "worker-create",
         "arguments": {
-          "workers": [{
-            "name": "ui-response-demo",
-            "description": "UI response demonstrator",
-            "model": "test/ui-response"
-          }],
+          "workers": [
+            {
+              "name": "ui-response-demo",
+              "description": "UI response demonstrator",
+              "model": "test/ui-response"
+            }
+          ],
           "prompt": "Reply with the child-worker UI demonstration."
         }
       }

@@ -14,3 +14,11 @@ test("project packets update the client state and invalidate the header", () => 
   session.packets.projects(ctx, { projects, canManageProjects: false });
   expect(ctx.state.canManageProjects).toBe(false);
 });
+
+test("agents-only session packets preserve the saved-session list", () => {
+  const recent = [{ id: "saved", preview: "keep me" }];
+  const ctx = { state: { sessions: { agents: [], recent }, agent: null }, invalidate() {} };
+  session.packets.sessions(ctx, { agents: [{ id: "worker", project: "/p", name: "worker", waitingForUser: true }] });
+  expect(ctx.state.sessions.recent).toBe(recent);
+  expect(ctx.state.sessions.agents[0].waitingForUser).toBe(true);
+});

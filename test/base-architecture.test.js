@@ -312,12 +312,15 @@ describe("linear ownership: dependencies only point DOWN the chain", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("every top-level package tool imports lib through a default public façade only", () => {
+  test("top-level package tools use public façades except the declared Bash formatting leaf", () => {
     const offenders = [];
     for (const tool of jsFiles("tools")) {
       const source = readFileSync(tool, "utf8");
       for (const spec of specifiers(tool)) {
         if (!spec.startsWith("../lib/")) continue;
+        // The foreground tool and sandbox worker share this dependency-free
+        // output formatter. Allow only this leaf, not general private imports.
+        if (tool === "tools/bash.js" && spec === "../lib/sandbox/bash-result.js") continue;
         const facade = /^\.\.\/lib\/([a-z-]+)\.js$/.exec(spec)?.[1];
         if (FOUNDATIONS.includes(facade)) continue;
         const defaultImport = new RegExp(`import\\s+[A-Za-z_$][\\w$]*\\s+from\\s+["\']${spec}["\']`).test(source);

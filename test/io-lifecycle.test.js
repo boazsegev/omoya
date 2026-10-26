@@ -314,6 +314,65 @@ describe("IO plan-usage reporting (provider → IO → consumer)", () => {
     });
   });
 
+  test("HTTP 429 reports response headers even when send throws before a response is stored", async () => {
+    const Protocol = class extends fakeProvider() {
+      async send() {
+        const error = new Error("HTTP 429 Too Many Requests");
+        error.status = 429;
+        error.headers = new Headers({ "x-ratelimit-limit-requests": "500", "x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "30s" });
+        throw error;
+      }
+    };
+    const aiio = makeIO({ Protocol });
+    const context = new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] });
+    const terminal = await aiio.write(context);
+    expect(terminal).toMatchObject({ type: "error", status: 429 });
+    expect(context.planUsage).toMatchObject({ quotas: { requests: { total: 500, remaining: 0, reset: "30s" } } });
+  });
+
+  test("the default HTTP transport preserves 429 headers for quota reporting", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response("rate limit", { status: 429, headers: {
+      "x-ratelimit-limit-requests": "100", "x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "1m",
+    } });
+    try {
+      const Protocol = class {
+        static provider = { capabilities: { tools: false } };
+        context2msg() { return [{}, {}]; }
+      };
+      const aiio = makeIO({ Protocol });
+      const context = new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] });
+      expect((await aiio.write(context)).status).toBe(429);
+      expect(context.planUsage).toMatchObject({ quotas: { requests: { total: 100, remaining: 0, reset: "1m" } } });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("HTTP 429 awaits a provider's separate usage endpoint before reporting the failure", async () => {
+    const Protocol = class extends fakeProvider() {
+      async send() { throw Object.assign(new Error("HTTP 429"), { status: 429 }); }
+      async reportPlanUsage(headers, aiio) {
+        expect(headers).toBeUndefined();
+        await Bun.sleep(5);
+        aiio.context.planUsage = { quotas: { "5h": { total: 100, remaining: 0, reset: "2026-10-13T23:00:00Z" } } };
+      }
+    };
+    const aiio = makeIO({ Protocol });
+    const context = new Context({ messages: [{ type: 2, content: [{ type: "text", text: "hi" }] }] });
+    const terminal = await aiio.write(context);
+    expect(terminal.status).toBe(429);
+    expect(context.planUsage?.quotas?.["5h"]?.reset).toBe("2026-10-13T23:00:00Z");
+  });
+
+  test("a failing 429 usage hook cannot replace the original error", async () => {
+    const Protocol = class extends fakeProvider() {
+      async send() { throw Object.assign(new Error("HTTP 429"), { status: 429 }); }
+      async reportPlanUsage() { throw new Error("usage unavailable"); }
+    };
+    const aiio = makeIO({ Protocol });
+    const terminal = await aiio.write(new Context({ messages: [] }));
+    expect(terminal).toMatchObject({ type: "error", status: 429, kind: "provider" });
+  });
+
   test("a hook failure never breaks the request", async () => {
     const Protocol = class extends fakeProvider(doneScript) {
       async send(msg) { this.msg = msg; this.response = { headers: new Headers() }; }

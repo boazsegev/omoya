@@ -98,7 +98,7 @@ export function toolDescription(env) {
     inputSchema: { type: "object", additionalProperties: false, required: ["workers"], properties: {
       prompt: { type: "string", description: "Self-contained first prompt sent unchanged to each worker; omit or use an empty string to create idle workers." },
       workers: { type: "array", minItems: 1, description: "Workers to create. Give each a unique name and any model, role, or scope options it needs.", items: { type: "object", additionalProperties: false, required: ["name"], properties: {
-        name: { type: "string", minLength: 1, description: "Short unique role name, e.g. reviewer." },
+        name: { type: "string", minLength: 1, description: "Short unique role name, e.g. reviewer. Workers can't read their own name." },
         model: { type: "string", description: "Model for the worker; omit to use yours.", ...(candidates.length ? { enum: candidates } : {}) },
         thinking: { type: "string", enum: ["none", "low", "medium", "high", "xhigh", "max"], description: "Thinking level; omit unless critical. Default to empty or medium." },
         description: { type: "string", description: "Worker's role description." },

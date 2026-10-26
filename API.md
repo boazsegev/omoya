@@ -1,4 +1,4 @@
-# API (2026-10-26)
+# API (2026-10-30)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -93,7 +93,8 @@ async callTool(env, name, args, context = {…}): Exact flattened lookup + invok
 optional TOOL CONTEXT is handed to every tool as its second argument.
 In-process dispatch supplies agent-local storage and messageSet(text), plus
 background.start(options)/list()/output(id, from)/stop(id) capabilities.
-Detectors receive storage, messageSet(text), agent, and env.
+Detectors receive storage, messageSet(text), agent, and env. Tools declaring
+the same `storage` name share one storage box and one published message.
 Forked sandbox workers receive the reduced data context plus explicit
 JSONL request/reply bridges; host callbacks never cross that boundary.
 
@@ -501,74 +502,101 @@ Source: `tools/job-schedule.js`; flags: trusted
 }
 ```
 
-### `note`
+### `note-list`
 
-Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use ["*"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.
+List scratchpad notes for the current context: each title with its type badge. Use note-read for contents.
 
 Source: `tools/note.js`; flags: safe
 
 ```json
 {
   "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}
+```
+
+### `note-read`
+
+Read scratchpad notes by title; omit titles to read every note.
+
+Source: `tools/note.js`; flags: safe
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
   "properties": {
-    "action": {
-      "type": "string",
-      "enum": [
-        "set",
-        "get",
-        "list",
-        "remove",
-        "search"
-      ],
-      "description": "The operation to perform."
-    },
-    "notes": {
-      "description": "set: a map of title → patch object. get/remove: an array of titles ([\"*\"] = every note).",
-      "items": {
-        "type": "string",
-        "description": "A note title; applies when `notes` is an array."
-      },
-      "additionalProperties": {
-        "description": "Patch for the note whose title is this key: fields you set are merged in (nested objects merge field-by-field, arrays and scalars replace), a null field deletes that field, and a null patch deletes the whole note.",
-        "properties": {
-          "content": {
-            "description": "The full note body as a string; null deletes this field."
-          },
-          "summary": {
-            "description": "A one-line gist as a string; null deletes this field."
-          },
-          "type": {
-            "description": "Use the string todo, active, done, or info; null deletes this field."
-          }
-        },
-        "additionalProperties": true
-      }
-    },
-    "only": {
+    "titles": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "get: return only these fields (default: every field)."
-    },
-    "pattern": {
+      "description": "Note titles from note-list."
+    }
+  }
+}
+```
+
+### `note-write`
+
+Create, update or delete scratchpad notes in one call. Prefer content, summary and type fields; add other JSON fields as needed. Notes live only in the current context; store durable data in files.
+
+Source: `tools/note.js`; flags: safe
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "notes"
+  ],
+  "properties": {
+    "notes": {
+      "type": "object",
+      "description": "Title → patch map; a null patch deletes that note.",
+      "additionalProperties": {
+        "description": "Patch for this title: set fields merge in (nested objects merge, arrays and scalars replace); a null field deletes it; a null patch deletes the note.",
+        "properties": {
+          "content": {
+            "description": "The full note body."
+          },
+          "summary": {
+            "description": "A one-line gist."
+          },
+          "type": {
+            "description": "todo, active, done or info."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  }
+}
+```
+
+### `process-join`
+
+Wait for this Agent's background Bash process; return its output and exit code like bash. Timeout starts on join and stops the process group.
+
+Source: `tools/process.js`; flags: trusted, onTimeout
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "id": {
       "type": "string",
-      "description": "search: a regular expression (case-insensitive)."
+      "description": "Process id returned by background Bash."
     },
-    "field": {
-      "type": "string",
-      "description": "search: limit the search to one field (default: the title and all fields)."
-    },
-    "max": {
+    "timeout": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 20,
-      "description": "search: maximum matches to return (1–50)."
+      "minimum": 0,
+      "description": "Milliseconds to wait from this call (default: 120000; capped at 1200000). Stops the process on timeout."
     }
   },
   "required": [
-    "action"
+    "id"
   ]
 }
 ```
@@ -1003,6 +1031,72 @@ Source: `tools/skill.js`; flags: safe
 }
 ```
 
+### `splice`
+
+Copy source lines into target lines; source stays unchanged. Write a temporary source and use this tool for large edits. Use edit-undo with the returned edit id.
+
+Source: `tools/splice.js`; flags: trusted
+
+```json
+{
+  "type": "object",
+  "required": [
+    "source",
+    "target"
+  ],
+  "properties": {
+    "source": {
+      "type": "object",
+      "description": "Existing file and 1-based inclusive lines to copy.",
+      "required": [
+        "path",
+        "from",
+        "to"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Source file inside the Agent folder."
+        },
+        "from": {
+          "type": "integer",
+          "description": "First source line."
+        },
+        "to": {
+          "type": "integer",
+          "description": "Last source line."
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "description": "Existing file and 1-based inclusive lines to replace; at inserts before a line (or appends at line count + 1). If given with at, from and to must both equal at.",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Target file inside the Agent folder."
+        },
+        "from": {
+          "type": "integer",
+          "description": "First line to replace."
+        },
+        "to": {
+          "type": "integer",
+          "description": "Last line to replace."
+        },
+        "at": {
+          "type": "integer",
+          "description": "Insert before this line; line count + 1 appends."
+        }
+      }
+    }
+  }
+}
+```
+
 ### `web-fetch`
 
 Read one HTTP(S) page or API response as Markdown, text, or JSON text. Supply the direct URL; check truncation notices before assuming the response is complete.
@@ -1111,7 +1205,7 @@ Source: `tools/worker-create.js`; flags: trusted
           "name": {
             "type": "string",
             "minLength": 1,
-            "description": "Short unique role name, e.g. reviewer."
+            "description": "Short unique role name, e.g. reviewer. Workers can't read their own name."
           },
           "model": {
             "type": "string",
@@ -2035,7 +2129,7 @@ Returns `number` — the message count
 
 Every session in the folder, LATEST FIRST (one entry per id), each
 with a small preview: the first meaningful line of the first user
-message (see meaningfulLine; whitespace-folded, capped) and `agent`,
+or assistant message with text (a compacted session's summary) (see meaningfulLine; whitespace-folded, capped) and `agent`,
 the stored agent name when it is not a default `agent-N` one. With `cwd`, only sessions whose metadata records THAT
 origin folder list (the resume contract: a project sees its own
 sessions; foreign metadata-less files are skipped by

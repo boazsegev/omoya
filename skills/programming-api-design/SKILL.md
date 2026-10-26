@@ -21,6 +21,7 @@ Deliver APIs as signatures with contract comments, plus happy-path, error-path a
 - Separate commands from queries: queries never mutate; retryable commands are idempotent.
 - Keep the surface minimal: private by default; export only what callers need.
 - Default to safe behavior: least privilege, validated input at the boundary, opaque handles over exposed internals.
+- Don't over-engineer. Not every edge case is relevant. Example: if system is out of memory you have bigger problems than code correctness.
 
 ## Naming
 

@@ -284,7 +284,6 @@ describe("generated API documentation", () => {
       expect(section).not.toBe('"unknown"');
     }
     expect(text).toContain('"glob?": "Only files matching a glob');
-    expect(text).toContain('"notes?": "set: a map');
     expect(text).toContain('"forms": "Task schedule: a string');
     expect(text).toContain('"forms": "Optional focused preview: a plain string');
   }, 20_000);

@@ -9,6 +9,7 @@ Every text is a negotiation for the reader's attention and trust: the reader can
 
 ## Plan Before Writing
 
+- Define the information you're trying to communicate, what do you want the reader to know or understand.
 - Define the reader, what they already know and believe, and the ONE belief or action you want.
 - Work backward from that goal: list the steps of understanding the reader needs to reach it.
 - Set push strength: Inform (docs, guides, reports) → Convince (proposals, essays, emails) → Sell (ads, landing pages).
@@ -76,6 +77,9 @@ Sell only: place a clear call to action midway and at the end, and risk reversal
 - Could a 15-year-old (or a domain newcomer, for technical docs) explain each paragraph back?
 - Is the main point in the first sentence? Does every section beat "stop reading"?
 - Is every claim true and backed by something?
+- Is the information transfer focused and effective?
+- Is the information transfer noisy?
+
 
 ## Output
 

@@ -179,9 +179,17 @@ describe("worker actions", () => {
   test("permission is required for mutations; status remains read-only", async () => {
     const { manager, context } = await setup(false);
     expect(worker_status({}, context)).toContain("Models");
-    await expect(worker_create({ prompt: "go", workers: [{ name: "a" }] }, context)).rejects.toThrow(/permit worker creation/);
+    await expect(worker_create({ prompt: "go", workers: [{ name: "a" }] }, context)).rejects.toThrow("delegation unavailable, please continue without workers");
     const pending = await setup(null);
+    await expect(worker_create({ workers: [{ name: "a" }] }, pending.context)).rejects.toThrow("delegation unavailable, please continue without workers");
     let asked;
+    await expect(worker_create({ workers: [{ name: "a" }] }, { ...pending.context, question: { ask: async () => [{ labels: ["Deny"] }] } })).rejects.toThrow("delegation unavailable, please continue without workers");
+    expect(pending.manager.can.delegate).toBe(false);
+    pending.manager.can.delegate = undefined;
+    await expect(worker_create({ workers: [{ name: "a" }] }, { ...pending.context, question: { ask: async () => [] } })).rejects.toThrow("delegation unavailable, please continue without workers");
+    pending.manager.can.delegate = undefined;
+    await expect(worker_create({ workers: [{ name: "a" }] }, { ...pending.context, question: { ask: async () => [{ text: "No, thanks." }] } })).rejects.toThrow("delegation unavailable, please continue without workers");
+    pending.manager.can.delegate = undefined;
     await worker_create({ prompt: "go", workers: [{ name: "a" }] }, { ...pending.context, question: { ask: async ([question]) => { asked = question; return [{ labels: ["Allow"] }]; } } });
     expect(asked.details).toContain("a: ep/m");
     expect(pending.manager.can.delegate).toBe(true);

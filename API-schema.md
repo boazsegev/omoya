@@ -74,6 +74,7 @@ Compact contract notation, not executable TypeScript or a validation schema. Acc
   "skills": {
     "<path>": "boolean",
   },
+  "theme": "unknown",
   "themes": {
     "<theme>": {
       "<role>": {
@@ -377,22 +378,52 @@ Source: `tools/job-schedule.js`; flags: trusted
 }
 ```
 
-Keep scratchpad notes for the current context. Use set with a title-to-patch map, get/remove with an array of titles, list for open notes, or search with a regex pattern. Use ["*"] to select all notes. Prefer content, summary, and type fields; add other JSON fields as needed. Null deletes a field or a whole note.
+List scratchpad notes for the current context: each title with its type badge. Use note-read for contents.
 
 Source: `tools/note.js`; flags: safe
 
-### `Env.toolDescription.note.inputSchema`
+### `Env.toolDescription.note-list.inputSchema`
+
+```schema
+{}
+```
+
+Read scratchpad notes by title; omit titles to read every note.
+
+Source: `tools/note.js`; flags: safe
+
+### `Env.toolDescription.note-read.inputSchema`
 
 ```schema
 {
-  "action": ["set", "get", "list", "remove", "search"],
-  "field?": "string",
-  "max?": "integer",
-  "notes?": "set: a map of title → patch object. get/remove: an array of titles ([\"*\"] = every note).",
-  "only?": {
+  "titles?": {
     "array": "string",
   },
-  "pattern?": "string",
+}
+```
+
+Create, update or delete scratchpad notes in one call. Prefer content, summary and type fields; add other JSON fields as needed. Notes live only in the current context; store durable data in files.
+
+Source: `tools/note.js`; flags: safe
+
+### `Env.toolDescription.note-write.inputSchema`
+
+```schema
+{
+  "notes": "object",
+}
+```
+
+Wait for this Agent's background Bash process; return its output and exit code like bash. Timeout starts on join and stops the process group.
+
+Source: `tools/process.js`; flags: trusted, onTimeout
+
+### `Env.toolDescription.process-join.inputSchema`
+
+```schema
+{
+  "id": "string",
+  "timeout?": "integer",
 }
 ```
 
@@ -549,6 +580,28 @@ Source: `tools/skill.js`; flags: safe
 {
   "names?": {
     "array": "string",
+  },
+}
+```
+
+Copy source lines into target lines; source stays unchanged. Write a temporary source and use this tool for large edits. Use edit-undo with the returned edit id.
+
+Source: `tools/splice.js`; flags: trusted
+
+### `Env.toolDescription.splice.inputSchema`
+
+```schema
+{
+  "source": {
+    "from": "integer",
+    "path": "string",
+    "to": "integer",
+  },
+  "target": {
+    "at?": "integer",
+    "from?": "integer",
+    "path": "string",
+    "to?": "integer",
   },
 }
 ```

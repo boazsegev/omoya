@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { contextEntries, viewerWhere, canEditViewerBlock } from "../lib/app/web/public/app/logic/viewer.js";
 import Agent from "../lib/agent.js";
+import { AgentSession } from "../lib/app/web/session.js";
 import { serve } from "../lib/app/web/server.js";
 import { parseClientMessage } from "../lib/app/web/protocol.js";
 import { testEnv, USER } from "./fakes.js";
@@ -22,6 +23,26 @@ test("Web viewer prepends a virtual system catalog and offers copy but no mutati
     const packet = type === "context.delete" ? { type, messageIndexes: [-1] } : { type, messageIndex: -1, blockIndex: 0, text: "x" };
     expect(() => parseClientMessage(JSON.stringify(packet))).toThrow();
   }
+});
+
+test("Web inclusive rollback retains the selected message and no-ops after the last", async () => {
+  const env = await testEnv();
+  const agent = await Agent.create({ env });
+  const session = new AgentSession(agent);
+  try {
+    agent.context.append(USER("keep"));
+    agent.context.append({ type: 3, content: [{ type: "text", text: "answer" }] });
+    agent.context.append(USER("later"));
+    session.rollback(2);
+    expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["keep", "answer"]);
+    const before = session.contextSnapshot();
+    let refreshes = 0;
+    session.refresh = () => { refreshes++; };
+    expect(session.rollback(agent.context.length)).toEqual(before);
+    expect(refreshes).toBe(0);
+    expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["keep", "answer"]);
+    expect(session.historySnapshot().map((block) => block.text)).toEqual(["keep", "answer"]);
+  } finally { session.dispose(); await agent.close(); }
 });
 
 test("Web async catalog results cannot overwrite a newer request or a switched Agent", async () => {
@@ -88,6 +109,13 @@ test("Web context inspection publishes filtered schemas separately and preserves
     expect(failed.tools.text).toContain("catalog error");
     expect(agent.context.messages().map((message) => message.content[0].text)).toEqual(["after"]);
     expect(packets.find((packet) => packet.type === "hello").history).not.toContain("Published tools");
+    const contextCount = packets.filter((packet) => packet.type === "context").length;
+    const inspected = next("context");
+    socket.send(JSON.stringify({ type: "context.rollback", messageIndex: agent.context.length }));
+    socket.send(JSON.stringify({ type: "context.inspect" }));
+    await inspected;
+    await Bun.sleep(20);
+    expect(packets.filter((packet) => packet.type === "context")).toHaveLength(contextCount + 1);
     const rolledBack = await request({ type: "context.rollback", messageIndex: 0 });
     expect(rolledBack.blocks).toEqual([]);
     expect(rolledBack.history).toEqual([]);

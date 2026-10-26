@@ -1,17 +1,13 @@
-// test/agent-note.test.js — proof for the NOTE tool (tools/note.js):
-// the context-OWNED short-memory store behind ONE tool (`note`) with
-// an action discriminator. Every call derives the notes by scanning
-// the agent's context for its own successful note calls and replaying
-// them (failed/unanswered calls apply nothing; a context edit that
-// drops the call drops the note). set MERGE-PATCHES (RFC 7386: objects merge
-// recursively, null deletes a field, a null patch deletes the note,
-// missing notes upsert); get returns a uniform title→note map (all
-// fields by default, `only` filters); remove ["*"] clears the store;
-// type is free-form data (badges resolve at display). Confirmations
-// are terse; the agent-owned sticky message lists every note as a
-// badge-headed title. End-to-end through the Agent's tool loop over
-// the scripted TEST provider (providers/test.js — zero network, zero
-// model).
+// test/agent-note.test.js — proof for the NOTE tools (tools/note.js):
+// note-list / note-read / note-write share `storage: "note"` (one storage
+// box, one sticky message). The store is DERIVED from the context's own
+// successful note-write calls (failed/unanswered calls apply nothing; a
+// context edit that drops the call drops the note). note-write
+// MERGE-PATCHES (RFC 7386: objects merge recursively, null deletes a
+// field, a null patch deletes the note, missing notes upsert); note-read
+// returns a uniform title→note map (omit titles for all); note-list shows
+// every title with its badge, done notes last. End-to-end through the
+// Agent's tool loop over the scripted TEST provider.
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { testEnv, USER } from "./fakes.js";
@@ -22,85 +18,97 @@ import { providerAdd, toolEntry, toolsLoad } from "./env-internals.js";
 import { toolStorage } from "../lib/agent/tool-storage.js";
 import { updateToolMessage } from "../lib/agent/tool-messages.js";
 
-const note = (args, context) => tools.note(args, {
+const ctxOf = (context) => ({
   ...context,
   storage: toolStorage(context.agent, "note"),
   messageSet: (text) => updateToolMessage(context.agent, "note", text),
 });
+const list = (context) => tools.note_list({}, ctxOf(context));
+const read = (titles, context) => tools.note_read(titles === undefined ? {} : { titles }, ctxOf(context));
+const write = (notes, context) => tools.note_write({ notes }, ctxOf(context));
 
-// a recorded note tool call (assistant message, type 3) + its result (type 4)
+// a recorded tool call (assistant message, type 3) + its result (type 4)
 const TC = (callId, name, args) => ({ type: 3, content: [{ type: "toolCall", callId, name, arguments: args }] });
 const TR = (callId, name, error = false) => ({
   type: 4, callId, name, ...(error ? { error: true } : {}), content: [{ type: "text", text: "x" }],
 });
-const agentOf = (...messages) => ({ context: new Context({ messages: [...messages] }) });
+// a recorded successful (or failed) note-write
+const W = (callId, notes, error = false) => [TC(callId, "note-write", { notes }), TR(callId, "note-write", error)];
+const agentOf = (...messages) => ({ context: new Context({ messages: messages.flat() }) });
 
-describe("note tool: the store is DERIVED from the context's own note calls", () => {
-  test("successful set calls apply in order; patches MERGE, null deletes a field", () => {
+describe("note tools: the store is DERIVED from the context's own note-write calls", () => {
+  test("successful writes apply in order; patches MERGE, null deletes a field", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { api: { content: "v1", summary: "s1" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { api: { content: "v2", summary: null } } }), TR("c2", "note"),
+      W("c1", { api: { content: "v1", summary: "s1" } }),
+      W("c2", { api: { content: "v2", summary: null } }),
     );
-    expect(note({ action: "get", notes: ["api"] }, { agent })).toBe('{\n "api": {\n  "content": "v2"\n }\n}');
+    expect(read(["api"], { agent })).toBe('{\n "api": {\n  "content": "v2"\n }\n}');
   });
 
-  test("FAILED and UNANSWERED calls apply nothing; remove deletes", () => {
+  test("FAILED and UNANSWERED calls apply nothing; a null patch deletes", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { kept: { content: "yes" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { failed: { content: "no" } } }), TR("c2", "note", true), // error result
-      TC("c3", "note", { action: "set", notes: { pending: { content: "no" } } }), // no result at all
-      TC("c4", "note", { action: "remove", notes: ["kept"] }), TR("c4", "note"),
+      W("c1", { kept: { content: "yes" } }),
+      W("c2", { failed: { content: "no" } }, true), // error result
+      TC("c3", "note-write", { notes: { pending: { content: "no" } } }), // no result at all
+      W("c4", { kept: null }),
     );
-    expect(note({ action: "list" }, { agent })).toBe("No notes.");
+    expect(list({ agent })).toBe("No notes.");
   });
 
   test("arguments arriving as JSON TEXT parse the same (provider dialects differ)", () => {
     const agent = agentOf(
-      TC("c1", "note", JSON.stringify({ action: "set", notes: { db: { content: "postgres :5432" } } })), TR("c1", "note"),
+      TC("c1", "note-write", JSON.stringify({ notes: { db: { content: "postgres :5432" } } })), TR("c1", "note-write"),
+      TC("c2", "note-write", { notes: JSON.stringify({ cache: { content: "redis" } }) }), TR("c2", "note-write"),
     );
-    expect(note({ action: "get", notes: ["db"] }, { agent })).toContain("postgres :5432");
+    expect(read(["db"], { agent })).toContain("postgres :5432");
+    expect(read(["cache"], { agent })).toContain("redis");
   });
 
   test("titles trim consistently between writing and reading", () => {
+    const agent = agentOf(W("c1", { "  padded  ": { content: "x" } }));
+    expect(read(["padded"], { agent })).toContain("x");
+  });
+
+  test("calls of other tools never apply (the old single `note` tool is not replayed)", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { "  padded  ": { content: "x" } } }), TR("c1", "note"),
+      TC("c1", "note", { action: "set", notes: { legacy: { content: "x" } } }), TR("c1", "note"),
     );
-    expect(note({ action: "get", notes: ["padded"] }, { agent })).toContain("x");
+    expect(list({ agent })).toBe("No notes.");
   });
 
   test("a note-store RECORD is the BASELINE; calls replay ON TOP of it", () => {
     const agent = agentOf(
       { type: "note-store", notes: { old: { content: "from the record" }, replaced: { content: "v1" } } },
       { type: 2, content: [{ type: "text", text: "anchor" }] },
-      TC("c1", "note", { action: "set", notes: { replaced: { content: "v2" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "remove", notes: ["old"] }), TR("c2", "note"),
+      W("c1", { replaced: { content: "v2" } }),
+      W("c2", { old: null }),
     );
-    expect(note({ action: "list" }, { agent })).toContain("1 note:");
-    expect(note({ action: "get", notes: ["replaced"] }, { agent })).toContain("v2");
+    expect(list({ agent })).toBe("1 note:\n- replaced");
+    expect(read(["replaced"], { agent })).toContain("v2");
   });
 
-  test("every set/remove PERSISTS a snapshot record; the derivation PREFERS a fresh same-context snapshot", () => {
+  test("every write PERSISTS a snapshot record; the derivation PREFERS a fresh same-context snapshot", () => {
     const agent = agentOf(
       { type: 2, content: [{ type: "text", text: "anchor" }] },
-      TC("c1", "note", { action: "set", notes: { temp: { content: "survives" } } }), TR("c1", "note"),
+      W("c1", { temp: { content: "survives" } }),
     );
-    expect(note({ action: "list" }, { agent })).toContain("temp"); // derives from the replay
+    expect(list({ agent })).toContain("temp"); // derives from the replay
     expect(agent.context.messages().some((m) => m?.type === "note-store")).toBe(false); // reads persist nothing
-    expect(note({ action: "set", notes: { temp: { content: "v2" } } }, { agent })).toBe("note saved");
+    expect(write({ temp: { content: "v2" } }, { agent })).toBe("note saved");
     const record = agent.context.messages().find((m) => m?.type === "note-store");
     expect(record.notes).toEqual({ temp: { content: "v2" } }); // the snapshot joined the context
-    expect(note({ action: "list" }, { agent })).toContain("temp"); // the fresh snapshot answers directly
+    expect(list({ agent })).toContain("temp"); // the fresh snapshot answers directly
   });
 
   test("a new Agent starts with its own note storage and context", async () => {
     const env = await testEnv();
     const agent = await Agent.create({ env });
-    agent.context.append(TC("c1", "note", { action: "set", notes: { "old session": { content: "x" } } }));
-    agent.context.append(TR("c1", "note"));
-    expect(note({ action: "list" }, { agent })).toContain("old session");
-    note({ action: "set", notes: { "old session": { content: "updated" } } }, { agent });
+    agent.context.append(TC("c1", "note-write", { notes: { "old session": { content: "x" } } }));
+    agent.context.append(TR("c1", "note-write"));
+    expect(list({ agent })).toContain("old session");
+    write({ "old session": { content: "updated" } }, { agent });
     const next = await Agent.create({ env });
-    expect(note({ action: "list" }, { agent: next })).toBe("No notes.");
+    expect(list({ agent: next })).toBe("No notes.");
     expect(toolStorage(next, "note")).not.toBe(toolStorage(agent, "note"));
     next.close();
     agent.close();
@@ -108,141 +116,130 @@ describe("note tool: the store is DERIVED from the context's own note calls", ()
   });
 
   test("an EMPTY context (no numeric-type message) RESETS the store", () => {
-    const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { kept: { content: "x" } } }), TR("c1", "note"),
-    );
-    expect(note({ action: "list" }, { agent })).toContain("kept");
+    const agent = agentOf(W("c1", { kept: { content: "x" } }));
+    expect(list({ agent })).toContain("kept");
     agent.context.update((messages) => { messages.length = 0; return true; }); // a full clear in place (the same Context)
-    expect(note({ action: "list" }, { agent })).toBe("No notes."); // reset, not resurrected
+    expect(list({ agent })).toBe("No notes."); // reset, not resurrected
     expect(toolStorage(agent, "note").snapshot).toBeUndefined(); // the cache cleared too
   });
 
   test("deleting the LAST note STAYS deleted — the empty snapshot persists (no resurrection)", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { a: { content: "1" }, b: { content: "2" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "remove", notes: ["a"] }), TR("c2", "note"),
+      W("c1", { a: { content: "1" }, b: { content: "2" } }),
+      W("c2", { a: null }),
     );
-    expect(note({ action: "list" }, { agent })).toBe("1 note:\n- b");
-    expect(note({ action: "remove", notes: ["b"] }, { agent })).toBe("note removed");
-    expect(note({ action: "list" }, { agent })).toBe("No notes."); // the empty snapshot answers
-    agent.context.update((messages) => { messages.push(TC("c3", "note", { action: "remove", notes: ["b"] }), TR("c3", "note")); return true; });
-    expect(note({ action: "list" }, { agent })).toBe("No notes."); // even replayed, the snapshot holds
+    expect(list({ agent })).toBe("1 note:\n- b");
+    expect(write({ b: null }, { agent })).toBe("note saved");
+    expect(list({ agent })).toBe("No notes."); // the empty snapshot answers
+    agent.context.update((messages) => { messages.push(...W("c3", { b: null })); return true; });
+    expect(list({ agent })).toBe("No notes."); // even replayed, the snapshot holds
     const records = agent.context.messages().filter((m) => m?.type === "note-store");
     expect(records.at(-1).notes).toEqual({}); // the empty snapshot persisted
-    // ["*"] clears the same way
-    const wiped = agentOf(TC("d1", "note", { action: "set", notes: { x: { content: "1" }, y: { content: "2" } } }), TR("d1", "note"));
-    expect(note({ action: "remove", notes: ["*"] }, { agent: wiped })).toBe("removed all 2 notes");
-    expect(note({ action: "list" }, { agent: wiped })).toBe("No notes.");
   });
 
   test("a context edit that drops note calls wins OUTRIGHT — deliberate edits stay authoritative", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { kept: { content: "1" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { "edited away": { content: "2" } } }), TR("c2", "note"),
+      W("c1", { kept: { content: "1" } }),
+      W("c2", { "edited away": { content: "2" } }),
     );
-    expect(note({ action: "list" }, { agent })).toContain("2 notes:");
+    expect(list({ agent })).toContain("2 notes:");
     agent.context.update((messages) => { messages.splice(2, 2); return true; }); // only the SECOND note's call+result dropped
-    const out = note({ action: "list" }, { agent });
+    const out = list({ agent });
     expect(out).toContain("1 note:");
     expect(out).toContain("kept");
     expect(out).not.toContain("edited away"); // the edit won
   });
 });
 
-describe("note tool: set — merge-patch upsert/delete in one call", () => {
+describe("note-write — merge-patch upsert/delete in one call", () => {
   test("one call upserts, patches and deletes several notes", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { a: { content: "1" }, b: { content: "2", type: "todo" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { a: { type: "done" }, b: null } }), TR("c2", "note"),
+      W("c1", { a: { content: "1" }, b: { content: "2", type: "todo" } }),
+      W("c2", { a: { type: "done" }, b: null }),
     );
-    expect(note({ action: "get", notes: ["a"] }, { agent })).toBe('{\n "a": {\n  "content": "1",\n  "type": "done"\n }\n}');
-    expect(note({ action: "list" }, { agent })).toBe("No open notes (+1 done)."); // b deleted, a done
+    expect(read(["a"], { agent })).toBe('{\n "a": {\n  "content": "1",\n  "type": "done"\n }\n}');
+    expect(list({ agent })).toBe("1 note:\n- ✅ a"); // b deleted, a done
   });
 
   test("nested objects merge RECURSIVELY; arrays replace wholesale", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { p: { meta: { owner: "ada", prio: 3 }, tags: ["a", "b"] } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { p: { meta: { prio: 4 }, tags: ["c"] } } }), TR("c2", "note"),
+      W("c1", { p: { meta: { owner: "ada", prio: 3 }, tags: ["a", "b"] } }),
+      W("c2", { p: { meta: { prio: 4 }, tags: ["c"] } }),
     );
-    const got = JSON.parse(note({ action: "get", notes: ["p"] }, { agent }));
+    const got = JSON.parse(read(["p"], { agent }));
     expect(got.p.meta).toEqual({ owner: "ada", prio: 4 }); // recursive merge
     expect(got.p.tags).toEqual(["c"]); // wholesale replace
   });
 
-  test("set validates the whole map before any of it can apply", () => {
+  test("the whole map validates before any of it can apply; errors name the valid form", () => {
     const agent = agentOf();
-    expect(() => note({ action: "set", notes: { ok: {}, "": {} } }, { agent })).toThrow(/non-empty title/);
-    expect(() => note({ action: "set", notes: {} }, { agent })).toThrow(/at least one note/);
-    expect(() => note({ action: "set", notes: ["x"] }, { agent })).toThrow(/title → patch map/); // a selector is not a payload
-    expect(() => note({ action: "set", notes: { x: "nope" } }, { agent })).toThrow(/must be an object/);
+    expect(() => write({ ok: {}, "": {} }, { agent })).toThrow(/non-empty title/);
+    expect(() => write({}, { agent })).toThrow(/is empty/);
+    expect(() => write(["x"], { agent })).toThrow(/map each title to a patch object/); // titles alone carry no patch
+    expect(() => write({ x: "nope" }, { agent })).toThrow(/must be an object/);
     const tooMany = Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`t${i}`, {}]));
-    expect(() => note({ action: "set", notes: tooMany }, { agent })).toThrow(/cap is 20/);
+    expect(() => write(tooMany, { agent })).toThrow(/at most 20/);
+    expect(list({ agent })).toBe("No notes.");
+  });
+
+  test("a JSON-text notes map is accepted (liberal input)", () => {
+    const agent = agentOf({ type: 2, content: [{ type: "text", text: "anchor" }] });
+    expect(write(JSON.stringify({ j: { content: "parsed" } }), { agent })).toBe("note saved");
+    expect(read(["j"], { agent })).toContain("parsed");
   });
 
   test("an empty patch creates the note; type is free-form data (no enum)", () => {
-    expect(note({ action: "set", notes: { bare: {} } }, { agent: agentOf() })).toBe("note saved");
-    expect(note({ action: "set", notes: { t: { type: "urgent" } } }, { agent: agentOf() })).toBe("note saved");
+    expect(write({ bare: {} }, { agent: agentOf() })).toBe("note saved");
+    expect(write({ t: { type: "urgent" } }, { agent: agentOf() })).toBe("note saved");
   });
 
   test("the store cap: an existing title merges even at the cap; a new one refuses", () => {
-    const full = Array.from({ length: 100 }, (_, i) => [
-      TC(`s${i}`, "note", { action: "set", notes: { [`n${i}`]: { content: "x" } } }), TR(`s${i}`, "note"),
-    ]).flat();
+    const full = Array.from({ length: 100 }, (_, i) => W(`s${i}`, { [`n${i}`]: { content: "x" } }));
     const capped = agentOf(...full);
-    expect(() => note({ action: "set", notes: { "one more": { content: "x" } } }, { agent: capped })).toThrow(/store is full \(100\/100\)/);
-    expect(note({ action: "set", notes: { n0: { content: "replaced" } } }, { agent: capped })).toBe("note saved");
+    expect(() => write({ "one more": { content: "x" } }, { agent: capped })).toThrow(/store is full \(100\/100\)/);
+    expect(write({ n0: { content: "replaced" } }, { agent: capped })).toBe("note saved");
   });
 
   test("the note is bounded", () => {
     const agent = agentOf();
-    expect(() => note({ action: "set", notes: { ["t".repeat(161)]: {} } }, { agent })).toThrow(/160 or fewer/);
-    expect(() => note({ action: "set", notes: { t: { content: "x".repeat(4097) } } }, { agent })).toThrow(/4096 or fewer/);
+    expect(() => write({ ["t".repeat(161)]: {} }, { agent })).toThrow(/160 or fewer/);
+    expect(() => write({ t: { content: "x".repeat(4097) } }, { agent })).toThrow(/4096 or fewer/);
   });
 });
 
-describe("note tool: get — a uniform title → note map", () => {
+describe("note-read — a uniform title → note map", () => {
   const agent = agentOf(
-    TC("c1", "note", { action: "set", notes: { full: { type: "todo", summary: "the gist", content: "the whole story" } } }), TR("c1", "note"),
+    W("c1", { full: { type: "todo", summary: "the gist", content: "the whole story" } }),
+    W("c2", { other: { content: "second" } }),
   );
   const ctx = { agent };
 
-  test("default returns EVERY field; `only` filters; missing titles report in-line", () => {
-    expect(note({ action: "get", notes: ["full"] }, ctx))
+  test("returns every field; missing titles report in-line", () => {
+    expect(read(["full"], ctx))
       .toBe('{\n "full": {\n  "type": "todo",\n  "summary": "the gist",\n  "content": "the whole story"\n }\n}');
-    expect(note({ action: "get", notes: ["full"], only: ["summary"] }, ctx)).toBe('{\n "full": {\n  "summary": "the gist"\n }\n}');
-    expect(note({ action: "get", notes: ["full", "nope"] }, ctx)).toContain('(no note: nope)');
-    expect(() => note({ action: "get", notes: ["full"], only: "summary" }, ctx)).toThrow(/array of field names/);
-    expect(() => note({ action: "get" }, ctx)).toThrow(/"notes" is required/);
+    expect(read(["full", "nope"], ctx)).toContain("(no note: nope)");
   });
 
-  test('["*"] reads every note; the map form works as a selector (tolerance)', () => {
-    const all = note({ action: "get", notes: ["*"] }, ctx);
-    expect(all).toContain('"full"');
-    expect(note({ action: "get", notes: { full: {} } }, ctx)).toContain('"the gist"'); // keys are the selector
-  });
-});
-
-describe("note tool: remove — selector deletes, ["*"] wipes", () => {
-  test("missing titles report in-line, never an error; ["*"] deletes EVERY note", () => {
-    const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { a: { content: "1" }, b: { content: "2" } } }), TR("c1", "note"),
-    );
-    expect(note({ action: "remove", notes: ["a", "nope"] }, { agent }))
-      .toBe("note removed (no note: nope)");
-    expect(note({ action: "remove", notes: ["*"] }, { agent })).toBe("removed all 1 note"); // the first remove persisted its snapshot: only b still stands
-    expect(note({ action: "remove", notes: ["*"] }, { agent: agentOf() })).toBe("no notes to remove");
+  test("omitted titles, [] or [\"*\"] read every note; a lone string or map infers titles", () => {
+    for (const titles of [undefined, [], ["*"], "*"]) {
+      const all = JSON.parse(read(titles, ctx));
+      expect(Object.keys(all)).toEqual(["full", "other"]);
+    }
+    expect(read("full", ctx)).toContain('"the gist"');
+    expect(read({ full: {} }, ctx)).toContain('"the gist"');
+    expect(read(undefined, { agent: agentOf() })).toBe("No notes.");
   });
 });
 
-describe("note tool: list — open notes with badges, done notes counted", () => {
-  test("badges show; done notes hide behind the footer; an empty store says so", () => {
+describe("note-list — every title with its badge, done notes last", () => {
+  test("badges show; done notes trail the open ones; an empty store says so", () => {
     const agent = agentOf(
-      TC("c1", "note", { action: "set", notes: { plain: {} } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { task: { type: "todo" } } }), TR("c2", "note"),
-      TC("c3", "note", { action: "set", notes: { hot: { type: "in-focus" }, done1: { type: "done" } } }), TR("c3", "note"),
+      W("c1", { plain: {} }),
+      W("c2", { done1: { type: "done" }, task: { type: "todo" } }),
+      W("c3", { hot: { type: "in-focus" } }),
     );
-    expect(note({ action: "list" }, { agent })).toBe("3 notes:\n- plain\n- 🔵 task\n- 🟠 hot\n(+1 done)");
-    expect(note({ action: "list" }, { agent: agentOf() })).toBe("No notes.");
+    expect(list({ agent })).toBe("4 notes:\n- plain\n- 🔵 task\n- 🟠 hot\n- ✅ done1");
+    expect(list({ agent: agentOf() })).toBe("No notes.");
   });
 
   test("an unrecognized type falls back to the 📂 badge", () => {
@@ -250,92 +247,57 @@ describe("note tool: list — open notes with badges, done notes counted", () =>
       { type: "note-store", notes: { typed: { type: "milestone", content: "x" }, plain: { type: "info" } } },
       { type: 2, content: [{ type: "text", text: "anchor" }] },
     );
-    expect(note({ action: "list" }, { agent })).toBe("2 notes:\n- 📂 typed\n- 📂 plain");
+    expect(list({ agent })).toBe("2 notes:\n- 📂 typed\n- 📂 plain");
   });
 });
 
-describe("note tool: regex search over the title and every field", () => {
-  const agent = agentOf(
-    TC("c1", "note", { action: "set", notes: { "deploy checklist": { content: "run migrations first" } } }), TR("c1", "note"),
-    TC("c2", "note", { action: "set", notes: { "db host": { content: "primary at 10.0.0.8", summary: "MIGRATION window Sundays", type: "info" } } }), TR("c2", "note"),
-  );
-
-  test("a pattern matches any field; the matching notes are NAMED", () => {
-    expect(note({ action: "search", pattern: "migrations" }, { agent })).toContain("- deploy checklist (matched: content)");
-    expect(note({ action: "search", pattern: "^db" }, { agent })).toContain("- db host (matched: title)");
-    expect(note({ action: "search", pattern: "sundays" }, { agent })).toContain("- db host (matched: summary)"); // case-insensitive
-    expect(note({ action: "search", pattern: "migration" }, { agent })).toContain("2 match(es)");
-  });
-
-  test("field limits the search; invalid regex is an ordinary error", () => {
-    const limited = note({ action: "search", pattern: "migration", field: "summary" }, { agent });
-    expect(limited).toContain("1 match(es)");
-    expect(limited).toContain("- db host");
-    expect(note({ action: "search", pattern: "zzz" }, { agent })).toBe("No notes match /zzz/.");
-    expect(() => note({ action: "search", pattern: "[" }, { agent })).toThrow(/invalid regular expression/);
-    expect(() => note({ action: "search" }, { agent })).toThrow(/"search" requires "pattern"/);
-  });
-
-  test("a bad action names the enum", () => {
-    expect(() => note({ action: "peek" }, { agent })).toThrow(/set, get, list, remove, search \(got "peek"\)/);
-    expect(() => note({}, { agent })).toThrow(/"action" must be one of/);
-  });
-});
-
-describe("note tool: the agent-owned sticky display (badge-headed titles, done trailing)", () => {
+describe("note tools: the agent-owned sticky display (badge-headed titles, done trailing)", () => {
   /** A bare agent double carrying the real Agent's message surface. */
   const displayAgent = (...messages) => {
     const agent = agentOf(...messages);
     agent._toolMessages = new Map();
-
     return agent;
   };
   // reading the message: any note call derives the store and publishes
   const message = (agent) => {
-    note({ action: "list" }, { agent });
+    list({ agent });
     return agent._toolMessages.get("note") ?? null;
   };
 
   test("mutations refresh the message; EVERY note displays (no hidden notes)", () => {
     const agent = displayAgent(
-      TC("c1", "note", { action: "set", notes: { "ship it": { type: "todo" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { "api key": { type: "secret", content: "sk-..." } } }), TR("c2", "note"),
-      TC("c3", "note", { action: "set", notes: { plain: {} } }), TR("c3", "note"),
+      W("c1", { "ship it": { type: "todo" } }),
+      W("c2", { "api key": { type: "secret", content: "sk-..." } }),
+      W("c3", { plain: {} }),
     );
     // mutations land as recorded calls (the context IS the store)
-    const record = (id, args) => agent.context.update((messages) => { messages.push(TC(id, "note", args), TR(id, "note")); return true; });
+    const record = (id, notes) => agent.context.update((messages) => { messages.push(...W(id, notes)); return true; });
     // transparency: an unrecognized type falls back to the 📂 badge, never hidden
     expect(message(agent)).toBe("🔵 **ship it**\n📂 **api key**\n**plain**");
-    record("c4", { action: "remove", notes: ["plain", "api key"] });
+    record("c4", { plain: null, "api key": null });
     expect(message(agent)).toBe("🔵 **ship it**");
-    record("c5", { action: "remove", notes: ["*"] }); // a full clear in ONE call (the restore would resurrect a lone delete)
+    record("c5", { "ship it": null });
     expect(message(agent)).toBe(null); // nothing left: cleared
   });
 
   test("a long list is published in full — the tool never truncates its own message", () => {
-    const calls = Array.from({ length: 8 }, (_, i) => [
-      TC(`s${i}`, "note", { action: "set", notes: { [`note ${i + 1}`]: {} } }), TR(`s${i}`, "note"),
-    ]).flat();
-    const agent = displayAgent(...calls);
-    const lines = message(agent).split("\n");
-    // every note published, no cap and no overflow row (the TUI's own
-    // per-tool line cap — lib/tui-helpers/view-rows.js infoLines —
-    // decides how much of this actually gets shown)
+    const calls = Array.from({ length: 8 }, (_, i) => W(`s${i}`, { [`note ${i + 1}`]: {} }));
+    const lines = message(displayAgent(...calls)).split("\n");
     expect(lines).toHaveLength(8);
     expect(lines[7]).toBe("**note 8**");
   });
 
   test("a summary trails the title; DONE notes still publish, but trail every OPEN one", () => {
     const agent = displayAgent(
-      TC("c1", "note", { action: "set", notes: { "ship it": { type: "todo", summary: "cut the release" } } }), TR("c1", "note"),
-      TC("c2", "note", { action: "set", notes: { "wrapped up": { content: "x" }, "second open one": { type: "active" } } }), TR("c2", "note"),
-      TC("c3", "note", { action: "set", notes: { "wrapped up": { type: "done" } } }), TR("c3", "note"),
+      W("c1", { "ship it": { type: "todo", summary: "cut the release" } }),
+      W("c2", { "wrapped up": { content: "x" }, "second open one": { type: "active" } }),
+      W("c3", { "wrapped up": { type: "done" } }),
     );
     expect(message(agent)).toBe("🔵 **ship it** — cut the release\n🟠 **second open one**\n✅ **wrapped up**");
   });
 });
 
-describe("note tool: end-to-end through the Agent's tool loop (scripted TEST provider)", () => {
+describe("note tools: end-to-end through the Agent's tool loop (scripted TEST provider)", () => {
   test("IO filters metadata records from the provider-bound context (the model never sees them)", async () => {
     const env = await testEnv();
     let seen = null;
@@ -367,88 +329,89 @@ describe("note tool: end-to-end through the Agent's tool loop (scripted TEST pro
     providerAdd(env, "test", TestPlugin);
     env.settings.providers.test = { provider: "test", url: "test://script", secret: true };
     env.settings.providers.test.script = script;
-    await toolsLoad(env, { dirs: ["./tools"] }); // the real note tool
+    await toolsLoad(env, { dirs: ["./tools"] }); // the real note tools
     const agent = await Agent.create({ env, model: "test/test-model", contextId: "s-note" });
     return { env, agent };
   };
 
-  test("a note saved in one turn is found by list in the NEXT turn (derived mid-run)", async () => {
+  test("a note written in one turn is listed in the NEXT turn; all three tools publish ONE message", async () => {
     const { agent } = await testProviderAgent([
-      [{ toolCall: { name: "note", arguments: { action: "set", notes: { goal: { content: "ship the MVP", type: "in-focus" } } } } }],
-      [{ toolCall: { name: "note", arguments: { action: "list" } } }],
+      [{ toolCall: { name: "note-write", arguments: { notes: { goal: { content: "ship the MVP", type: "in-focus" } } } } }],
+      [{ toolCall: { name: "note-list", arguments: {} } }],
+      [{ toolCall: { name: "note-read", arguments: { titles: ["goal"] } } }],
       [{ text: "noted" }],
     ]);
     const terminal = await agent.run({});
     expect(terminal.type).toBe("done");
     const results = agent.context.messages().filter((m) => m?.type === 4);
-    expect(results).toHaveLength(2);
-    expect(results[0].error).toBeUndefined(); // set ok
+    expect(results).toHaveLength(3);
+    expect(results[0].error).toBeUndefined();
     expect(results[0].content.map((b) => b.text).join("\n")).toBe("note saved");
-    // the SECOND turn's list derived the note from the record of the first
-    const list = results[1].content.map((b) => b.text).join("\n");
-    expect(list).toBe("1 note:\n- 🟠 goal");
-    // the sticky display followed (agent-owned)
+    expect(results[1].content.map((b) => b.text).join("\n")).toBe("1 note:\n- 🟠 goal");
+    expect(results[2].content.map((b) => b.text).join("\n")).toContain("ship the MVP");
+    // the sticky display: keyed by the shared storage name, never per tool
     expect(agent.toolMessages()).toEqual([{ name: "note", text: "🟠 **goal**" }]);
   });
 
-  test("every set call's snapshot record PERSISTS with the session and re-loads as the baseline", async () => {
+  test("every write's snapshot record PERSISTS with the session and re-loads as the baseline", async () => {
     const { env, agent } = await testProviderAgent([
-      [{ toolCall: { name: "note", arguments: { action: "set", notes: { durable: { content: "across resume" } } } } }],
+      [{ toolCall: { name: "note-write", arguments: { notes: { durable: { content: "across resume" } } } } }],
       [{ text: "done" }],
     ]);
     agent.send(USER("go"));
     await agent.run({});
-    expect(note({ action: "list" }, { agent })).toContain("durable");
+    expect(list({ agent })).toContain("durable");
     agent._flush(); // persist: the file carries the snapshot record
     const fileText = await Bun.file(agent.context.file).text();
     expect(fileText).toContain('"type":"note-store"');
     expect(fileText).toContain("durable");
-    // resume: the record rides back in as the baseline (a FRESH agent —
-    // no tool-storage snapshot, so the record is the only source)
-    const { Agent: AgentClass } = await import("../lib/agent.js");
-    const resumed = await AgentClass.create({ env, model: "test/test-model", contextId: agent.context.id });
-    expect(note({ action: "list" }, { agent: resumed })).toContain("durable");
+    // resume: the record rides back in as the baseline (a FRESH agent)
+    const resumed = await Agent.create({ env, model: "test/test-model", contextId: agent.context.id });
+    // the note-list detector republishes under the shared storage name
+    await resumed._toolMessagesDetected;
+    expect(resumed.toolMessages()).toEqual([{ name: "note", text: "**durable**" }]);
+    expect(list({ agent: resumed })).toContain("durable");
   });
 
-  test("a rollback that drops a set call WINS — deliberate edits stay authoritative", async () => {
+  test("a rollback that drops a write WINS — deliberate edits stay authoritative", async () => {
     const { agent } = await testProviderAgent([
-      [{ toolCall: { name: "note", arguments: { action: "set", notes: { scratch: { content: "temporary" } } } } }],
+      [{ toolCall: { name: "note-write", arguments: { notes: { scratch: { content: "temporary" } } } } }],
       [{ text: "done" }],
     ]);
     agent.send(USER("go")); // the context keeps a message after the rollback (never empty)
     await agent.run({});
-    expect(note({ action: "list" }, { agent })).toContain("scratch");
+    expect(list({ agent })).toContain("scratch");
     const at = agent.context.messages().findIndex((m) =>
-      (m?.content ?? []).some((b) => b?.type === "toolCall" && b.name === "note"));
+      (m?.content ?? []).some((b) => b?.type === "toolCall" && b.name === "note-write"));
     expect(at).toBeGreaterThanOrEqual(0);
     agent.context.rollback(at); // the call, its result AND its snapshot record leave the record
-    expect(note({ action: "list" }, { agent })).toBe("No notes."); // the edit won
+    expect(list({ agent })).toBe("No notes."); // the edit won
   });
 
   test("COMPACTION keeps the snapshot records (the store survives)", async () => {
     const { compactContext } = await import("../lib/agent/compact.js");
     const { agent } = await testProviderAgent([
-      [{ toolCall: { name: "note", arguments: { action: "set", notes: { kept: { content: "through compaction" } } } } }],
+      [{ toolCall: { name: "note-write", arguments: { notes: { kept: { content: "through compaction" } } } } }],
       [{ text: "the summary" }], // the compaction turn's summary
       [{ text: "the summary" }],
     ]);
     agent.send(USER("go"));
     await agent.run({});
-    expect(note({ action: "list" }, { agent })).toContain("kept");
+    expect(list({ agent })).toContain("kept");
     const result = await compactContext(agent);
     expect(result.ok).toBe(true);
     expect(agent.context.messages().some((m) => m?.type === "note-store")).toBe(true); // the record survived the rollback
-    expect(note({ action: "list" }, { agent })).toContain("kept"); // the store rebuilt from it
+    expect(list({ agent })).toContain("kept"); // the store rebuilt from it
   });
 
-  test("manual Env.toolCall with an Agent retains note storage and sticky display", async () => {
+  test("manual Env.toolCall with an Agent retains note storage and the shared sticky display", async () => {
     const env = await testEnv();
     await toolsLoad(env, { dirs: ["./tools"] });
     const agent = await Agent.create({ env });
     agent.context.append(USER("manual note"));
     try {
-      expect(await env.toolCall("note", { action: "set", notes: { manual: { type: "todo" } } }, { agent })).toBe("note saved");
-      expect(await env.toolCall("note", { action: "list" }, { agent })).toContain("manual");
+      expect(await env.toolCall("note-write", { notes: { manual: { type: "todo" } } }, { agent })).toBe("note saved");
+      expect(await env.toolCall("note-list", {}, { agent })).toContain("manual");
       expect(toolStorage(agent, "note").snapshot?.owner).toBe(agent.context);
       expect(agent.toolMessages()).toEqual([{ name: "note", text: "🔵 **manual**" }]);
     } finally {
@@ -457,12 +420,14 @@ describe("note tool: end-to-end through the Agent's tool loop (scripted TEST pro
     }
   });
 
-  test("the note tool publishes as a SAFE read-only host tool", async () => {
+  test("the note tools publish as SAFE host tools sharing one storage; the old `note` is gone", async () => {
     const env = await testEnv();
     await toolsLoad(env, { dirs: ["./tools"] });
-    const entry = toolEntry(env, "note");
-    expect(entry).toBeDefined();
-    expect(entry.safe).toBe(true); // available in safe mode and in-process
-    expect(toolEntry(env, "note-set")).toBeUndefined(); // the six old tools are gone
+    for (const name of ["note-list", "note-read", "note-write"]) {
+      const entry = toolEntry(env, name);
+      expect(entry?.safe).toBe(true);
+      expect(entry.storage).toBe("note");
+    }
+    expect(toolEntry(env, "note")).toBeUndefined();
   });
 });

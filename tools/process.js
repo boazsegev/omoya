@@ -1,7 +1,12 @@
 /** List processes started by this Agent's background bash. Read-only. */
 export async function processList(_args = {}, context) {
   if (!context?.background) throw new Error("process-list requires background capabilities");
-  return context.background.list();
+  const processes = context.background.list();
+  if (processes.length === 0) return "No background processes.";
+  return [
+    "id | state | uptime | bytes | command",
+    ...processes.map((entry) => `${entry.id} | ${entry.state} | ${entry.uptime}ms | ${entry.bytes}B | ${JSON.stringify(entry.command)}`),
+  ].join("\n");
 }
 
 /** Read buffered output from one of this Agent's background processes. Read-only. */

@@ -124,7 +124,7 @@ Built-in tools:
 - **Files:** `read` (read and search), `edit` (exact edits with a diff), `edit-undo` (reverse a recorded edit), `write`
 - **Shell:** `bash`, with time limits and cancellation
 - **You:** `question` asks you something
-- **Knowledge:** `skill`, `resource`, `note`
+- **Knowledge:** `skill`, `resource`, `note-list`, `note-read`, `note-write`
 - **Other agents:** `worker-create`, `worker-message`, `worker-close`, `worker-status`, `request`
 - **Outside world:** `mcp`, `web-search`, `web-fetch`
 

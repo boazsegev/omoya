@@ -40,17 +40,21 @@ test("failed resume retains the old agent and the environment", async () => {
   await old.close(); await env.close();
 });
 
-test("new Agent keeps Agent preferences but not pending work", async () => {
+test("new Agent keeps model and thinking but resets permissions without pending work", async () => {
   const env = await testEnv();
   const old = await Agent.create({ env, model: "p/m", contextId: false,
-    folder: env.folder, can: { write: false, delegate: false } });
+    folder: env.folder, can: { write: false, delegate: false, request: true, interact: false, custom: true } });
   old.thinking = "high";
   const fresh = await conversationCreate(old, { kind: "new" });
   expect(fresh.model).toBe(old.model);
-  expect(fresh.can.write).toBe(false);
+  expect(fresh.can.write).toBe(true);
   expect(fresh.thinking).toBe("high");
   expect(fresh.folder).toBe(old.folder);
-  expect(fresh.can.delegate).toBe(false);
+  expect(fresh.can.delegate).toBeUndefined();
+  expect(fresh.can.request).toBeUndefined();
+  expect(fresh.can.interact).toBe(true);
+  expect(fresh.can.custom).toBeUndefined();
+  expect(fresh.context.save).toBe(false);
   expect(fresh.pending).toEqual([]);
   expect(fresh.usage.inputTokens).toBe(0);
   await fresh.close(); await old.close(); await env.close();
@@ -122,16 +126,32 @@ test("question bridge restores conditionally", () => {
   const prior = agent.question;
   const bridge = { ask: () => [] };
   const restore = questionBridgeInstall(agent, bridge);
-  expect(agent.question).toBe(bridge);
+  expect(agent.question).not.toBe(bridge);
+  expect(typeof agent.question.ask).toBe("function");
   restore();
   expect(agent.question).toBe(prior);
   const newer = questionBridgeInstall(agent, bridge);
   restore(); // stale disposer cannot clobber a newer installation of the same object
-  expect(agent.question).toBe(bridge);
+  expect(agent.question).not.toBe(prior);
   newer();
   expect(agent.question).toBe(prior);
   const conditional = questionBridgeInstall(agent, bridge);
   agent.question = prior;
   conditional();
   expect(agent.question).toBe(prior);
+});
+
+test("new without an id inherits the current logging preference", async () => {
+  const env = await testEnv();
+  const logged = await Agent.create({ env, contextId: "app-new-logged" });
+  const fresh = await conversationCreate(logged, { kind: "new" });
+  expect(fresh.context.save).toBe(true);
+  expect(fresh.context.id).toBeTruthy();
+  expect(fresh.context.id).not.toBe(logged.context.id);
+  const anonymous = await conversationCreate(logged, { kind: "new", id: false });
+  expect(anonymous.context.save).toBe(false);
+  const unlogged = await Agent.create({ env, contextId: false });
+  const quiet = await conversationCreate(unlogged, { kind: "new" });
+  expect(quiet.context.save).toBe(false);
+  await quiet.close(); await unlogged.close(); await anonymous.close(); await fresh.close(); await logged.close(); await env.close();
 });

@@ -133,6 +133,7 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 .connection-dot.online { background: var(--status-idle, var(--ok)); }
 .connection-dot.online.working { background: var(--status-busy, var(--accent)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-busy, var(--accent)) 25%, transparent); animation: pulse 1.4s ease-in-out infinite; }
 .connection-dot.disconnected { background: var(--danger); }
+.response-warning { color: var(--warn); font-size: .95rem; line-height: 1; }
 .working-word { display: inline-block; color: var(--status-busy, var(--accent)); animation: var(--working-animation-name, web-wave) var(--working-duration, 850ms) ease-in-out infinite; }
 
 /* ---- sidebar ---- */
@@ -261,7 +262,6 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
   opacity: 0; pointer-events: none; transform: translateY(2px); transition: opacity var(--hover-motion) var(--motion-ease), transform var(--hover-motion) var(--motion-ease);
 }
 .message-row:hover .block-controls, .message-row:focus-within .block-controls { opacity: 1; pointer-events: auto; transform: none; }
-.msg-tool:not([open]) .tool-body .block-controls { display: none; }
 .block-icon { width: 1.75rem; height: 1.75rem; display: grid; place-items: center; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: .9rem; }
 .block-icon:hover { background: var(--raise-2); color: var(--fg); }
 .block-delete:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
@@ -413,7 +413,18 @@ details[open] > summary > .block-preview { display: none; }
 .tool-chip.warn.active { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
 .tool-chip.icon-only { width: 2rem; padding: 0; justify-content: center; }
 .model-chip { color: var(--fg); font-weight: 550; }
-.usage-anchor { position: relative; display: inline-flex; }
+.usage-anchor, .tool-data-anchor { position: relative; display: inline-flex; }
+.tool-data-toggle { min-height: 2rem; padding: 0 .5rem; border: 0; border-radius: 999px; background: none; color: var(--muted); font: .75rem var(--mono); cursor: pointer; }
+.tool-data-toggle:hover { background: var(--raise-2); color: var(--fg); }
+.tool-data-toggle[hidden] { display: none; }
+.tool-data-toggle:focus-visible, .context-meter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tool-data-details { position: absolute; z-index: 8; right: 0; bottom: calc(100% + .4rem); width: min(28rem, calc(100vw - 2rem)); max-height: min(60vh, 32rem); overflow: auto; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg); box-shadow: 0 12px 32px var(--shadow); overflow-wrap: anywhere; }
+.tool-data-details[hidden] { display: none; }
+.tool-data-section + .tool-data-section { border-block-start: 1px solid var(--line); margin-block-start: .7rem; padding-block-start: .7rem; }
+.tool-data-name { margin: 0 0 .35rem; font-size: .78rem; }
+.tool-data-text { font-size: .8rem; line-height: 1.5; }
+.tool-data-text :first-child { margin-block-start: 0; }
+.tool-data-text :last-child { margin-block-end: 0; }
 .context-meter { display: inline-flex; align-items: center; gap: .35rem; min-height: 2rem; padding: 0 .5rem; border: 0; border-radius: 999px; background: none; color: var(--muted); font: .72rem var(--mono); }
 .context-meter:hover, .usage-viewer:hover { background: var(--raise-2); }
 .usage-viewer { min-width: 2rem; min-height: 2rem; border: 0; border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }
@@ -498,6 +509,12 @@ dialog.picker .panel-body { padding: 0; gap: 0; display: flex; flex-direction: c
 .segment.active { background: var(--surface); color: var(--fg); box-shadow: 0 1px 3px var(--shadow); font-weight: 600; }
 .inline-form { display: flex; gap: .4rem; }
 .inline-form input { flex: 1; min-width: 0; }
+.compaction-form { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.compaction-form input { width: 8rem; min-width: 0; }
+.compaction-form select { max-width: 13rem; }
+.compaction-form .field-error { flex-basis: 100%; color: var(--danger, #b83232); }
+.compaction-form .field-error:empty { display: none; }
+.compaction-form input[aria-invalid="true"] { outline: 2px solid var(--danger, #b83232); }
 .endpoint-list { margin: 0; padding: 0; list-style: none; display: grid; gap: .35rem; }
 .endpoint-row { display: flex; align-items: center; gap: .5rem; padding: .45rem .6rem; border: 1px solid var(--line); border-radius: var(--radius-s); }
 .endpoint-text { flex: 1; min-width: 0; display: grid; }
@@ -680,7 +697,9 @@ dialog.panel.context-viewer { height: min(85vh, 48rem); height: min(85dvh, 48rem
   .tool-chip:not(.model-chip) .label { display: none; }
   .meter-text { display: none; }
   /* Anchor wide details to the composer, not the inset, icon-only meter. */
-  .usage-anchor { position: static; }
+  .usage-anchor, .tool-data-anchor { position: static; }
+  .tool-data-toggle { max-width: 5.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool-data-details { right: .55rem; max-width: calc(100% - 1.1rem); }
   .usage-details { right: .55rem; max-width: calc(100% - 1.1rem); }
   .settings-row { grid-template-columns: 1fr; }
   #toast-region { bottom: 6.5rem; }

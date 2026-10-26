@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { fakeIO, testEnv, USER } from "./fakes.js";
+import TestProvider from "../providers/test.js";
+import { authSetOf, providerAdd } from "./env-internals.js";
 
 function deferred() {
   let resolve;
@@ -16,6 +18,45 @@ async function until(predicate) {
   throw new Error("timed out awaiting lifecycle transition");
 }
 
+async function settlement(promise, ms = 250) {
+  return Promise.race([
+    Promise.resolve(promise).then(() => "settled", () => "rejected"),
+    Bun.sleep(ms).then(() => "pending"),
+  ]);
+}
+
+async function oauthEnvironment() {
+  const env = await testEnv();
+  providerAdd(env, "test", TestProvider);
+  env.settings.retry = { attempts: 1 };
+  env.settings.providers.p.script = [[{ text: "done" }]];
+  env.settings.providers.p.oauth = { tokenUrl: "https://oauth.test/token", clientId: "test" };
+  authSetOf(env, "p", { auth: { type: "oauth", access: "expired", token: "expired", refresh: "refresh", expires: Date.now() - 1 } });
+  return env;
+}
+
+function stallOAuthFetch() {
+  const originalFetch = globalThis.fetch;
+  let refreshStarted;
+  let rejectRefresh;
+  const stall = {
+    started: new Promise((resolve) => { refreshStarted = resolve; }),
+    signal: undefined,
+    release(message) { rejectRefresh?.(new Error(message)); },
+    restore() { globalThis.fetch = originalFetch; },
+  };
+  globalThis.fetch = (_url, init) => {
+    stall.signal = init.signal;
+    refreshStarted();
+    return new Promise((_, reject) => {
+      rejectRefresh = reject;
+      if (init.signal?.aborted) reject(init.signal.reason);
+      else init.signal?.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    });
+  };
+  return stall;
+}
+
 function ownedIO(gate, { failure } = {}) {
   const io = fakeIO(async () => ({ type: "done" }));
   io.close = async () => {
@@ -26,6 +67,66 @@ function ownedIO(gate, { failure } = {}) {
   };
   return io;
 }
+
+test("cancellation settles a close-marked agent stalled in OAuth refresh", async () => {
+  const env = await oauthEnvironment();
+  const stall = stallOAuthFetch();
+  let agent;
+  try {
+    agent = await Agent.create({ env, model: "p/test-model" });
+    const turn = agent.send(USER("work"));
+    expect(await settlement(stall.started)).toBe("settled");
+    const closing = agent.close();
+    expect(agent).toMatchObject({ busy: true, closeMarked: true, closed: false });
+    expect(agent._activeIO.state).toBe("sending");
+    expect(env.agents()).toContain(agent);
+
+    const cancelling = agent.cancel();
+    const cancelled = await settlement(cancelling);
+    // Release a broken implementation too, so the failing regression never leaks a zombie.
+    if (cancelled !== "settled") stall.release("test release");
+    const [terminal] = await Promise.allSettled([turn, closing, cancelling]);
+    expect(cancelled).toBe("settled");
+    expect(stall.signal).toBeInstanceOf(AbortSignal);
+    expect(terminal.status).toBe("fulfilled");
+    expect(terminal.value).toMatchObject({ type: "error", cancelled: true });
+    expect(agent).toMatchObject({ busy: false, closeMarked: true, closed: true });
+    expect(env.agents()).not.toContain(agent);
+  } finally {
+    stall.release("test cleanup");
+    stall.restore();
+    if (agent && !agent.closed) await agent.cancel().catch(() => {});
+    if (agent && !agent.closed) await agent.close().catch(() => {});
+    await env.close();
+  }
+});
+
+test("the overall timeout settles graceful close during OAuth refresh", async () => {
+  const env = await oauthEnvironment();
+  const stall = stallOAuthFetch();
+  env.settings.providers.p.timeout = 20;
+  let agent;
+  try {
+    agent = await Agent.create({ env, model: "p/test-model" });
+    const turn = agent.send(USER("work"));
+    expect(await settlement(stall.started)).toBe("settled");
+    const closing = agent.close();
+    const closed = await settlement(closing);
+    if (closed !== "settled") stall.release("test release");
+    const [terminal] = await Promise.allSettled([turn, closing]);
+    expect(closed).toBe("settled");
+    expect(terminal.status).toBe("fulfilled");
+    expect(terminal.value).toMatchObject({ type: "error", error: expect.stringContaining("overall cap") });
+    expect(agent).toMatchObject({ busy: false, closeMarked: true, closed: true });
+    expect(env.agents()).not.toContain(agent);
+  } finally {
+    stall.release("test cleanup");
+    stall.restore();
+    if (agent && !agent.closed) await agent.cancel().catch(() => {});
+    if (agent && !agent.closed) await agent.close().catch(() => {});
+    await env.close();
+  }
+});
 
 test("idle close marks immediately but repeated calls wait for owned IO and context release", async () => {
   const env = await testEnv();

@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { turnReadoutParts, formatQuotaText } from "../lib/app/tui/status-data.js";
 import { modelParts, sortedQuotaEntries } from "../lib/app/shared/format.js";
+import { questionBridgeInstall } from "../lib/app/host/question-bridge.js";
 
 test("modelParts: splits the first slash only and leaves missing selection empty", () => {
   expect(modelParts("endpoint/team/model")).toEqual({ endpoint: "endpoint", model: "team/model" });
@@ -184,6 +185,26 @@ test("statusView: the plan (label, usage, reset) shows once — in the readout b
   expect(lines).toContain("500/1000 ▰▰▰▰▱▱▱▱ 50.0% · Max: 5h 2/100 (2.0%) · resets in 2h");
   expect(lines).not.toContain("plan");
   expect(lines.match(/Max/g)).toHaveLength(1);
+});
+
+test("statusData: a background question warns alongside the working animation until answered", async () => {
+  const { statusData } = await import("../lib/app/tui/status-data.js");
+  const { statusView } = await import("../lib/app/tui/status-view.js");
+  const { layoutView } = await import("../lib/app/gtui/layout.js");
+  const viewed = { ...agentStub(), busy: true };
+  const background = { ...agentStub(), busy: true, question: null };
+  let answer;
+  const dispose = questionBridgeInstall(background, { ask: () => new Promise((resolve) => { answer = resolve; }) });
+  try {
+    const request = background.question.ask([]);
+    const data = statusData({ agent: viewed, agents: [viewed, background], cwd: "/w" });
+    expect(data.waitingForUser).toBe(true);
+    const lines = layoutView(statusView(data), { width: 100, height: 6 }).snapshot.lines.join("\n");
+    expect(lines).toContain("● working ⚠️");
+    answer([]);
+    await request;
+    expect(statusData({ agent: viewed, agents: [viewed, background] }).waitingForUser).toBe(false);
+  } finally { dispose(); }
 });
 
 test("statusData: global state — one working agent outranks another's stale disconnect", async () => {

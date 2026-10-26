@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { layoutView } from "../lib/app/gtui/layout.js";
 import { createControls } from "../lib/app/gtui/controls.js";
 import { activeAgentMenuOptions, addAgentMenuOptions, masterMenuOptions, modelMenuOptions } from "../lib/app/tui/menu-sources.js";
+import { questionBridgeInstall } from "../lib/app/host/question-bridge.js";
 import { buildMenuItems, buildAutocompactItems, buildSessionAddItems, buildSessionAddModelItems, buildSessionCloseItems } from "../lib/app/tui/menu-data.js";
 import { resolveMenuAction } from "../lib/app/tui/menu-actions.js";
 import { openMenu, previewMenu } from "../lib/app/tui/overlay-controller.js";
@@ -41,6 +42,22 @@ describe("active-agent menu snapshots", () => {
       expect.objectContaining({ label: "  same | 🟠 working", preview: { type: "agent-description", description: "First child." } }),
       expect.objectContaining({ label: "beta" }),
     ]);
+  });
+
+  test("background agent waiting for a response is marked in the switch menu", async () => {
+    const background = agent("background", null, { busy: true });
+    background.question = null;
+    let answer;
+    const dispose = questionBridgeInstall(background, { ask: () => new Promise((resolve) => { answer = resolve; }) });
+    try {
+      const request = background.question.ask([]);
+      const options = activeAgentMenuOptions({ agents: () => [background] }, background);
+      expect(buildMenuItems({ agents: options }).find((row) => row.value?.type === "agent.switch")?.label).toContain("⚠️");
+      answer([]);
+      await request;
+      const settled = activeAgentMenuOptions({ agents: () => [background] }, background);
+      expect(buildMenuItems({ agents: settled }).find((row) => row.value?.type === "agent.switch")?.label).not.toContain("⚠️");
+    } finally { dispose(); }
   });
 
   test("sorts active agent names again after a rename", () => {

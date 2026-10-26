@@ -77,6 +77,13 @@ describe("bash tool — current API execution boundaries", () => {
 });
 
 describe("bash tool", () => {
+  test("publishes the current foreground and background command contract", () => {
+    const info = toolDescription().bash;
+    expect(info.description).toContain("return output and any exit code");
+    expect(info.inputSchema.required).toEqual(["command"]);
+    expect(info.inputSchema.properties.background.description).toContain("process-list/process-output");
+  });
+
   test("runs normal commands and reports output", async () => {
     expect(await bash({ command: "echo hello" })).toBe("hello");
   });

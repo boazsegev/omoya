@@ -7,7 +7,7 @@
 // (non-message records quietly ignored).
 import { NAMES } from "../lib/namespace.js";
 import { defaultSettingsDir } from "../lib/env/paths.js";
-import { describe, expect, test, afterEach } from "bun:test";
+import { describe, expect, test, afterEach, spyOn } from "bun:test";
 import { rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { resolve, basename, join } from "node:path";
 import { Context } from "../lib/context.js";
@@ -663,6 +663,58 @@ describe("Context.list / latest (session folder overview)", () => {
       await store.close();
       expect(Context.list({ dir: ROOT }).find((s) => s.id === store.id).preview).toBe(preview);
     }
+  });
+
+  test("an Assistant message before the first User message (a compacted session) is the preview", async () => {
+    const compacted = new Context({ id: "compacted", dir: ROOT });
+    compacted.append({ type: 1, content: [{ type: "text", text: "system prompt" }] });
+    compacted.append({ type: 3, content: [{ type: "text", text: "[context compacted — the summary of the earlier conversation follows]\nRefactored the parser.\n\n[end of summary — continue the work based on it]" }] });
+    compacted.append(USER("next question"));
+    await compacted.close();
+    const thinking = new Context({ id: "thinking-only", dir: ROOT });
+    thinking.append({ type: 3, content: [{ type: "thinking", text: "pondering" }] });
+    thinking.append(USER("the real question"));
+    await thinking.close();
+    for (const list of [Context.list({ dir: ROOT }), await Context.listAsync({ dir: ROOT })]) {
+      expect(list.find((s) => s.id === "compacted").preview).toBe("Refactored the parser.");
+      expect(list.find((s) => s.id === "thinking-only").preview).toBe("the real question"); // no text: scan on
+    }
+  });
+
+  test("preview capture spans read chunks and handles a torn final candidate", async () => {
+    mkdirSync(ROOT, { recursive: true });
+    const id = "chunked-preview";
+    const header = `${JSON.stringify({ type: "session-metadata", id, cwd: process.cwd() })}\n`;
+    const user = JSON.stringify(USER("preview across chunks"));
+    const token = '"text":"';
+    const emptySystem = JSON.stringify({ type: 1, content: [{ type: "text", text: "" }] });
+    const tokenAt = 64 * 1024 - 3;
+    const padding = tokenAt - Buffer.byteLength(header) - emptySystem.length - 1 - user.indexOf(token);
+    const system = JSON.stringify({ type: 1, content: [{ type: "text", text: "x".repeat(padding) }] });
+    const data = header + system + "\n" + user; // no final newline: a torn tail still previews
+    expect(Buffer.byteLength(header) + Buffer.byteLength(system) + 1 + user.indexOf(token)).toBe(tokenAt);
+    writeFileSync(join(ROOT, "chunked.jsonl"), data);
+    const [listed] = await Context.listAsync({ dir: ROOT });
+    expect(listed).toMatchObject({ id, messages: 1, preview: "preview across chunks" });
+  });
+
+  test("preview scanning does not concatenate text-less candidate lines", async () => {
+    const store = new Context({ id: "tokenless-candidates", dir: ROOT });
+    for (let index = 0; index < 8; index++) {
+      store.append({ type: 3, content: [{ type: "thinking", text: `thought ${index}` }] });
+      store.append({ type: 2, content: [{ type: "binary", mime: "application/octet-stream", content: "AA==" }] });
+    }
+    store.append(USER("the visible question"));
+    await store.close();
+    const concat = spyOn(Buffer, "concat");
+    let listed;
+    let concatenations;
+    try {
+      listed = Context.list({ dir: ROOT });
+      concatenations = concat.mock.calls.length;
+    } finally { concat.mockRestore(); }
+    expect(concatenations).toBe(0);
+    expect(listed.find((item) => item.id === store.id)).toMatchObject({ messages: 16, preview: "the visible question" });
   });
 
   test("lists carry a non-default agent name; default agent-N names stay out", async () => {

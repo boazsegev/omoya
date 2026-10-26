@@ -108,6 +108,44 @@ describe("atomic normalized activation", () => {
 });
 
 describe("skill activation lifecycle", () => {
+  test("compaction refreshes available skills in system guidance while retaining unavailable ones", async () => {
+    put("base", "web", "updated body");
+    const old = env.skillSection({ name: "web", body: "old body" });
+    const missing = env.skillSection({ name: "missing", body: "retained body" });
+    const context = new Context({ messages: [Context.messageSystem(`Before\n${old}\nBetween\n${missing}\nAfter`), USER("work")] });
+    const agent = {
+      context, env, _append: (message) => agent.context.append(message),
+      _contextReplace: (next) => { agent.context = next; },
+      _emit: () => {}, pending: [],
+    };
+    try {
+      await compactContext(agent, "", async () => {
+        context.append(Context.messageAssistant([{ type: "text", text: "summary" }]));
+        return { type: "done" };
+      });
+      const guidance = agent.context.at(0).content[0].text;
+      expect(guidance).toContain(env.skillSection(env.skills().get("web")));
+      expect(guidance).not.toContain("old body");
+      expect(guidance).toContain(`Between\n${missing}\nAfter`);
+      expect(guidance).toStartWith("Before\n");
+      expect(loadedSkills(agent.context)).toEqual(new Set(["web", "missing"]));
+    } finally { await context.close(); if (agent.context !== context) await agent.context.close(); }
+  });
+  test("compaction keeps existing guidance if skill discovery fails", async () => {
+    const original = env.skills;
+    env.skills = () => { throw new Error("unavailable registry"); };
+    const section = env.skillSection({ name: "web", body: "retained body" });
+    const context = new Context({ messages: [Context.messageSystem(section), USER("work")] });
+    const agent = { context, env, _append: (message) => agent.context.append(message),
+      _contextReplace: (next) => { agent.context = next; }, _emit: () => {}, pending: [] };
+    try {
+      await compactContext(agent, "", async () => {
+        context.append(Context.messageAssistant([{ type: "text", text: "summary" }]));
+        return { type: "done" };
+      });
+      expect(agent.context.at(0).content[0].text).toBe(section);
+    } finally { env.skills = original; await context.close(); if (agent.context !== context) await agent.context.close(); }
+  });
   test("prefilled guidance counts as active even when the file disappears", async () => {
     const context = new Context({ messages: [Context.messageSystem(env.skillSection({ name: "web build", body: "prefilled" }))] });
     const loaded = await skill({ names: " web build " }, { env, loadedSkills: () => loadedSkills(context) });
