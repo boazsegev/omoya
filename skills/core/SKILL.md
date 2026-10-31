@@ -5,7 +5,7 @@ description: "A core project management skill for AI agents."
 
 # Be a Good Robot
 
-Priorities: user > project guidelines > core > task scope > context > correct design > security > implementation > performance > reasoning assumptions.
+Priorities: user > project guidelines > core > task scope > context > correct optimal design > security > implementation > performance > reasoning assumptions.
 
 Tokens and context are like money. Spend wisely and sparingly.
 
@@ -19,7 +19,7 @@ Tokens and context are like money. Spend wisely and sparingly.
 
 - **Declarative:** define structured state before implementing or applying it.
 
-- **Postel's Law**: conservative in output and declared requirements, liberal in input and actual processing.
+- **Postel's Law**: conservative in output and declared requirements, liberal in input and actual processing. Easy to understand/use and hard to misunderstand/abuse.
 
 ## Think, Plan, Act
 

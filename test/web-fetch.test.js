@@ -219,6 +219,50 @@ console.log(x);</code></pre>
     expect(second).toContain("Retrieved: 2026-09-24T12:00:00.000Z");
   });
 
+  test("refresh bypasses a warm cache entry and stores the fresh result", async () => {
+    let count = 0;
+    const fetchImpl = makeFetch({
+      "https://refresh.example/page": () => new Response(`call ${++count}`, { headers: { "content-type": "text/plain" } }),
+    });
+    const context = { env: { settings: { web: { limit: { calls: 100 }, throttle: { stepMs: 0 } } } } };
+    const options = { fetch: fetchImpl, now: fixedNow };
+    expect(await packageFetch({ url: "https://refresh.example/page" }, context, options)).toEndWith("call 1");
+    expect(await packageFetch({ url: "https://refresh.example/page", refresh: true }, context, options)).toEndWith("call 2");
+    expect(await packageFetch({ url: "https://refresh.example/page" }, context, options)).toEndWith("call 2");
+    expect(fetchImpl.calls).toHaveLength(2);
+  });
+
+  test("cacheSeconds 0 stores nothing, even with a max-age response", async () => {
+    let count = 0;
+    const fetchImpl = makeFetch({
+      "https://nocache.example/page": () => new Response(`call ${++count}`, { headers: { "content-type": "text/plain", "cache-control": "max-age=600" } }),
+    });
+    const web = { limit: { calls: 100 }, throttle: { stepMs: 0 } };
+    const options = { fetch: fetchImpl, now: fixedNow };
+    await packageFetch({ url: "https://nocache.example/page" }, { env: { settings: { web: { ...web, fetch: { cacheSeconds: 0 } } } } }, options);
+    // Caching re-enabled: a stored entry would be served; none must exist.
+    expect(await packageFetch({ url: "https://nocache.example/page" }, { env: { settings: { web } } }, options)).toEndWith("call 2");
+    expect(fetchImpl.calls).toHaveLength(2);
+  });
+
+  test("defaults cache 64 entries for 600 seconds", async () => {
+    const fetchImpl = async (url) => new Response(`body ${url}`, { headers: { "content-type": "text/plain" } });
+    let fetches = 0;
+    const counted = async (url, init) => { fetches += 1; return fetchImpl(url, init); };
+    const context = { env: { settings: { web: { limit: { calls: 1_000 }, throttle: { stepMs: 0 } } } } };
+    const at = (seconds) => () => new Date(Date.parse("2026-09-24T12:00:00.000Z") + seconds * 1_000);
+    for (let i = 0; i < 64; i++) await packageFetch({ url: `https://defaults.example/${i}` }, context, { fetch: counted, now: at(0) });
+    await packageFetch({ url: "https://defaults.example/0" }, context, { fetch: counted, now: at(599) });
+    expect(fetches).toBe(64); // all 64 retained; entry 0 still fresh at 599s
+    await packageFetch({ url: "https://defaults.example/64" }, context, { fetch: counted, now: at(1) }); // evicts LRU entry 1
+    await packageFetch({ url: "https://defaults.example/1" }, context, { fetch: counted, now: at(1) });
+    expect(fetches).toBe(66);
+    expect(await packageFetch({ url: "https://defaults.example/3" }, context, { fetch: counted, now: at(599) })).toEndWith("body https://defaults.example/3");
+    expect(fetches).toBe(66); // entry 3 still cached at 599s
+    await packageFetch({ url: "https://defaults.example/4" }, context, { fetch: counted, now: at(600) }); // cached at 0s, expired at 600s
+    expect(fetches).toBe(67);
+  });
+
   test("web.readability false forces the built-in extractor", async () => {
     const fetchImpl = makeFetch({
       "https://disabled.example/page": { headers: { "content-type": "text/html" }, body: "<html><body><main><h1>Built in</h1><p>Fallback body</p></main></body></html>" },

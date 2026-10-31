@@ -1,4 +1,4 @@
-# API (2026-10-30)
+# API (2026-11-16)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -281,7 +281,7 @@ This file is executed, not imported, and must stay runtime-agnostic
 
 Source: `lib/agent/tool-exec.js`
 
-resultContent(value): Normalize a tool return value into result content blocks — the full
+resultContent(value, name): Normalize a tool return value into result content blocks — the full
 tool-answer contract. A tool may return:
   - a string → one text block;
   - an array of content blocks → used as-is;
@@ -293,6 +293,10 @@ tool-answer contract. A tool may return:
     context viewers (handled by the caller, not here).
 Throwing fails the call: the error message becomes the tool-result
 error content (error: true on the result message).
+An EMPTY answer ("", [], {content: []}, only empty text blocks) is a
+tool defect: no provider dialect carries a contentless result, so it
+would be dropped and later repaired as "interrupted". It becomes
+"(no output)" and emits an OMOYA_EMPTY_TOOL_RESULT warning naming the tool.
 
 async executeToolCall(agent, call, { notify = false } = {…}): Execute one tool call. NEVER throws — failures become tool-result
 error messages for the model.
@@ -1110,6 +1114,11 @@ Source: `tools/web.js`; flags: safe, trusted
     "url": {
       "type": "string",
       "description": "HTTP(S) URL without embedded credentials"
+    },
+    "refresh": {
+      "type": "boolean",
+      "default": false,
+      "description": "Bypass the recent-fetch cache and fetch the page again."
     }
   },
   "required": [
@@ -3370,7 +3379,7 @@ provider configuration, including after this IO is cached.
 - `options.env` (object) — Env registry; required.
 - `options.model` (string) — Registered `<endpoint>/<model>` selector.
 - `[options.tools]` (string[]) — Tool selection: omitted or ["*"] means all, [] none, otherwise the named subset.
-- `[options.safe=false]` (boolean) — Whether to publish read-only tools only.
+- `[options.safe=false]` (boolean) — Whether to publish read-only tools only. Agent always passes false: safe mode limits execution, never publication.
 - `[options.onData]` ((event:object)=>void) — Optional default data callback.
 - `[options.onLog]` ((line:string)=>void) — Optional default log callback.
 - `[options.remember=true]` (boolean) — Whether Env.connection records this pair as last used.

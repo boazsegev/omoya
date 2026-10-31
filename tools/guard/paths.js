@@ -23,6 +23,12 @@ function isDevelopmentPath(token, cwd) {
   return [...TEMP_ROOTS, resolve(tmpdir())].some((root) => target === root || target.startsWith(`${root}${sep}`));
 }
 
+// Escape suffixes in source and shell text do not revoke a convention's
+// exemption. Keep this separate from checks of actual filesystem targets.
+function isDevelopmentReference(token, cwd) {
+  return isDevelopmentPath(token.replace(/(?:\\[A-Za-z\\]?)+$/, ""), cwd);
+}
+
 function policyError(message) { return new Error(message); }
 
 function escapesRoot(token, root) {
@@ -69,6 +75,9 @@ async function existingOutsidePath(token, cwd) {
   const target = token.startsWith("~/") ? resolve(homedir(), token.slice(2)) : resolve(root, token);
   let actual;
   try { actual = await realpath(target); } catch { return false; }
+  // Judge what the filesystem resolved, not the spelling: some platforms
+  // resolve escaped spellings onto an exempt device or temp path.
+  if (isDevelopmentPath(actual, root)) return false;
   const rel = relative(root, actual);
   return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
@@ -103,7 +112,7 @@ export async function findWriteTraversal(content, { cwd = process.cwd(), max = 5
   for (const [index, text] of String(content).split("\n").entries()) {
     if (index === 0 && text.startsWith("#!")) continue;
     for (const token of contentPaths(text)) {
-      if (isDevelopmentPath(token, cwd ?? process.cwd()) || (!isAbsolute(token) && isImportMetaUrlPath(text, token))) continue;
+      if (isDevelopmentReference(token, cwd ?? process.cwd()) || (!isAbsolute(token) && isImportMetaUrlPath(text, token))) continue;
       const kind = await contentViolation(token, cwd);
       if (kind) { found.push({ line: index + 1, token, text, kind }); break; }
     }
@@ -146,7 +155,8 @@ export async function enforceContentPolicy({ path, content, ask = false, context
 async function commandTokenViolation(value, root, boundary = root) {
   if (value === "" || value.includes("*")) return false; // globs carry no single path
   // Development conventions are exempt from the trip-wire, not the kernel jail.
-  if (isDevelopmentPath(value, root)) return false;
+  // A trailing escape suffix (backslash-n, double backslash) keeps the exemption.
+  if (isDevelopmentReference(value, root)) return false;
   const target = resolve(root, value);
   // Visible paths within either tree are permitted for reading. The OS
   // sandbox, not this shell scanner, restricts writes to the Agent folder.
@@ -187,7 +197,9 @@ export async function findCommandTraversal(command, { cwd = process.cwd(), bound
   const root = resolve(cwd);
   const limit = resolve(boundary);
   const found = [];
-  for (const raw of pathTokens(command)) {
+  // Bash deletes backslash-newline before word splitting; a continuation
+  // glued to an exempt path must not hide its exemption.
+  for (const raw of pathTokens(String(command).replace(/\\\r?\n/g, ""))) {
     const token = bareToken(raw).replace(/^[0-9]*[<>]+[<>]?/, "");
     const candidates = [token];
     const equal = token.indexOf("=");

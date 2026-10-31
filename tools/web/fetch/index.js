@@ -9,8 +9,8 @@ const DEFAULT_LIMITS = Object.freeze({
   maxRedirects: 8,
   maxBytes: 5_000_000,
   maxCharacters: 50_000,
-  cacheSeconds: 300,
-  cacheMaxEntries: 32,
+  cacheSeconds: 600,
+  cacheMaxEntries: 64,
 });
 
 const HARD_LIMITS = Object.freeze({
@@ -47,7 +47,8 @@ export function __resetPackageFetchForTests() {
 
 /**
  * Fetches one HTTP(S) URL and returns a textual provenance envelope plus body.
- * @param {{url: string}} args Normalized package args.
+ * @param {{url: string, refresh?: boolean}} args Normalized package args;
+ *   `refresh` skips the cache read but still stores the fresh result.
  * @param {{signal?: AbortSignal, env?: {settings?: object}}} [context]
  * @param {{fetch?: Function, now?: Function, importModule?: Function, readability?: object|null}} [options]
  * @returns {Promise<string>}
@@ -67,7 +68,7 @@ export async function packageFetch(args, context = {}, options = {}) {
   // successful calls pause per the shared graded throttle — never an error.
   // The remaining deadline bounds any capacity wait / pause to half of it.
   const budgetMs = webBudgetMs(context);
-  const cached = readCache(cacheKey, clock, limits);
+  const cached = args?.refresh === true ? undefined : readCache(cacheKey, clock, limits);
   if (cached) return renderEnvelope(cached, limits.maxCharacters);
   const rate = webRateSettings(context.env?.settings?.web);
   const leave = await rateEnter(rate, clock, context.signal, options.sleep, budgetMs, "web-fetch");
@@ -556,6 +557,7 @@ function readCache(key, clock, limits) {
 }
 
 function writeCache(key, value, response, clock, limits) {
+  if (limits.cacheSeconds === 0) return;
   const ttl = cacheTtlSeconds(response.headers?.get?.("cache-control"), limits.cacheSeconds);
   if (ttl <= 0) return;
   CACHE.set(key, { value, expiresAt: clockTime(clock) + ttl * 1_000 });

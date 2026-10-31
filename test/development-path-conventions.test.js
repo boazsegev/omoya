@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { findTraversal, findWriteTraversal, findCommandTraversal } from "../tools/guard/paths.js";
 import { write } from "../tools/write.js";
 import { read } from "../tools/read/read.js";
@@ -55,6 +56,47 @@ describe("development path conventions", () => {
     await write({ path: "script.sh", content: script }, context);
     expect(readFileSync(`${ROOT}/script.sh`, "utf8")).toBe(script);
     expect(await bash({ command: script }, context)).toBe(temporaryRoots[0]);
+  });
+
+  test("line continuations and escape suffixes keep exemptions; real outside paths still refuse", async () => {
+    const context = setup();
+    const cwd = context.env.folder;
+    const B = "\\";
+    const exempt = [...devices.slice(0, 3), systemPath("dev", "fd", "3"), `${temporaryRoots[0]}/x`];
+    for (const path of exempt) {
+      for (const spelling of [`${path}${B}\n  && true`, `"${path}${B}\n"`, `${path}${B}n`, `${path}${B}${B}`, `${path}${B}`]) {
+        expect(await findCommandTraversal(`cmd 2>${spelling}`, { cwd })).toEqual([]);
+        expect(await findWriteTraversal(`x = \`${spelling}\`;`, { cwd })).toEqual([]);
+      }
+    }
+    expect(await findCommandTraversal(`cmd ${devices[0].slice(0, -2)}${B}\nll`, { cwd })).toEqual([]);
+    const line = `printf 'a${B}${B}${B}n' ${B}\n  >${devices[0]}`;
+    await write({ path: "cont.sh", content: line }, context);
+    writeFileSync(`${ROOT}/cont.js`, "old");
+    await edit({ path: "cont.js", edits: [{ oldText: "old", newText: `// ${devices[0]}${B}${B} ${devices[0]}${B}n` }] }, context);
+    expect(readFileSync(`${ROOT}/cont.sh`, "utf8")).toBe(line);
+    // Continuations never hide a real outside reference.
+    expect(await findCommandTraversal(`cat ${systemPath("etc", "hosts")}${B}\n`, { cwd })).not.toEqual([]);
+    expect(await findCommandTraversal(`cat ..${B}\n/..${B}\n/x`, { cwd })).not.toEqual([]);
+  });
+
+  test("escaped device content does not depend on inherited descriptor targets", () => {
+    // Isolate the module mock so other tests keep the real filesystem.
+    const script = `
+      import { mock } from "bun:test";
+      const fs = await import("node:fs/promises");
+      mock.module("node:fs/promises", () => ({ ...fs, realpath: async () => "/outside/terminal" }));
+      const { findWriteTraversal } = await import("./tools/guard/paths.js");
+      const slash = String.fromCharCode(92);
+      for (const suffix of [slash, slash + "n", slash + slash]) {
+        const content = "x = " + String.fromCharCode(96) + "/dev/stdin" + suffix + String.fromCharCode(96) + ";";
+        const violations = await findWriteTraversal(content);
+        if (violations.length) throw new Error(JSON.stringify(violations));
+      }
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 10000 });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
   });
 
   test("exceptions are component-bounded and do not relax real destination guards", async () => {

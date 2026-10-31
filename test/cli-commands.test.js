@@ -735,16 +735,16 @@ describe("cli-commands: /agent-safe", () => {
     return { agent, commands, lines };
   };
 
-  test("shows the mode, toggles it, and reports the published tool count", async () => {
+  test("shows the mode, toggles it, and reports published and runnable tool counts", async () => {
     const { agent, commands, lines } = await setup();
     await commands.handle("/agent-safe");
-    expect(lines.at(-1)).toBe(`safe mode: ${agent.can.write ? "off" : "on (read-only tools only)"}`);
+    expect(lines.at(-1)).toBe(`safe mode: ${agent.can.write ? "off" : "on (runs read-only tools only)"}`);
     await commands.handle("/agent-safe on");
     expect(agent.can.write).toBe(false);
-    expect(lines.at(-1)).toContain("safe mode: on — 1 tool(s) published");
+    expect(lines.at(-1)).toContain("safe mode: on — 3 tool(s) published, 1 runnable");
     await commands.handle("/agent-safe off");
     const canWrite = agent.can.write;
-    expect(lines.at(-1)).toContain(`safe mode: ${canWrite ? "off — 3" : "on — 1"} tool(s) published`);
+    expect(lines.at(-1)).toContain(`safe mode: ${canWrite ? "off — 3 tool(s) published, 3" : "on — 3 tool(s) published, 1"} runnable`);
     await commands.handle("/agent-safe bogus");
     expect(lines.at(-1)).toContain("usage: /agent-safe");
   });

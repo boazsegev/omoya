@@ -364,12 +364,13 @@ details[open] > summary > .block-preview { display: none; }
 .composer-dock { position: relative; z-index: 4; flex: none; padding: 0 1rem max(.8rem, env(safe-area-inset-bottom)); }
 /* Both jump links stack at the composer dock's level (4), above hovered message rows (3). */
 .jump-bottom, .jump-top {
-  position: absolute; left: 50%; transform: translateX(-50%); z-index: 4;
+  position: absolute; right: max(.5rem, env(safe-area-inset-right)); z-index: 4;
   width: 2.2rem; height: 2.2rem; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%;
   background: var(--surface); box-shadow: 0 4px 14px var(--shadow); color: var(--fg);
 }
-.jump-bottom { top: -3rem; }
-.jump-top { top: 4rem; }
+.jump-bottom { bottom: max(.5rem, env(safe-area-inset-bottom)); }
+.jump-top-anchor { position: relative; flex: none; height: 0; z-index: 4; }
+.jump-top { top: .5rem; }
 .composer {
   position: relative; width: min(var(--col), 100%); margin: 0 auto; padding: .5rem .55rem .45rem;
   display: flex; flex-direction: column; gap: .3rem;

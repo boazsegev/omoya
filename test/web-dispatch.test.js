@@ -253,6 +253,7 @@ describe("conventional web dispatch", () => {
   test("rejects malformed input before dispatch", async () => {
     await expect(webSearch({ query: " ", limit: 2 }, { env: await env() })).rejects.toThrow(/non-empty/);
     await expect(webSearch({ query: "x", limit: 1.5 }, { env: await env() })).rejects.toThrow(/finite integer/);
+    await expect(webFetch({ url: "https://x.test/", refresh: "yes" }, { env: await env() })).rejects.toThrow(/refresh must be a boolean/);
   });
 
   test("Agent tool authorization preserves explicit allow-lists", async () => {

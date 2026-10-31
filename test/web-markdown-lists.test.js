@@ -19,3 +19,21 @@ test("spacing after the first two items does not change a list's style", () => {
   expect(renderMarkdown("- one\n\nprose\n\n- two")).toBe("<ul>\n<li>one</li>\n</ul>\n<p>prose</p>\n<ul>\n<li>two</li>\n</ul>");
   expect(renderMarkdown("2. one\n\n3. two\n\n- another")).toBe('<ol start="2">\n<li>one</li>\n<li>two</li>\n</ol>\n<ul>\n<li>another</li>\n</ul>');
 });
+
+test("indented unordered items belong to their parent item", () => {
+  expect(renderMarkdown("List:\n- item\n- item\n  - sub-item\n  - sub-item\n- item")).toBe(
+    "<p>List:</p>\n<ul>\n<li>item</li>\n<li>item\n<ul>\n<li>sub-item</li>\n<li>sub-item</li>\n</ul></li>\n<li>item</li>\n</ul>"
+  );
+});
+
+test("deep and mixed nested lists close before returning to their parent", () => {
+  expect(renderMarkdown("- parent\n  - child\n    - deep\n  3. numbered\n- sibling\n\nend")).toBe(
+    '<ul>\n<li>parent\n<ul>\n<li>child\n<ul>\n<li>deep</li>\n</ul></li>\n</ul>\n<ol start="3">\n<li>numbered</li>\n</ol></li>\n<li>sibling</li>\n</ul>\n<p>end</p>'
+  );
+});
+
+test("nested task items retain their checkbox classes and inline formatting", () => {
+  expect(renderMarkdown("- parent\n  - [x] **done**")).toBe(
+    '<ul>\n<li>parent\n<ul>\n<li class="task done"><strong>done</strong></li>\n</ul></li>\n</ul>'
+  );
+});

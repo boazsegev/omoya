@@ -5,6 +5,10 @@ description: "This skill should be used when profiling or optimizing algorithms,
 
 # Optimizing Code
 
+This skill focuses mainly on implementation performance optimization, but design optimizations should always be considered and suggested to the user where applicable.
+
+Note that 100x performance improvements can only be achieved by optimizing the design, rarely by performance tuning an implementation.
+
 ## Set the Target First
 
 Before changing code, record: the metric (p50/p95/p99 latency, throughput, CPU, peak memory, bundle size), a numeric target (`p99 < 50 ms at 1000 concurrent users`), a realistic workload and the measurement method. Stop when the target is met. If no target is given and the work is Tier 3, ask for one.

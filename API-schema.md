@@ -614,6 +614,7 @@ Source: `tools/web.js`; flags: safe, trusted
 
 ```schema
 {
+  "refresh?": "boolean",
   "url": "string",
 }
 ```

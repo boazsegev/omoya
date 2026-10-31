@@ -31,7 +31,10 @@ function normalizeFetch(args = {}) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username !== "" || url.password !== "") {
     throw new TypeError("web-fetch: url must be HTTP(S) and contain no credentials");
   }
-  return { url: url.href };
+  if (args.refresh !== undefined && typeof args.refresh !== "boolean") {
+    throw new TypeError("web-fetch: refresh must be a boolean");
+  }
+  return args.refresh ? { url: url.href, refresh: true } : { url: url.href };
 }
 
 function deadlineSignal(parent, duration) {
@@ -108,12 +111,14 @@ async function dispatch(kind, args, context, packageBackend) {
     const remoteTool = kind === "search" ? mapping?.searchTool : mapping?.fetchTool;
     const shortcut = typeof mapping?.server === "string" ? `mcp-${mapping.server}` : undefined;
     if (mapping?.shadow === true && remoteTool && (await context?.agent?.toolCallable?.(shortcut)) !== false) {
+      // `refresh` only steers the local cache; remote tools never receive it.
+      const { refresh: _refresh, ...remoteArgs } = args;
       try {
         // A stalled remote tool must not consume the local backend's entire deadline.
         const remaining = Math.max(1, total.deadline - Date.now());
         const remote = deadlineSignal(total.signal, Math.min(MCP_TIMEOUT, Math.max(1, Math.floor(remaining / 2))));
         try {
-          const content = await awaitWithinSignal(context.env.toolCall("mcp", { action: "call", server: mapping.server, tool: remoteTool, arguments: args, timeout: Math.min(MCP_TIMEOUT, remote.deadline - Date.now()) }, { ...context, signal: remote.signal }), remote.signal);
+          const content = await awaitWithinSignal(context.env.toolCall("mcp", { action: "call", server: mapping.server, tool: remoteTool, arguments: remoteArgs, timeout: Math.min(MCP_TIMEOUT, remote.deadline - Date.now()) }, { ...context, signal: remote.signal }), remote.signal);
           if (typeof content !== "string" || content.trim() === "") throw new Error("MCP web result is empty");
           return withCodePath(content, `mcp (${mapping.server}/${remoteTool})`, isDebug);
         } finally {
@@ -187,6 +192,7 @@ export function toolDescription(env) {
       description: "Read one HTTP(S) page or API response as Markdown, text, or JSON text. Supply the direct URL; check truncation notices before assuming the response is complete.",
       inputSchema: { type: "object", properties: {
         url: { type: "string", description: "HTTP(S) URL without embedded credentials" },
+        refresh: { type: "boolean", default: false, description: "Bypass the recent-fetch cache and fetch the page again." },
       }, required: ["url"] },
     },
   };

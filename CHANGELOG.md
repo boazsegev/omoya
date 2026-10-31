@@ -2,6 +2,15 @@
 
 Releases are listed newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not. Model-facing tool schemas may change between runs because agents receive the current tool catalog.
 
+## 0.3.2 — 2026-11-17
+
+- Web file and image uploads no longer stop working five minutes after connecting. Upload keys now last until the browser connection closes; only pending file bytes expire after five minutes.
+
+- Empty tool results now become `(no output)` and emit an `OMOYA_EMPTY_TOOL_RESULT` warning naming the tool, rather than later appearing as interrupted calls.
+- TUI safe-mode status distinguishes published tools from runnable tools. Safe mode limits execution without hiding tools from the agent.
+- Shell path checks no longer flag exempt development paths because of line continuations, trailing escape sequences, or filesystem-resolved spellings. OS sandbox restrictions remain unchanged.
+- `web-fetch` accepts `refresh: true` to bypass its recent-fetch cache; the fresh result replaces the cached entry. The cache defaults are now 64 entries for 600 seconds (`web.fetch.cacheMaxEntries`, `web.fetch.cacheSeconds`), and `cacheSeconds: 0` now stores nothing, even when a response sends `max-age`.
+
 ## 0.3.1 — 2026-10-30
 
 ### Sessions and tools

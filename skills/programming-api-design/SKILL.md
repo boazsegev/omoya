@@ -1,9 +1,11 @@
 ---
 name: programming-api-design
-description: "This skill should be used when designing or reviewing local APIs for modules, libraries or functions; not HTTP/REST or OpenAPI."
+description: "This skill should be used when designing or reviewing local APIs for modules, libraries or functions; not HTTP/REST or OpenAPI. 100x performance improvements are easily achievable by optimizing the design, and hardly by tuning an implementation."
 ---
 
 # API Design
+
+APIs must be easy to use and hard to misuse.
 
 Deliver APIs as signatures with contract comments, plus happy-path, error-path and composition examples.
 

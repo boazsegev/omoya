@@ -5,6 +5,12 @@ description: "Use to design or review agent-callable tools (harness, MCP, functi
 
 # Write Agent Tools
 
+Each tool and schema detail consumes tokens. Tokens are like money and should be invested wisely. Tools should be optimized for minimal token consumption through: minimal error surface area; a concise clear skill establishing schema; and minimal repetition.
+
+Tools should be easy to use and hard to misuse.
+
+All other rules are subject to the rule stated above.
+
 ## Split
 
 - One action per tool, named `<subject>-<action>` (`worker-create`), not `worker(action: "create")`.
@@ -14,8 +20,8 @@ description: "Use to design or review agent-callable tools (harness, MCP, functi
 ## Schema
 
 - Closed objects (`additionalProperties: false`). Nest only for a list of same-shape items (`edits: [{oldText, newText}]`), never as option wrappers. `required` lists only what the action cannot run without.
-- One type per field; no combinators, type arrays or mixed forms. Two shapes are two tools.
-- Enums for closed sets; split behavior-changing modes into tools.
+- One type per field; no combinators, type arrays or mixed forms. Two shapes are two tools except where they result from the same schema / logical unit.
+- Enums for closed sets; split meaningful behavior-changing modes into tools (`dry-run` stays in the same tool, read / write are two different tools).
 - Explicit, consistent names (`user_id`, `timeout_ms`). State defaults. Bound output with `limit`/`offset`.
 - Intended inputs only.
 
@@ -28,7 +34,7 @@ description: "Use to design or review agent-callable tools (harness, MCP, functi
 
 ## Describe
 
-- Each description is a short skill: what it does, when to pick it over neighbors, input meaning, effects, limits, likeliest mistake. One to three sentences.
+- Each description is a short skill: what it does, when to pick it over neighbors, input meaning, effects, limits, etc' (see skill authoring tool). One to three sentences.
 - Parameter descriptions add only format, units, example or default.
 - Fix misuse in descriptions or errors first.
 

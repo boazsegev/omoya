@@ -1,6 +1,6 @@
 // test/agent-safe.test.js — proof for the tool `safe` key and the
 // Agent's write capability: read-only tools (schemas with safe: true) are the
-// only ones published and executed in safe mode; a missing key means
+// only ones executed in safe mode, while every tool stays published; a missing key means
 // false; the key never leaks into the provider-facing catalog.
 import { NAMES } from "../lib/namespace.js";
 import { describe, expect, test } from "bun:test";
@@ -60,7 +60,7 @@ describe("env: the tool `safe` key", () => {
 });
 
 describe("agent: safe mode", () => {
-  test("the published catalog is limited to safe tools", async () => {
+  test("safe mode publishes the full catalog", async () => {
     const env = await testEnv();
     env.toolAdd("reader", () => "r", SAFE_READER);
     env.toolAdd("writer", () => "w", WRITER);
