@@ -16,6 +16,15 @@ async function run(command, args, env = process.env) {
 
 const help = (command) => run(command, ["--help"]);
 
+for (const command of [cli.app, cli.appAlias, cli.bare]) {
+  test(`${command} --version prints only the package version and exits`, async () => {
+    const { version } = await Bun.file("package.json").json();
+    const result = await run(command, ["--version"]);
+    expect(result).toEqual({ stdout: `${version}\n`, stderr: "", exit: 0 });
+    expect((await help(command)).stdout).toContain("--version");
+  });
+}
+
 describe("CLI names", () => {
   test("the generated and package command lists contain only the full and short interactive names", async () => {
     const names = wrapperNames().sort();

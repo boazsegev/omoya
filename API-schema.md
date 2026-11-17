@@ -795,6 +795,7 @@ export class Context {
   static listAsync: (options?: object) => Promise<Array<{id: string, file: string, mtime: number, messages: number, preview: string, agent?: string}>>;
   messages: () => object[];
   name: string|undefined;
+  onRename: (listener: unknown) => unknown;
   origin: { read: string };
   static originOf: (options?: Object) => string|undefined;
   planUsage: { read: unknown; write: (report?: object) => void };

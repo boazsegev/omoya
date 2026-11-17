@@ -1,3 +1,4 @@
+import { version } from "../package.json";
 import { describe, expect, test } from "bun:test";
 import { Agent } from "../lib/agent.js";
 import { createApp } from "../lib/app/tui/app.js";
@@ -17,6 +18,22 @@ function screen(root, width, height) {
 }
 
 describe("TUI opening", () => {
+  test("shows the current package version dimmed between the art and model", () => {
+    for (const width of [40, 80, 100]) {
+      for (const compact of [false, true]) {
+        const rows = welcomeView({ width, compact, model: "p/m" }).children;
+        const index = rows.findIndex((row) => textOf(row).includes(`Version ${version}`));
+        expect(index).toBeGreaterThan(width < 56 ? 0 : 12);
+        expect(rows[index].role).toBe("muted");
+        if (width >= 56) {
+          const line = (row) => row.content.map((span) => span.text).join("").trimEnd();
+          const artEnd = Math.max(...rows.slice(0, 13).map((row) => line(row).length));
+          expect(line(rows[index]).length).toBe(artEnd);
+        }
+        expect(textOf(rows[index + 1])).toContain("Talking to p/m");
+      }
+    }
+  });
   test("a symmetric circular O replaces the first letter; its colors invert the old mark", () => {
     for (const wide of [true, false]) {
       const art = welcomeArt(wide, 100);

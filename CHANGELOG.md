@@ -2,54 +2,109 @@
 
 Releases are listed newest first. The embedded library follows [Semantic Versioning](https://semver.org/); App and GTUI APIs do not. Model-facing tool schemas may change between runs because agents receive the current tool catalog.
 
-## 0.3.2 — 2026-11-17
+## 0.3.3 — 2026-11-17
 
-- Web file and image uploads no longer stop working five minutes after connecting. Upload keys now last until the browser connection closes; only pending file bytes expire after five minutes.
+### Added
 
-- Empty tool results now become `(no output)` and emit an `OMOYA_EMPTY_TOOL_RESULT` warning naming the tool, rather than later appearing as interrupted calls.
-- TUI safe-mode status distinguishes published tools from runnable tools. Safe mode limits execution without hiding tools from the agent.
-- Shell path checks no longer flag exempt development paths because of line continuations, trailing escape sequences, or filesystem-resolved spellings. OS sandbox restrictions remain unchanged.
-- `web-fetch` accepts `refresh: true` to bypass its recent-fetch cache; the fresh result replaces the cached entry. The cache defaults are now 64 entries for 600 seconds (`web.fetch.cacheMaxEntries`, `web.fetch.cacheSeconds`), and `cacheSeconds: 0` now stores nothing, even when a response sends `max-age`.
+- Web project file tree with folder creation, uploads, and file-explorer reveal on local connections. Large folders display 100 entries at a time; replacing a file requires confirmation.
+- File and folder references in the Web composer, including drag-and-drop from the file tree. References use project-relative paths and identify the project when it differs from the conversation's project.
+- Markdown previews in a separate page using the project's theme and Markdown styles. Uploads and previews each have a 10 MB limit.
+- `om --version` prints the package version without launching an app. The Web sidebar and TUI welcome screen also display the version.
+
+### Fixed
+
+- Agent and session renames stay synchronized when their names are linked. Independently named agents and sessions retain their separate names.
+- Session renames accept whitespace in names and preserve it when saving, listing, and resuming. `/session-name` accepts multiword names in the TUI and Web.
+- Compaction keeps the original session resumable and saves named continuations separately as `<session-name>-1`, `-2`, and so on, skipping names already in use.
+
+## 0.3.2 — 2026-11-16
+
+### Added
+
+- `web-fetch` accepts `refresh: true` to bypass its recent-fetch cache and replace the cached entry.
+
+### Changed
+
+- The `web-fetch` cache defaults to 64 entries for 600 seconds, configured through `web.fetch.cacheMaxEntries` and `web.fetch.cacheSeconds`.
+- TUI safe-mode status distinguishes published tools from runnable tools. Safe mode restricts execution without hiding tools from the agent.
+
+### Fixed
+
+- Web file and image uploads no longer stop working five minutes after connection. Upload keys remain valid until the browser disconnects; only pending file bytes expire after five minutes.
+- Empty tool results become `(no output)` and emit an `OMOYA_EMPTY_TOOL_RESULT` warning naming the tool, instead of appearing as interrupted calls.
+- Shell path checks no longer flag exempt development paths because of line continuations, trailing escapes, or filesystem-resolved spellings. OS sandbox restrictions are unchanged.
+- Setting `web.fetch.cacheSeconds` to `0` disables caching, including when a response sends `max-age`.
 
 ## 0.3.1 — 2026-10-30
 
-### Sessions and tools
+### Added
 
-- New sessions created with `/new`, `/session-new`, or the Web new-session action inherit the current session's logging preference. `/anon` and `/new false` still create memory-only sessions. New conversations start with default capabilities rather than copying the previous agent's permissions.
-- **Tool migration:** `note` is replaced by `note-list`, `note-read`, and `note-write`. Use `note-write({notes: {title: patch}})` to create or update notes; a null patch deletes one. `note-read({titles?})` reads selected notes or all notes when titles are omitted. Search, remove, and `only` are gone. Notes stored by the old tool are not restored. Tools sharing a storage name now share one published sticky message.
-- Saved-session search matches all space-separated terms. Previews show the first assistant text when a compacted session has no earlier text. Web transcript actions can roll back, fork, or delete through a selected message; tool cards include their results. Tool-attached messages update after tool results.
+- TUI and Web indicators for agents waiting for a user response.
+- Web transcript actions to roll back, fork, or delete through a selected message. Tool cards include their results.
+- `note-list`, `note-read`, and `note-write` replace `note`. `note-write({notes: {title: patch}})` creates or updates notes; a null patch deletes a note. `note-read({titles?})` reads selected notes, or all notes when titles are omitted.
+- Providers can report quota snapshots from HTTP 429 error headers.
 
-### Status and provider fixes
+### Changed
 
-- TUI and Web mark agents waiting for a user response. Endpoint and global `maxActive` values now act as defaults for limits enforced per endpoint/model pair, rather than limiting an entire endpoint's running agents.
-- On HTTP 429, providers can report a quota snapshot using the response's error headers. Separate usage lookups have a three-second best-effort limit; a failed lookup does not replace the original error.
-- Overall request timeouts now include OAuth token refresh, not just the provider request. After compaction, loaded skill instructions refresh from the current skill definition when available.
+- Sessions created with `/new`, `/session-new`, or the Web new-session action inherit the current session's logging preference. `/anon` and `/new false` remain memory-only. New conversations use default capabilities rather than copying the previous agent's permissions.
+- Saved-session search matches all space-separated terms. Compacted-session previews use the first assistant text when no earlier text remains.
+- Tools with the same storage name share one published sticky message. Tool-attached messages update after results arrive.
+- Endpoint and global `maxActive` settings provide defaults for limits enforced per endpoint/model pair, rather than limiting all running agents on an endpoint.
+- Loaded skill instructions refresh from the current definition after compaction, when available.
+
+### Removed
+
+- The `note` tool's search, remove, and `only` options. Notes saved by the old tool are not restored.
+
+### Fixed
+
+- Request timeouts include OAuth token refresh, not just the provider request.
+- Separate usage lookups have a three-second best-effort limit. A failed lookup no longer replaces the original request error.
 
 ## 0.3.0 — 2026-10-26
 
-### Library migration
+### Added
 
-- **Create and close asynchronously:** use `await Env.open(path, options)` and `await Agent.create(options)` instead of constructors. `Env.create`, `Env.use`, and `Agent.open` are removed; `env.agentCreate` and `agent.childCreate` return Promises. Agents borrow their Env, so close an Env you own separately. Await `Agent.close()`, `Env.close()`, `Context.close()`, `IO.close()`, and `SettingsStore.close()` for teardown and persistence. Constructors reject unknown option keys.
-- **Project identity and lifecycle:** `env.folder` replaces `env.cwd` as the fixed project path. A ready Env is acquired through `Env.open(path)`; calls with independent settings overrides create separately owned Envs. One Agent owns one conversation for its lifetime: create a new Agent to start, resume, or fork. Context and Env identities are read-only. `Agent.safe` is removed; use `agent.can.write` (`--safe` remains available). Agent event constants are Symbols; subscriptions still use `onEvent`/`offEvent`.
-- **IO and Context:** `IO.write` now takes a Context rather than an array of messages. `io.context` identifies it during requests; `Context.dirty` identifies changed entries. Context owns usage snapshots (`context.contextUsage`, `context.planUsage`). Replace idle IO through `agent.io`; `io.cancel()` interrupts without closing. Provider configuration comes from Env; model, thinking, and request deadlines remain Agent-local. `Agent.send` accepts a user-message string and rejects invalid or closed-agent submissions through its Promise.
-- **Imports and App surface:** `omoya` and `omoya/agent` load core; `omoya/app` adds `App`. CLI, Markdown, TUI, Web, and GTUI belong under App. `App.Web` exposes `serve`, not the former server alias or session/protocol internals. Removed in-place Agent context methods, `reseat`, public loop policy, deprecated wrappers, and unused CLI aliases; consult [API.md](API.md) for current signatures.
-- **Settings migration:** executable roots and extension selections use `path/name: boolean` maps; legacy arrays fail with migration guidance. Trusted extension roots replace `providerPaths`. `settings.env` replaces child-environment allow/refuse lists. Inherited variable names containing `KEY`, `TOKEN`, `AUTH`, `OAUTH`, `PASSWORD`, `PASS`, or `SECRET` are withheld from tool/MCP children by default; set `settings.env[name] = true` to pass one through.
+- Asynchronous creation through `await Env.open(path, options)` and `await Agent.create(options)`. `env.agentCreate` and `agent.childCreate` also return Promises. Agents borrow their Env; callers close separately owned Envs.
+- Asynchronous teardown through `Agent.close()`, `Env.close()`, `Context.close()`, `IO.close()`, and `SettingsStore.close()`. Await these methods for cleanup and persistence.
+- `env.settingsFlush()` to wait for settings persistence, and `Env.ready()` to wait for startup settings. `Env.EVENT.SETTINGS_LOADED` reports fresh file reads separately from value changes.
+- `context.autocompactMax`, an independent 200,000-token compaction trigger by default; `0` disables it.
+- TUI Ctrl-X access to agents and endpoints, plus search across projects, sessions, models, and settings. Project switches retain per-agent drafts; forms use selectable options.
+- Web controls to exit after served agents become idle or crash the app. Crash aborts work and signals owned process groups. Under `omd`, Exit is labeled Restart because the supervisor relaunches Web.
+- `omd`, the bundled periodic Web/Jobs supervisor. Its children load a fresh login-shell environment.
+- GitHub workflow test coverage on Linux and macOS.
 
-### Settings, usage, and requests
+### Changed
 
-- Env settings now merge shared user settings, discovered endpoints, and project overrides by source. Nested objects merge by key; arrays replace. Changes persist through coalesced atomic writes; `await env.settingsFlush()` waits for durability. Equal-value writes no longer publish updates or persist again. `Env.EVENT.SETTINGS_LOADED` reports fresh file reads separately from value changes. `await Env.ready()` waits for complete startup settings.
-- Settings loading uses cached snapshots and bounded background work to reduce main-thread stalls. Web theme previews no longer reset on unrelated settings updates. Endpoint/model menus sort alphabetically; disabled endpoints remain visible in settings but cannot be selected.
-- Usage reports now combine known token and cost counters across retries, with consistent cache and reasoning fields across providers. Anthropic input/output quotas, Kimi allowances and cent-denominated booster budgets, and OpenAI subscription quotas appear in TUI/Web details without duplicate fields. Context tokens remain visible beside the Web context meter; other plan details stay in its expandable panel.
-- Auto-compaction starts at 40% of the context window by default. `context.autocompactMax` adds an independent 200,000-token trigger (`0` disables it); runaway limits carry across compaction. Tool-supplied system guidance is appended after the full tool batch, preventing Claude rejections when skills load together. Claude requests no longer exceed Anthropic's four-cache-breakpoint limit.
-- Anthropic/Claude requests discard invalid thinking replay data after a conversation is edited, compacted, or moved between endpoints. Mid-conversation system messages stay in place; models known to reject them are excluded. Claude generation 5+ requests adaptive thinking by default and displays the available summary, not raw reasoning.
+- **Project identity:** `env.folder` replaces `env.cwd` as the fixed project path. `Env.open(path)` returns a ready Env; independent settings overrides create separately owned Envs.
+- **Agent lifecycle:** each Agent owns one conversation for its lifetime. Starting, resuming, or forking a conversation requires a new Agent. Context and Env identities are read-only; constructors reject unknown option keys.
+- **Permissions and events:** `agent.can.write` replaces `Agent.safe`; `--safe` remains supported. Agent event constants are Symbols; subscriptions still use `onEvent` and `offEvent`.
+- **IO and Context:** `IO.write` accepts a Context instead of a message array. `io.context` identifies it during requests; `Context.dirty` identifies changed entries. Context owns usage snapshots through `context.contextUsage` and `context.planUsage`.
+- **Request configuration:** idle IO can be replaced through `agent.io`; `io.cancel()` interrupts without closing. Provider configuration comes from Env, while model, thinking, and request deadlines remain Agent-local. `Agent.send` accepts a user-message string and rejects invalid or closed-agent submissions through its Promise.
+- **Imports:** `omoya` and `omoya/agent` load core; `omoya/app` adds `App`. CLI, Markdown, TUI, Web, and GTUI are under App. `App.Web.serve` replaces the former server alias; session and protocol internals are no longer exposed. See [API.md](API.md) for signatures.
+- **Settings format:** executable roots and extension selections use `path/name: boolean` maps. Legacy arrays fail with migration guidance. Trusted extension roots replace `providerPaths`.
+- **Child environments:** `settings.env` replaces allow/refuse lists. Inherited variable names containing `KEY`, `TOKEN`, `AUTH`, `OAUTH`, `PASSWORD`, `PASS`, or `SECRET` are withheld from tool/MCP children by default. `settings.env[name] = true` passes a variable through.
+- Env settings merge shared user settings, discovered endpoints, and project overrides by source. Nested objects merge by key; arrays replace. Changes use coalesced atomic writes. Equal-value writes neither publish updates nor persist again.
+- Settings loading uses cached snapshots and bounded background work to reduce main-thread stalls. Endpoint and model menus sort alphabetically; disabled endpoints remain visible in settings but cannot be selected.
+- Usage reports combine known token and cost counters across retries, with consistent cache and reasoning fields. TUI and Web show Anthropic quotas, Kimi allowances and cent-denominated booster budgets, and OpenAI subscription quotas without duplicate fields. Web keeps context tokens beside the context meter and other plan details in its expandable panel.
+- Auto-compaction starts at 40% of the context window by default. Runaway limits carry across compaction.
+- Anthropic/Claude requests discard invalid thinking replay data after edits, compaction, or endpoint changes. Mid-conversation system messages retain their positions; models known to reject them are excluded. Claude generation 5+ uses adaptive thinking by default and displays the available summary rather than raw reasoning.
+- `resource` can list and read reachable projects without `can.request`; copying still requires write permission. Omitting `path` selects the root. Folders and globs list automatically unless `target` requests a copy.
+- `resource.target` works with `list`, preserves exact bytes, supports renamed copies, and creates parent folders. Destination collisions use a numbered folder; path and symlink protections are unchanged.
+- Web displays queued tool calls without a running spinner, clearer project headings, and a visible jump-to-oldest control. Local clients can edit pinned-project descriptions without losing model or group metadata. TUI and Web use Agent capabilities for state updates.
 
-### Tools and apps
+### Removed
 
-- `resource` can list and read reachable projects without `can.request`; copying still requires write permission. Omitting a path selects the root; folders and globs list automatically unless `target` requests a copy. `target` works with `list`, preserves exact bytes, can rename a file, and creates missing parent folders. Destination collisions use a numbered folder; path and symlink protections remain.
-- TUI Ctrl-X provides direct access to agents and endpoints and searches projects, sessions, models, and settings. Project switching retains per-agent drafts. Forms use selectable options; modal keys take priority over composer completion. Menus truncate long labels at row edges instead of obscuring actions.
-- Web shows queued tool calls without a running spinner. The sidebar has clearer project headings and a visible jump-to-oldest control. Local clients can edit pinned-project descriptions without losing model or group metadata. Both apps use Agent capabilities for state updates.
-- Web Settings has an Exit app control that waits for served agents to become idle; Crash now aborts and signals owned process groups. Under `omd`, the control says Restart app because the supervisor relaunches Web. `omd` is the bundled periodic Web/Jobs supervisor, replacing the proposed `om --daemon` and `om-jobs daemon foreground`; its children load a fresh login-shell environment.
-- Unsupported `--max-turns`, `--max-tool-calls`, and `--tool-async` flags now fail explicitly. The GitHub workflow runs tests on Linux and macOS.
+- `Env.create`, `Env.use`, and `Agent.open`; use `Env.open` and `Agent.create` instead.
+- In-place Agent context methods, `reseat`, public loop policy, deprecated wrappers, and unused CLI aliases.
+- The proposed `om --daemon` and `om-jobs daemon foreground` interfaces, superseded by `omd`.
+
+### Fixed
+
+- Tool-supplied system guidance is appended after the full tool batch, preventing Claude rejections when skills load together. Claude requests respect Anthropic's four-cache-breakpoint limit.
+- Web theme previews no longer reset after unrelated settings updates.
+- TUI modal keys take priority over composer completion. Menus truncate long labels at row edges instead of obscuring actions.
+- Unsupported `--max-turns`, `--max-tool-calls`, and `--tool-async` flags fail explicitly.
 
 ## 0.2.3 — 2026-10-08
 

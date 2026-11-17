@@ -71,3 +71,20 @@ test("name remains assignable without silently changing the stable id", () => {
   expect(context.name).toBe("display label");
   expect(context.id).toBe("first");
 });
+
+for (const name of ["two words", "two  spaces", "tab\tseparated", "line\nbreak", "nonbreaking\u00a0space", "unicode 日本語"]) {
+  test(`session rename preserves whitespace through persistence: ${JSON.stringify(name)}`, () => temporarySessions((dir) => {
+    const context = new Context({ id: "first", dir, origin: "original", messages: [message] });
+    context.flush();
+    context.rename(name);
+    expect(context.id).toBe(name);
+    expect(context.name).toBe(name);
+    expect(Context.list({ dir }).some((entry) => entry.id === name)).toBe(true);
+    const loaded = Context.resume({ id: name, dir });
+    expect(loaded.id).toBe(name);
+    expect(loaded.name).toBe(name);
+    expect(loaded.messages()).toEqual(context.messages());
+    loaded.close();
+    context.close();
+  }));
+}

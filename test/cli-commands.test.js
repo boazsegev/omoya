@@ -957,7 +957,7 @@ describe("cli-commands: /session-name", () => {
     await commands.handle("/session-name false");
     expect(lines.at(-1)).toContain("reserved");
     await commands.handle("/session-name bad name");
-    expect(lines.at(-1)).toContain("usage"); // two words = a usage error
+    expect(agent.context.name).toBe("bad name");
     await commands.handle("/session-name bad/name");
     expect(lines.at(-1)).toContain("invalid session name");
     await commands.handle("/session-new false"); // not logged

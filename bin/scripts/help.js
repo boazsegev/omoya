@@ -157,6 +157,7 @@ options:
                        stays attached until the Web server stops
   --host <host>        Web bind host (with --serve)
   --port <port>        Web port (default: 9900; with --serve)
+  --version            print the version number and exit
   --help, -h           show this text and exit
 
 cancellation: SIGINT during a response kills the in-flight request;

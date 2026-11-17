@@ -1,5 +1,19 @@
 import { expect, test } from "bun:test";
 import { session } from "../lib/app/web/public/app/orchestrators/session.js";
+test("hello refreshes the server version and invalidates the sidebar", () => {
+  const invalidations = [];
+  const ctx = {
+    state: { agent: null, composerByAgent: new Map(), version: "old" },
+    showThrottle() {},
+    invalidate: (region) => invalidations.push(region),
+  };
+  session.packets.hello(ctx, { version: "0.3.2" });
+  expect(ctx.state.version).toBe("0.3.2");
+  expect(invalidations).toContain("sidebar");
+  session.packets.hello(ctx, {});
+  expect(ctx.state.version).toBeNull();
+});
+
 test("model settings refresh the already mounted welcome without replacing it", async () => {
   const previousMatchMedia = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
   const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");

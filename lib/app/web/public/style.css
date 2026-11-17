@@ -143,7 +143,8 @@ kbd { display: inline-block; min-width: 1.4em; padding: 0 .35em; border: 1px sol
 }
 .web-shell:not(.sidebar-open) .session-sidebar { visibility: hidden; }
 .sidebar-top { display: flex; align-items: center; justify-content: space-between; padding: .7rem .75rem .35rem 1rem; }
-.app-brand { font-size: 1.4rem; letter-spacing: -.01em; }
+.app-brand { display: flex; align-items: baseline; gap: .5rem; font-size: 1.4rem; letter-spacing: -.01em; }
+.app-version { color: var(--muted); font-size: .75rem; font-weight: 400; letter-spacing: normal; white-space: nowrap; }
 .sidebar-lists { flex: 1; min-height: 0; overflow-y: auto; padding: 0 .5rem .5rem; scrollbar-width: thin; }
 .sidebar-section { margin-top: .6rem; }
 .section-head { display: flex; align-items: center; justify-content: space-between; padding: 0 .5rem; min-height: 1.8rem; }
@@ -678,7 +679,7 @@ dialog.panel.context-viewer { height: min(85vh, 48rem); height: min(85dvh, 48rem
 /* ---- responsive ---- */
 @media (max-width: 63.99rem) {
   .web-shell, .web-shell.sidebar-open { grid-template-columns: minmax(0, 1fr); }
-  .session-sidebar { position: fixed; z-index: 30; inset: 0 auto 0 0; width: min(19rem, 86vw); transform: translateX(-105%); transition: transform .2s ease, visibility .2s; box-shadow: 8px 0 30px var(--shadow); }
+  .session-sidebar { background: var(--surface); position: fixed; z-index: 30; inset: 0 auto 0 0; width: min(19rem, 86vw); transform: translateX(-105%); transition: transform .2s ease, visibility .2s; box-shadow: 8px 0 30px var(--shadow); }
   .web-shell.sidebar-open .session-sidebar { transform: none; }
   .web-shell.sidebar-open .sidebar-scrim { display: block; position: fixed; inset: 0; z-index: 25; background: color-mix(in srgb, #000 35%, transparent); }
   .conversation { grid-column: 1; grid-row: 1; }
@@ -705,3 +706,7 @@ dialog.panel.context-viewer { height: min(85vh, 48rem); height: min(85dvh, 48rem
   .settings-row { grid-template-columns: 1fr; }
   #toast-region { bottom: 6.5rem; }
 }
+.sidebar-modes { display: flex; gap: .2rem; margin: .25rem .75rem .6rem; padding: .2rem; background: var(--surface-2); border-radius: .65rem; }
+.sidebar-modes .sidebar-link { flex: 1; justify-content: center; min-height: 32px; border-radius: .45rem; }
+.sidebar-modes [aria-pressed="true"] { color: var(--fg); background: var(--surface); font-weight: 600; box-shadow: 0 1px 3px #00000010; }
+.markdown-file-preview { max-width: 70rem; margin: auto; padding: 2rem; overflow-wrap: anywhere; }

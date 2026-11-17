@@ -57,12 +57,26 @@ describe("module layout: public façades own private folders", () => {
 
   test("cross-cutting foundations are dependency-free leaves", () => {
     for (const name of FOUNDATIONS) {
-      expect(specifiers(join("lib", `${name}.js`)), `lib/${name}.js imports`).toEqual([]);
+      expect(specifiers(join("lib", `${name}.js`)), `lib/${name}.js imports`).toEqual(name === "namespace" ? ["../package.json"] : []);
     }
     // the tool-runtime leaf is exactly what tools may import WITHOUT
     // the library: it must never grow a dependency a worker pays for
     const runtime = readFileSync("lib/tool-runtime.js", "utf8");
     expect(runtime).not.toMatch(/\.\/env\//);
+  });
+
+  test("runtime package metadata is imported only by the namespace foundation", () => {
+    const offenders = [];
+    for (const root of ["lib", "bin"]) {
+      for (const file of filesRecursive(root)) {
+        if (file === "lib/namespace.js") continue;
+        for (const spec of specifiers(file)) {
+          if (spec.endsWith("package.json")) offenders.push(`${file} -> ${spec}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+    expect(NAMES.version).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
   });
 
   test("the namespace derives every migratable runtime name in one place", () => {

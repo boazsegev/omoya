@@ -9,14 +9,15 @@ import { writeSettingsTemplate } from "../../lib/app/cli/init.js";
 import { listEndpointModels } from "../../lib/app/shared/catalog.js";
 import { formatHelp } from "./help.js";
 
-const { App, NAMES } = AI;
+const { App } = AI;
+const { NAMES } = AI.Agent;
 const { CLI } = App;
 // The invoked name: argv[1] holds the wrapper's file name; a bare
 // `bun bin/scripts/app` has none, so the app's own command — the bare
 // prefix — fills in (never a stale literal).
 const program = basename(process.argv[1] ?? "") || NAMES.cliPrefix;
 const valueFlags = ["model", "url", "token", "timeout", "tools", "tool-timeout", "session", "resume", "max-turns", "max-tool-calls", "input", "logout", "mcp-login", "screen", "port", "host"];
-const booleanFlags = ["no-tool-fork", "tool-async", "safe", "login", "init", "force", "serve", "list"];
+const booleanFlags = ["no-tool-fork", "tool-async", "safe", "login", "init", "force", "serve", "list", "version"];
 
 function sessionState(args) {
   if (["0", "false", "anon"].includes(args.session)) return { kind: "anonymous" };
@@ -86,6 +87,10 @@ async function administrativeCommand(args) {
 
 async function main() {
   const args = CLI.parseFlags(process.argv.slice(2), { flags: valueFlags, bools: booleanFlags, numbers: ["max-turns", "max-tool-calls"] });
+  if (args.version) {
+    process.stdout.write(`${NAMES.version}\n`);
+    return;
+  }
   if (args.session && args.resume) throw new Error("--session and --resume are mutually exclusive");
   if (args.help) {
     process.stdout.write(`${formatHelp(program)}\n`);

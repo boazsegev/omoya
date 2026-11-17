@@ -1,4 +1,4 @@
-# API (2026-11-16)
+# API (2026-11-17)
 
 ## Tool contract — PUBLISHES / REQUIRES / RETURNS (add a tool by reading this)
 
@@ -2172,6 +2172,10 @@ Returns `object[]` — A new array of LIVE message objects. Mutating a message c
 Stored or automatically derived session label; remains writable.
 
 Returns `string|undefined` — Stored or automatically derived session label; remains writable.
+
+### `Agent.Context.onRename(listener)`
+
+Subscribe to explicit session renames. Listeners receive {previous, name}; returns an unsubscribe function. Does not retain inputs. @param {Function} listener @returns {Function} @throws {TypeError} For a non-function.
 
 ### `Agent.Context.origin`
 

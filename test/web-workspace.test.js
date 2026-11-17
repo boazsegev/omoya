@@ -1,3 +1,4 @@
+import { version } from "../package.json";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { createWorkspace } from "../lib/app/web/workspace.js";
@@ -25,7 +26,7 @@ test("workspace exchanges a session-list packet with a fake socket without a lis
   const ws = { readyState: WebSocket.OPEN, send: (json) => sent.push(JSON.parse(json)) };
   try {
     await workspace.open(ws);
-    expect(sent.some((packet) => packet.type === "hello")).toBe(true);
+    expect(sent.find((packet) => packet.type === "hello")?.version).toBe(version);
     sent.length = 0;
     await workspace.message(ws, JSON.stringify({ type: "session.list" }));
     expect(sent.find((packet) => packet.type === "sessions")?.agents).toBeArray();

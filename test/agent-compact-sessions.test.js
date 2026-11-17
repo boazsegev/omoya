@@ -16,15 +16,15 @@ describe('compaction preserves earlier sessions', () => {
       const file = first.file;
       await agent.compact();
       expect(agent.context).not.toBe(first);
-      expect(agent.context.id).toBe('project-cont-001');
-      expect(agent.context.name).toBe('project cont 001');
+      expect(agent.context.id).toBe('project-1');
+      expect(agent.context.name).toBe('project-1');
       expect(Context.fileOf({ dir: env.settings.sessions, id: 'project' })).toBe(file);
       expect(Context.resume({ dir: env.settings.sessions, id: 'project' }).messages()).toEqual([USER('original')]);
       expect(readFileSync(file, 'utf8')).not.toContain('Create a detailed summary');
       agent.context.append(USER('next'));
       await agent.compact();
-      expect(agent.context.id).toBe('project-cont-002');
-      expect(Context.resume({ dir: env.settings.sessions, id: 'project-cont-001' }).messages()).toContainEqual(USER('next'));
+      expect(agent.context.id).toBe('project-2');
+      expect(Context.resume({ dir: env.settings.sessions, id: 'project-1' }).messages()).toContainEqual(USER('next'));
     } finally { await agent.close(); await env.close(); }
   });
   test('automatic compaction archives the held-out user message in the old session', async () => {
@@ -36,7 +36,7 @@ describe('compaction preserves earlier sessions', () => {
     try {
       agent.context.contextUsage = { used: 90, total: 100 };
       await agent.run();
-      expect(agent.context.id).toBe('auto-cont-001');
+      expect(agent.context.id).toBe('auto-1');
       const archived = Context.resume({ dir: env.settings.sessions, id: 'auto' }).messages();
       expect(archived.at(-1)).toEqual(USER('waiting'));
       expect(archived.some((m) => m.content?.some((b) => b.text?.includes('Create a detailed summary')))).toBe(false);
@@ -66,3 +66,53 @@ describe('compaction preserves earlier sessions', () => {
     } finally { await agent.close(); await env.close(); }
   });
 });
+
+for (const name of ["project notes", "two  spaces", "tab\tname", "line\nbreak", "日本語", "x".repeat(64)]) {
+  test(`compaction preserves named archives and resumes its counter: ${JSON.stringify(name)}`, async () => {
+    const env = await testEnv();
+    let agent = await Agent.create({ env, model: "p/m", contextId: "original", context: [USER("original")], createIO: reply });
+    const stem = Array.from(name).slice(0, 62).join("");
+    try {
+      agent.context.rename(name);
+      const oldFile = agent.context.file;
+      const occupied = new Context({ id: `${stem}-1`, dir: env.settings.sessions, messages: [USER("occupied")] });
+      occupied.flush();
+      await occupied.close();
+      await agent.compact();
+      expect(agent.context.id).toBe(`${stem}-2`);
+      expect(agent.context.name).toBe(`${stem}-2`);
+      expect(agent.context.file).not.toBe(oldFile);
+      const archived = Context.resume({ id: name, dir: env.settings.sessions });
+      expect(archived.messages()).toEqual([USER("original")]);
+      await archived.close();
+      const id = agent.context.id;
+      await agent.close();
+      agent = await Agent.create({ env, model: "p/m", context: Context.resume({ id, dir: env.settings.sessions }), createIO: reply });
+      await agent.compact();
+      expect(agent.context.id).toBe(`${stem}-3`);
+      expect(agent.context.name).toBe(`${stem}-3`);
+      const untouched = Context.resume({ id: `${stem}-1`, dir: env.settings.sessions });
+      expect(untouched.messages()).toEqual([USER("occupied")]);
+      await untouched.close();
+    } finally {
+      await agent.close();
+      await env.close();
+    }
+  });
+}
+
+for (const [id, name, expected] of [["project-cont-007", "project cont 007", "project-8"], [crypto.randomUUID(), "derived session name", "derived session name-1"], ["release-7", "release-7", "release-8"]]) {
+  test(`compaction continues stored label ${name} as ${expected}`, async () => {
+    const env = await testEnv();
+    const context = new Context({ id, name, dir: env.settings.sessions, messages: [USER("original")] });
+    const agent = await Agent.create({ env, model: "p/m", context, createIO: reply });
+    try {
+      await agent.compact();
+      expect(agent.context.id).toBe(expected);
+      expect(agent.context.name).toBe(expected);
+      const archived = Context.resume({ id, dir: env.settings.sessions });
+      expect(archived.messages()).toEqual([USER("original")]);
+      await archived.close();
+    } finally { await agent.close(); await env.close(); }
+  });
+}
